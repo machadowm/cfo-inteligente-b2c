@@ -1,0 +1,23 @@
+# Ambientes virtuais e dependências
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.DS_Store
+
+# Dados de persistência dos microsserviços (Docker Volumes)
+postgres_data/
+redis_data/
+minio_data/
+
+# Backups locais e logs
+*.sql
+*.tar
+*.gz
+logs/
+*.log
+
+# IDEs
+.vscode/
+.idea/

@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+asyncpg          # Driver assíncrono hiper-rápido para PostgreSQL (essencial para o RLS)
+redis            # Para conectar com nosso Redis 7 (FSM e Debouncing)
+boto3            # Cliente S3 para interagir com o MinIO (armazenamento de mídia)
+pydantic         # Para modelagem e validação dos JSON Schemas do GPT-4o
+pydantic-settings
+httpx            # Para chamadas HTTP assíncronas (enviar respostas de volta p/ Evolution API)
+python-dotenv

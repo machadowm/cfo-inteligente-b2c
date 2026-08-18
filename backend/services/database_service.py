@@ -30,7 +30,7 @@ class DatabaseService:
             min_size=2,
             max_size=20,
             command_timeout=60.0,
-            max_queries=50_000,
+            max_queries=50000,
             max_inactive_connection_lifetime=300.0,
         )
 
@@ -77,7 +77,7 @@ class DatabaseService:
         async with cls.get_connection() as conn:
             return await conn.fetchrow(
                 """
-                SELECT id, nome, telefone
+                SELECT id, telefone, nome, meta_mensal_faturamento, dias_uteis_mes
                 FROM motoristas
                 WHERE telefone = $1
                 LIMIT 1
@@ -90,10 +90,11 @@ class DatabaseService:
         async with cls.get_tenant_connection(motorista_id) as conn:
             return await conn.fetchrow(
                 """
-                SELECT id, placa, modelo
+                SELECT id, placa, modelo, tipo_combustivel, created_at
                 FROM veiculos
                 WHERE motorista_id = $1::uuid
-                ORDER BY criado_em DESC NULLS LAST, id DESC
+                  AND ativo = TRUE
+                ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
                 motorista_id,

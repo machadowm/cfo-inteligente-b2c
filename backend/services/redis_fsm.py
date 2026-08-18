@@ -7,7 +7,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 
 class RedisFSMService:
-    """Gerencia estado conversacional e buffer transitório no Redis."""
+    """Gerencia estado conversacional e buffer transitório do FSM no Redis."""
 
     _client: Optional[redis.Redis] = None
     _DEFAULT_STATE = "IDLE"

@@ -2,13 +2,15 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict
 
+import asyncpg
+
 from services.database_service import DatabaseService
 
 logger = logging.getLogger(__name__)
 
 
 class TransacaoService:
-    """Serviço de transações financeiras com idempotência e isolamento por tenant."""
+    """Serviço financeiro com idempotência e tratamento de período consolidado."""
 
     _TIPOS_MOVIMENTACAO_VALIDOS = {"receita", "despesa"}
     _TIMEZONE_NEGOCIO = "America/Sao_Paulo"
@@ -43,6 +45,24 @@ class TransacaoService:
         return valor_decimal
 
     @staticmethod
+    def _mapear_erro_postgres(exc: Exception) -> Dict[str, Any]:
+        mensagem = str(exc)
+        if "PERIODO_FECHADO" in mensagem:
+            return {
+                "status": "error",
+                "message": (
+                    "O período contabilístico já foi consolidado e não permite alterações."
+                ),
+                "error_code": "PERIODO_FECHADO",
+            }
+
+        return {
+            "status": "error",
+            "message": "Falha ao processar a transação.",
+            "error_code": "ERRO_BANCO",
+        }
+
+    @staticmethod
     async def registrar_transacao(
         motorista_id: str,
         tipo_movimentacao: str,
@@ -57,99 +77,109 @@ class TransacaoService:
             )
             valor_decimal = TransacaoService._validar_valor(valor)
         except ValueError as exc:
-            return {"status": "error", "message": str(exc)}
+            return {"status": "error", "message": str(exc), "error_code": "VALIDACAO"}
 
-        async with DatabaseService.get_tenant_connection(motorista_id) as conn:
-            turno_id = await conn.fetchval(
-                """
-                SELECT id
-                FROM turnos
-                WHERE motorista_id = $1::uuid
-                  AND status IN ('ABERTO', 'PAUSADO')
-                ORDER BY data_inicio DESC
-                LIMIT 1
-                """,
-                motorista_id,
-            )
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                turno_id = await conn.fetchval(
+                    """
+                    SELECT id
+                    FROM turnos
+                    WHERE motorista_id = $1::uuid
+                      AND status IN ('ABERTO', 'PAUSADO')
+                    ORDER BY data_inicio DESC
+                    LIMIT 1
+                    """,
+                    motorista_id,
+                )
 
-            row = await conn.fetchrow(
-                """
-                INSERT INTO transacoes (
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO transacoes (
+                        motorista_id,
+                        turno_id,
+                        tipo_movimentacao,
+                        categoria,
+                        valor,
+                        descricao,
+                        wpp_msg_id
+                    )
+                    VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)
+                    ON CONFLICT (wpp_msg_id) DO NOTHING
+                    RETURNING id, data_transacao
+                    """,
                     motorista_id,
                     turno_id,
-                    tipo_movimentacao,
+                    tipo_movimentacao_validado,
                     categoria,
-                    valor,
+                    valor_decimal,
                     descricao,
-                    wpp_msg_id
-                )
-                VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)
-                ON CONFLICT (wpp_msg_id) DO NOTHING
-                RETURNING id, data_transacao
-                """,
-                motorista_id,
-                turno_id,
-                tipo_movimentacao_validado,
-                categoria,
-                valor_decimal,
-                descricao,
-                wpp_msg_id,
-            )
-
-            if row is None:
-                logger.warning(
-                    "Tentativa duplicada de transação. motorista_id=%s wpp_msg_id=%s",
-                    motorista_id,
                     wpp_msg_id,
                 )
-                return {
-                    "status": "duplicate",
-                    "message": "Transação já registada. Ignorada por idempotência.",
-                }
 
-            return {
-                "status": "success",
-                "message": "Transação registada com sucesso.",
-                "transacao_id": str(row["id"]),
-                "turno_id": str(turno_id) if turno_id else None,
-                "data_transacao": row["data_transacao"],
-            }
+                if row is None:
+                    logger.warning(
+                        "Tentativa duplicada de transação. motorista_id=%s wpp_msg_id=%s",
+                        motorista_id,
+                        wpp_msg_id,
+                    )
+                    return {
+                        "status": "duplicate",
+                        "message": "Transação já registada. Ignorada por idempotência.",
+                        "error_code": "DUPLICADA",
+                    }
+
+                return {
+                    "status": "success",
+                    "message": "Transação registada com sucesso.",
+                    "transacao_id": str(row["id"]),
+                    "turno_id": str(turno_id) if turno_id else None,
+                    "data_transacao": row["data_transacao"],
+                }
+        except asyncpg.PostgresError as exc:
+            logger.exception("Erro PostgreSQL ao registrar transação.")
+            return TransacaoService._mapear_erro_postgres(exc)
 
     @staticmethod
     async def estornar_transacao(
         motorista_id: str,
         transacao_id: str,
     ) -> Dict[str, Any]:
-        async with DatabaseService.get_tenant_connection(motorista_id) as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE transacoes
-                SET estornado = TRUE
-                WHERE id = $1::uuid
-                  AND motorista_id = $2::uuid
-                  AND estornado = FALSE
-                RETURNING id, tipo_movimentacao, valor
-                """,
-                transacao_id,
-                motorista_id,
-            )
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE transacoes
+                    SET estornado = TRUE
+                    WHERE id = $1::uuid
+                      AND motorista_id = $2::uuid
+                      AND estornado = FALSE
+                    RETURNING id, tipo_movimentacao, valor
+                    """,
+                    transacao_id,
+                    motorista_id,
+                )
 
-            if row is None:
+                if row is None:
+                    return {
+                        "status": "error",
+                        "message": (
+                            "Transação não encontrada, não pertence ao motorista, "
+                            "ou já estornada."
+                        ),
+                        "error_code": "TRANSACAO_NAO_ENCONTRADA",
+                    }
+
                 return {
-                    "status": "error",
+                    "status": "success",
                     "message": (
-                        "Transação não encontrada, não pertence ao motorista, "
-                        "ou já estornada."
+                        f"{row['tipo_movimentacao'].capitalize()} de "
+                        f"R$ {row['valor']} estornada com sucesso."
                     ),
                 }
-
-            return {
-                "status": "success",
-                "message": (
-                    f"{row['tipo_movimentacao'].capitalize()} de "
-                    f"R$ {row['valor']} estornada com sucesso."
-                ),
-            }
+        except asyncpg.PostgresError as exc:
+            logger.exception("Erro PostgreSQL ao estornar transação.")
+            return TransacaoService._mapear_erro_postgres(exc)
 
     @staticmethod
     async def obter_resumo_diario(

@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="CFO Inteligente B2C API",
-    version="5.0.0",
+    version="5.1.0",
     lifespan=lifespan,
 )
 
@@ -352,40 +352,39 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
         if tem_intencao_pausa:
             await RedisFSMService.resetar_fluxo(fsm_turno_key)
             res = await TurnoService.pausar_turno(motorista_id)
-            background_tasks.add_task(
-                enviar_whatsapp,
-                app,
-                remote_jid,
-                res["message"],
-            )
+            background_tasks.add_task(enviar_whatsapp, app, remote_jid, res["message"])
             return {"status": "turno_paused"}
 
         if tem_intencao_retomar:
             await RedisFSMService.resetar_fluxo(fsm_turno_key)
             res = await TurnoService.retomar_turno(motorista_id)
-            background_tasks.add_task(
-                enviar_whatsapp,
-                app,
-                remote_jid,
-                res["message"],
-            )
+            background_tasks.add_task(enviar_whatsapp, app, remote_jid, res["message"])
             return {"status": "turno_resumed"}
 
         if tem_intencao_status:
             await RedisFSMService.resetar_fluxo(fsm_turno_key)
             res = await TurnoService.obter_status_turno(motorista_id)
-            background_tasks.add_task(
-                enviar_whatsapp,
-                app,
-                remote_jid,
-                res["message"],
-            )
+            background_tasks.add_task(enviar_whatsapp, app, remote_jid, res["message"])
             return {"status": "turno_status"}
 
         palavras_chave_financeiras = [
-            "recebi", "ganhei", "faturei", "corrida", "uber", "99",
-            "gastei", "paguei", "despesa", "combustiv", "gasolin",
-            "posto", "almoco", "bala", "lava", "marmita", "mercado",
+            "recebi",
+            "ganhei",
+            "faturei",
+            "corrida",
+            "uber",
+            "99",
+            "gastei",
+            "paguei",
+            "despesa",
+            "combustiv",
+            "gasolin",
+            "posto",
+            "almoco",
+            "bala",
+            "lava",
+            "marmita",
+            "mercado",
         ]
         is_financeiro = any(w in texto_limpo for w in palavras_chave_financeiras)
         valor_transacao = converter_para_float(texto_bruto)
@@ -394,9 +393,17 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
             is_despesa = any(
                 w in texto_limpo
                 for w in [
-                    "gastei", "paguei", "despesa", "combustiv",
-                    "gasolin", "posto", "almoco", "bala", "lava",
-                    "marmita", "mercado",
+                    "gastei",
+                    "paguei",
+                    "despesa",
+                    "combustiv",
+                    "gasolin",
+                    "posto",
+                    "almoco",
+                    "bala",
+                    "lava",
+                    "marmita",
+                    "mercado",
                 ]
             )
 
@@ -406,7 +413,7 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
                     if any(c in texto_limpo for c in ["gasolin", "posto", "combustiv"])
                     else "geral"
                 )
-                await TransacaoService.registrar_transacao(
+                res = await TransacaoService.registrar_transacao(
                     motorista_id=motorista_id,
                     tipo_movimentacao="despesa",
                     categoria=categoria,
@@ -414,9 +421,13 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
                     descricao=texto_bruto,
                     wpp_msg_id=wpp_msg_id,
                 )
-                resposta = f"✅ Despesa de *{formatar_moeda(valor_transacao)}* registada com sucesso! 🛡️"
+                resposta = (
+                    f"✅ Despesa de *{formatar_moeda(valor_transacao)}* registada com sucesso! 🛡️"
+                    if res["status"] == "success"
+                    else res["message"]
+                )
             else:
-                await TransacaoService.registrar_transacao(
+                res = await TransacaoService.registrar_transacao(
                     motorista_id=motorista_id,
                     tipo_movimentacao="receita",
                     categoria="corrida",
@@ -424,7 +435,11 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
                     descricao=texto_bruto,
                     wpp_msg_id=wpp_msg_id,
                 )
-                resposta = f"✅ Receita de *{formatar_moeda(valor_transacao)}* guardada no cofre! 🛡️"
+                resposta = (
+                    f"✅ Receita de *{formatar_moeda(valor_transacao)}* guardada no cofre! 🛡️"
+                    if res["status"] == "success"
+                    else res["message"]
+                )
 
             background_tasks.add_task(enviar_whatsapp, app, remote_jid, resposta)
             return {"status": "finance_logged"}

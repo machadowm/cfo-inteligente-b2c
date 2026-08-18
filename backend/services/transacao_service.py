@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import logging
 from decimal import Decimal, InvalidOperation
 from typing import Dict, Any, Optional
@@ -139,3 +140,33 @@ class TransacaoService:
                 }
             }
 
+=======
+from services.database_service import DatabaseService
+
+class TransacaoService:
+    @staticmethod
+    async def registrar_transacao(driver_id: str, tipo: str, categoria: str, valor: float, descricao: str, hash_msg: str):
+        # Utiliza o Context Manager para garantir a devolução ao Pool
+        async with DatabaseService.get_connection() as conn:
+            # Garante a atomicidade (Commit automático se sucesso, Rollback se exceção)
+            async with conn.transaction():
+                
+                # Correção 2: Injeção de RLS nativa e segura para o contexto do motor de DB
+                await conn.execute("SELECT set_config('app.current_driver_id', $1, true)", driver_id)
+                
+                # Barreira de Idempotência
+                existe = await conn.fetchval(
+                    "SELECT 1 FROM transacoes WHERE driver_id = $1 AND hash_idempotencia = $2",
+                    driver_id, hash_msg
+                )
+                if existe:
+                    return {"status": "duplicate", "message": "Transação já registada anteriormente."}
+
+                query = """
+                    INSERT INTO transacoes (driver_id, tipo, categoria, valor, descricao, hash_idempotencia)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING id, data_criacao;
+                """
+                row = await conn.fetchrow(query, driver_id, tipo, categoria, valor, descricao, hash_msg)
+                return {"status": "success", "id": str(row["id"]), "data": row["data_criacao"]}
+>>>>>>> b6763d0 (Atualização dos arquivos do projeto CFO Inteligente B2C)

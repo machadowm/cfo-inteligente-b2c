@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-import os
-import httpx
+import asyncio
 import base64
 import logging
-import asyncio
+import os
+
+import httpx
 
 # Configuração de Observabilidade
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -78,7 +79,7 @@ async def gerar_qrcode_direto():
         except httpx.HTTPStatusError as e:
             logger.error(f"[ERRO HTTP] Falha na comunicação com a API: {e.response.text}")
         except Exception as e:
-            logger.exception(f"[FALHA CRÍTICA] Erro interno na geração do QR Code: {str(e)}")
+            logger.exception(f"[FALHA CRÍTICA] Erro interno na geração do QR Code: {e!s}")
 
 if __name__ == "__main__":
     # Ponto de entrada atómico para rodar o script localmente no terminal

@@ -16,7 +16,7 @@ from services.turno_service import TurnoService
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://cfo_evolution:8080")
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://localhost:8080")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "evolution_secret_key")
 
 HTTP_TIMEOUT = httpx.Timeout(10.0, connect=3.0)

@@ -1,6 +1,6 @@
 import logging
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict
+from typing import Any
 
 import asyncpg
 
@@ -45,7 +45,7 @@ class TransacaoService:
         return valor_decimal
 
     @staticmethod
-    def _mapear_erro_postgres(exc: Exception) -> Dict[str, Any]:
+    def _mapear_erro_postgres(exc: Exception) -> dict[str, Any]:
         mensagem = str(exc)
         if "PERIODO_FECHADO" in mensagem:
             return {
@@ -70,7 +70,7 @@ class TransacaoService:
         valor: float,
         descricao: str,
         wpp_msg_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         try:
             tipo_movimentacao_validado = (
                 TransacaoService._validar_tipo_movimentacao(tipo_movimentacao)
@@ -144,7 +144,7 @@ class TransacaoService:
     async def estornar_transacao(
         motorista_id: str,
         transacao_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 row = await conn.fetchrow(
@@ -185,7 +185,7 @@ class TransacaoService:
     async def obter_resumo_diario(
         motorista_id: str,
         data_referencia_iso: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         async with DatabaseService.get_tenant_connection(motorista_id) as conn:
             row = await conn.fetchrow(
                 f"""

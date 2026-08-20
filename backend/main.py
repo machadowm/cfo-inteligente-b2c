@@ -104,66 +104,38 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: Dict[str, Any]) 
 
     despesas = res.get("despesas_detalhadas", [])
     if despesas:
-        detalhes_despesas = "• Detalhes dos Gastos:
-"
+        detalhes_despesas = "• Detalhes dos Gastos:"
         for despesa in despesas:
             descricao = despesa.get("descricao_original") or despesa.get("categoria", "geral")
             valor = float(despesa.get("valor", 0.0))
-            detalhes_despesas += f"  - _{descricao}_: *{formatar_moeda(valor)}*
-"
+            detalhes_despesas += f"  - _{descricao}_: *{formatar_moeda(valor)}*"
     else:
-        detalhes_despesas = "• Nenhuma despesa registada neste turno.
-"
+        detalhes_despesas = "• Nenhuma despesa registada neste turno."
 
     return (
-        "🏁 *FECHAMENTO DE TURNO - DRE EXECUTIVO DIÁRIO*
-"
-        f"👤 Motorista: *{nome_motorista}*
-"
-        "──────────────────────────────
-
-"
-        "⏱️ *1. RESUMO OPERACIONAL*
-"
-        f"• Horário: *{res['data_inicio']}* às *{res['data_fim']}* ({duracao_str})
-"
-        f"• Odômetro: *{formatar_km(res['km_inicial'])} km* ➔ *{formatar_km(res['km_final'])} km*
-"
-        f"• Distância Rodada: *{formatar_km(km_rodados)} km*
-
-"
-        "📊 *2. DEMONSTRATIVO DE RESULTADO (DRE)*
-"
-        f"• (+) Faturamento Bruto: *{formatar_moeda(faturamento)}*
-"
-        "• (-) Custos Variáveis:
-"
+        "🏁 *FECHAMENTO DE TURNO - DRE EXECUTIVO DIÁRIO*"
+        f"👤 Motorista: *{nome_motorista}*"
+        "──────────────────────────────"
+        "⏱️ *1. RESUMO OPERACIONAL*"
+        f"• Horário: *{res['data_inicio']}* às *{res['data_fim']}* ({duracao_str})"
+        f"• Odômetro: *{formatar_km(res['km_inicial'])} km* ➔ *{formatar_km(res['km_final'])} km*"
+        f"• Distância Rodada: *{formatar_km(km_rodados)} km*"
+        f"📊 *2. DEMONSTRATIVO DE RESULTADO (DRE)*"
+        f"• (+) Faturamento Bruto: *{formatar_moeda(faturamento)}*"
+        f"• (-) Custos Variáveis:"
         f"{detalhes_despesas}"
-        f"  *Total Custos Variáveis: {formatar_moeda(custo_variavel)}*
-"
-        f"• (=) Margem Contribuição: *{formatar_moeda(faturamento - custo_variavel)}*
-"
-        f"• (-) Rateio Custo Fixo (Aluguel/Pro-Rata): *{formatar_moeda(custo_fixo)}*
-"
-        "──────────────────────────────
-"
-        f"💰 *LUCRO LÍQUIDO REAL DO DIA: {formatar_moeda(lucro)}*
-"
-        f"📈 Margem Líquida Real: *{margem_lucro:.1f}%*
-
-"
-        "🎯 *3. INDICADORES DE PERFORMANCE*
-"
-        f"• Faturamento por KM: *{formatar_moeda(faturamento_por_km)}/km*
-"
-        f"• Faturamento por Hora: *{formatar_moeda(faturamento_por_hora)}/h*
-"
-        f"• Lucro Real por Hora: *{formatar_moeda(lucro_por_hora)}/h*
-"
-        f"• Atingimento Meta Diária ({formatar_moeda(meta_diaria)}): *{perc_meta:.1f}%*
-
-"
-        "🛡️ *Cofre Contábil Atualizado! Fechamento registado com sucesso. Bom descanso!*"
+        f"  *Total Custos Variáveis: {formatar_moeda(custo_variavel)}*"
+        f"• (=) Margem Contribuição: *{formatar_moeda(faturamento - custo_variavel)}*"
+        f"• (-) Rateio Custo Fixo (Aluguel/Pro-Rata): *{formatar_moeda(custo_fixo)}*"
+        f"──────────────────────────────"
+        f"💰 *LUCRO LÍQUIDO REAL DO DIA: {formatar_moeda(lucro)}*"
+        f"📈 Margem Líquida Real: *{margem_lucro:.1f}%*"
+        f"🎯 *3. INDICADORES DE PERFORMANCE*"
+        f"• Faturamento por KM: *{formatar_moeda(faturamento_por_km)}/km*"
+        f"• Faturamento por Hora: *{formatar_moeda(faturamento_por_hora)}/h*"
+        f"• Lucro Real por Hora: *{formatar_moeda(lucro_por_hora)}/h*"
+        f"• Atingimento Meta Diária ({formatar_moeda(meta_diaria)}): *{perc_meta:.1f}%*"
+        f"🛡️ *Cofre Contábil Atualizado! Fechamento registado com sucesso. Bom descanso!*"
     )
 
 
@@ -445,20 +417,12 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
             return {"status": "finance_logged"}
 
         resposta_ajuda = (
-            "🤖 Não reconheci a ação! Aqui tens os comandos rápidos:
-
-"
-            "🟢 *Iniciar* (ou 'iniciar 1399')
-"
-            "🏁 *Fechar* (ou 'fechar 1450')
-"
-            "⏸️ *Pausar* / *Retomar*
-"
-            "📊 *Status* (resumo do dia)
-"
-            "💰 *[Valor]* (ex: 'ganhei 100' ou 'gastei 40 almoço')
-
-"
+            "🤖 Não reconheci a ação! Aqui tens os comandos rápidos:"
+            "🟢 *Iniciar* (ou 'iniciar 1399')"
+            "🏁 *Fechar* (ou 'fechar 1450')"
+            "⏸️ *Pausar* / *Retomar*"
+            "📊 *Status* (resumo do dia)"
+            "💰 *[Valor]* (ex: 'ganhei 100' ou 'gastei 40 almoço')"
             "Como posso ajudar agora?"
         )
         background_tasks.add_task(enviar_whatsapp, app, remote_jid, resposta_ajuda)

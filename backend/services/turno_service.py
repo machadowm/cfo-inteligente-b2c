@@ -1,5 +1,5 @@
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Optional
+from typing import Any
 
 from services.database_service import DatabaseService
 
@@ -23,7 +23,7 @@ class TurnoService:
     async def _buscar_turno_ativo(
         motorista_id: str,
         conn,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         row = await conn.fetchrow(
             """
             SELECT id, motorista_id, veiculo_id, status, km_inicial, km_final,
@@ -43,7 +43,7 @@ class TurnoService:
         motorista_id: str,
         veiculo_id: str,
         km_inicial: float,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         try:
             km_inicial_decimal = TurnoService._validar_km(km_inicial, "km_inicial")
         except ValueError as exc:
@@ -86,8 +86,8 @@ class TurnoService:
     @staticmethod
     async def pausar_turno(
         motorista_id: str,
-        motivo: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        motivo: str | None = None,
+    ) -> dict[str, Any]:
         async with DatabaseService.get_tenant_connection(motorista_id) as conn:
             turno = await conn.fetchrow(
                 """
@@ -139,7 +139,7 @@ class TurnoService:
             }
 
     @staticmethod
-    async def retomar_turno(motorista_id: str) -> Dict[str, Any]:
+    async def retomar_turno(motorista_id: str) -> dict[str, Any]:
         async with DatabaseService.get_tenant_connection(motorista_id) as conn:
             turno = await conn.fetchrow(
                 """
@@ -186,7 +186,7 @@ class TurnoService:
             }
 
     @staticmethod
-    async def obter_status_turno(motorista_id: str) -> Dict[str, Any]:
+    async def obter_status_turno(motorista_id: str) -> dict[str, Any]:
         async with DatabaseService.get_tenant_connection(motorista_id) as conn:
             turno = await TurnoService._buscar_turno_ativo(motorista_id, conn)
 
@@ -224,7 +224,7 @@ class TurnoService:
     async def fechar_turno_com_dre(
         motorista_id: str,
         km_final: float,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         try:
             km_final_decimal = TurnoService._validar_km(km_final, "km_final")
         except ValueError as exc:

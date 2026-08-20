@@ -1,5 +1,4 @@
 import os
-from typing import List, Optional
 
 import redis.asyncio as redis
 
@@ -9,7 +8,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 class RedisFSMService:
     """Gerencia estado conversacional e buffer transitório do FSM no Redis."""
 
-    _client: Optional[redis.Redis] = None
+    _client: redis.Redis | None = None
     _DEFAULT_STATE = "IDLE"
     _STATE_TTL_SECONDS = 3600
     _MESSAGE_BUFFER_TTL_SECONDS = 60
@@ -78,7 +77,7 @@ class RedisFSMService:
             await pipe.execute()
 
     @classmethod
-    async def obter_buffer(cls, flow_key: str) -> List[str]:
+    async def obter_buffer(cls, flow_key: str) -> list[str]:
         client = await cls._get_client()
         return await client.lrange(cls._buffer_key(flow_key), 0, -1)
 

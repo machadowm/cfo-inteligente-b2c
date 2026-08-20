@@ -1,6 +1,6 @@
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Optional
 
 import asyncpg
 
@@ -10,7 +10,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 class DatabaseService:
     """Gerencia o pool PostgreSQL e conexões com escopo transacional de tenant."""
 
-    _pool: Optional[asyncpg.Pool] = None
+    _pool: asyncpg.Pool | None = None
 
     @classmethod
     def _get_database_url(cls) -> str:
@@ -64,13 +64,12 @@ class DatabaseService:
         motorista_id: str,
     ) -> AsyncIterator[asyncpg.Connection]:
         pool = cls._ensure_pool()
-        async with pool.acquire() as connection:
-            async with connection.transaction():
-                await connection.execute(
-                    "SELECT set_config('app.current_driver_id', $1, true)",
-                    motorista_id,
-                )
-                yield connection
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute(
+                "SELECT set_config('app.current_driver_id', $1, true)",
+                motorista_id,
+            )
+            yield connection
 
     @classmethod
     async def buscar_motorista_por_telefone(cls, telefone: str):

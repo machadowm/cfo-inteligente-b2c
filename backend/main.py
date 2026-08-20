@@ -167,6 +167,7 @@ def extrair_km_do_texto(texto_limpo: str) -> Optional[float]:
 
 
 @app.post("/webhooks/evolution")
+@app.post("/api/v1/webhook/whatsapp")
 async def evolution_webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         body = await request.json()

@@ -1,92 +1,75 @@
 import os
-
 import redis.asyncio as redis
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-
+REDIS_URL = os.getenv("REDIS_URL", "redis://:cfo_redis_password_2026@cfo_redis:6379/0")
 
 class RedisFSMService:
-    """Gerencia estado conversacional e buffer transitório do FSM no Redis."""
-
-    _client: redis.Redis | None = None
-    _DEFAULT_STATE = "IDLE"
-    _STATE_TTL_SECONDS = 3600
-    _MESSAGE_BUFFER_TTL_SECONDS = 60
-
-    @classmethod
-    async def init_redis(cls) -> None:
-        if cls._client is not None:
-            return
-
-        cls._client = redis.from_url(
-            REDIS_URL,
-            decode_responses=True,
-        )
+    """
+    Gerenciador de Estado Conversacional (Finite State Machine) e Aglutinação de Mensagens (Debouncing) via Redis 7.
+    Adiciona controle de erros consecutivos para prevenção de loops infinitos.
+    """
+    _client = None
 
     @classmethod
-    async def close_redis(cls) -> None:
+    async def get_client(cls) -> redis.Redis:
         if cls._client is None:
-            return
-
-        await cls._client.aclose()
-        cls._client = None
-
-    @classmethod
-    async def _get_client(cls) -> redis.Redis:
-        if cls._client is None:
-            await cls.init_redis()
+            cls._client = redis.from_url(REDIS_URL, decode_responses=True)
         return cls._client
 
-    @classmethod
-    def _state_key(cls, flow_key: str) -> str:
-        return f"fsm:state:{flow_key}"
+    @staticmethod
+    async def obter_estado(key: str) -> str:
+        """Obtém o estado atual da FSM para o tenant."""
+        client = await RedisFSMService.get_client()
+        estado = await client.get(f"state:{key}")
+        return estado if estado else "IDLE"
 
-    @classmethod
-    def _buffer_key(cls, flow_key: str) -> str:
-        return f"fsm:buffer:{flow_key}"
+    @staticmethod
+    async def definir_estado(key: str, estado: str, ex_seconds: int = 1800):
+        """Define o estado atual da FSM com TTL de segurança (padrão 30 minutos)."""
+        client = await RedisFSMService.get_client()
+        await client.set(f"state:{key}", estado, ex=ex_seconds)
 
-    @classmethod
-    async def obter_estado(cls, flow_key: str) -> str:
-        client = await cls._get_client()
-        state = await client.get(cls._state_key(flow_key))
-        return state if state else cls._DEFAULT_STATE
+    @staticmethod
+    async def limpar_buffer(key: str):
+        """Limpa o estado e os buffers associados à FSM do tenant."""
+        client = await RedisFSMService.get_client()
+        await client.delete(f"state:{key}")
+        await client.delete(f"buffer_msg:{key}")
 
-    @classmethod
-    async def definir_estado(
-        cls,
-        flow_key: str,
-        state: str,
-        expire: int = _STATE_TTL_SECONDS,
-    ) -> None:
-        client = await cls._get_client()
-        await client.set(cls._state_key(flow_key), state, ex=expire)
-
-    @classmethod
-    async def limpar_estado(cls, flow_key: str) -> None:
-        client = await cls._get_client()
-        await client.delete(cls._state_key(flow_key))
-
-    @classmethod
-    async def bufferizar_mensagem(cls, flow_key: str, message_text: str) -> None:
-        client = await cls._get_client()
-        key = cls._buffer_key(flow_key)
-
+    @staticmethod
+    async def acumular_mensagem(tenant_id: str, texto: str, janela_segundos: int = 4) -> list:
+        """
+        Implementa o debouncing: acumula mensagens enviadas em rajada pelo motorista
+        numa lista do Redis, renovando a janela temporal. Retorna o acumulado.
+        """
+        client = await RedisFSMService.get_client()
+        list_key = f"buffer_msg:{tenant_id}"
+        
         async with client.pipeline(transaction=True) as pipe:
-            pipe.rpush(key, message_text)
-            pipe.expire(key, cls._MESSAGE_BUFFER_TTL_SECONDS)
+            pipe.rpush(list_key, texto)
+            pipe.expire(list_key, janela_segundos)
             await pipe.execute()
+        
+        mensagens = await client.lrange(list_key, 0, -1)
+        return mensagens
 
-    @classmethod
-    async def obter_buffer(cls, flow_key: str) -> list[str]:
-        client = await cls._get_client()
-        return await client.lrange(cls._buffer_key(flow_key), 0, -1)
+    @staticmethod
+    async def obter_erros_consecutivos(key: str) -> int:
+        """Obtém o contador de erros consecutivos para o tenant."""
+        client = await RedisFSMService.get_client()
+        erros = await client.get(f"errors:{key}")
+        return int(erros) if erros else 0
 
-    @classmethod
-    async def limpar_buffer(cls, flow_key: str) -> None:
-        client = await cls._get_client()
-        await client.delete(cls._buffer_key(flow_key))
+    @staticmethod
+    async def incrementar_erros_consecutivos(key: str) -> int:
+        """Incrementa o contador de erros consecutivos para o tenant e renova o TTL de 15 minutos."""
+        client = await RedisFSMService.get_client()
+        erros = await client.incr(f"errors:{key}")
+        await client.expire(f"errors:{key}", 900)
+        return erros
 
-    @classmethod
-    async def resetar_fluxo(cls, flow_key: str) -> None:
-        await cls.limpar_estado(flow_key)
-        await cls.limpar_buffer(flow_key)
+    @staticmethod
+    async def limpar_erros_consecutivos(key: str):
+        """Reseta o contador de erros consecutivos do tenant."""
+        client = await RedisFSMService.get_client()
+        await client.delete(f"errors:{key}")

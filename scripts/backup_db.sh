@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Script de Backup Automatizado do Cofre Contábil (PostgreSQL 15)
+# Gera: Dump Binário de Recuperação (.dump) e SQL Plano Limpo (.sql)
 # Nível: SRE / Confiabilidade Bank-Grade
 # ==============================================================================
 
-# Aborta o script se algum comando falhar, variáveis não declaradas forem invocadas
-# ou se algum comando em uma pipeline falhar de forma silenciosa.
+# Aborta o script caso qualquer comando falhe, variáveis vazias sejam chamadas
+# ou falhas silenciosas ocorram em pipelines.
 set -euo pipefail
 
 # --- Configurações de Cores para Terminal ---
@@ -34,31 +35,33 @@ PROJECT_DIR="$HOME/cfo-inteligente"
 BACKUP_DIR="$PROJECT_DIR/backups"
 ENV_FILE="$PROJECT_DIR/.env"
 
-# Carrega variáveis do .env se existir, preservando o padrão estrito
+# Carrega segredos e variáveis do .env se existir, preservando o padrão estrito
 if [[ -f "$ENV_FILE" ]]; then
     log "INFO" "Carregando segredos a partir do arquivo .env..."
-    # Exporta apenas o necessário de forma segura
     set -a
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
 fi
 
-# --- Variáveis de Configuração com Fallbacks ---
+# --- Variáveis de Configuração com Fallbacks Seguros ---
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 CONTAINER_NAME="${CONTAINER_NAME:-cfo_postgres}"
 DB_NAME="${POSTGRES_DB:-cfo_inteligente}"
 DB_USER="${POSTGRES_USER:-cfo_admin}"
 RETENTION_DAYS=7
-BACKUP_FILE="$BACKUP_DIR/cfo_backup_$TIMESTAMP.dump"
 
-# Garante a existência do diretório de backup com permissão restrita
+# Nomes dos arquivos de saída
+BACKUP_BIN_FILE="$BACKUP_DIR/cfo_backup_$TIMESTAMP.dump"
+BACKUP_SQL_FILE="$BACKUP_DIR/cfo_clean_$TIMESTAMP.sql"
+
+# Garante a existência do diretório de backup com permissão restrita (700)
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
-log "INFO" "Iniciando verificação de pré-requisitos para o backup..."
+log "INFO" "Iniciando verificação de pré-requisitos para a salvaguarda..."
 
-# 1. Verificar se o Docker Daemon está em execução
+# 1. Verificar se o Docker Daemon está em execução no host
 if ! docker info &> /dev/null; then
     log "ERROR" "O serviço do Docker não está rodando no host. Abortando backup."
     exit 1
@@ -71,78 +74,80 @@ if [[ "$CONTAINER_STATUS" != "true" ]]; then
     exit 1
 fi
 
-# 3. Verificar se o banco de dados PostgreSQL interno está saudável e pronto
+# 3. Verificar se o banco de dados interno está saudável e pronto para conexões
 if ! docker exec "$CONTAINER_NAME" pg_isready -U "$DB_USER" -d "$DB_NAME" &> /dev/null; then
     log "WARN" "PostgreSQL no container '$CONTAINER_NAME' não está pronto. Aguardando 5 segundos..."
     sleep 5
     if ! docker exec "$CONTAINER_NAME" pg_isready -U "$DB_USER" -d "$DB_NAME" &> /dev/null; then
-        log "ERROR" "PostgreSQL continua indisponível. Abortando operação de backup."
+        log "ERROR" "PostgreSQL continua indisponível após timeout. Abortando."
         exit 1
     fi
 fi
 
-# --- Execução do Backup (pg_dump) ---
-log "INFO" "💾 [1/3] Iniciando pg_dump do banco '$DB_NAME' no container '$CONTAINER_NAME'..."
-
-# Injeta de forma segura a senha a partir do .env se declarada, permitindo bypass seguro
+# Configura a senha de forma segura no escopo local da execução
+PG_PASS_ENV=""
 if [[ -n "${POSTGRES_PASSWORD:-}" ]]; then
-    # Executa o dump injetando a PGPASSWORD de forma segura no escopo local
-    if ! docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" "$CONTAINER_NAME" \
-        pg_dump -U "$DB_USER" -d "$DB_NAME" --format=custom > "$BACKUP_FILE"; then
-        log "ERROR" "Falha crítica na execução do comando pg_dump."
-        rm -f "$BACKUP_FILE"
-        exit 1
-    fi
-else
-    # Executa sem injeção direta de senha (confia em chaves locais ou pgpass do container)
-    if ! docker exec -i "$CONTAINER_NAME" \
-        pg_dump -U "$DB_USER" -d "$DB_NAME" --format=custom > "$BACKUP_FILE"; then
-        log "ERROR" "Falha crítica na execução do comando pg_dump."
-        rm -f "$BACKUP_FILE"
-        exit 1
-    fi
+    PG_PASS_ENV="-e PGPASSWORD=$POSTGRES_PASSWORD"
 fi
 
-# --- Validação de Integridade do Backup (Verify-After-Write) ---
-log "INFO" "Validando integridade do arquivo de backup gerado..."
-
-# A. Verificar se o arquivo foi criado e não está vazio
-if [[ ! -f "$BACKUP_FILE" ]] || [[ ! -s "$BACKUP_FILE" ]]; then
-    log "ERROR" "Arquivo de backup não foi criado ou possui tamanho igual a zero. Abortando."
-    rm -f "$BACKUP_FILE"
+# --- Execução do Backup Binário (.dump) ---
+log "INFO" "💾 [1/4] Gerando dump binário compactado (.dump)..."
+# shellcheck disable=SC2086
+if ! docker exec -i $PG_PASS_ENV "$CONTAINER_NAME" \
+    pg_dump -U "$DB_USER" -d "$DB_NAME" --format=custom > "$BACKUP_BIN_FILE"; then
+    log "ERROR" "Falha crítica na execução do comando pg_dump (formato binário)."
+    rm -f "$BACKUP_BIN_FILE"
     exit 1
 fi
 
-# B. Restringir permissão do arquivo imediatamente (Segurança Contábil)
-chmod 600 "$BACKUP_FILE"
-log "INFO" "Permissões de acesso do arquivo de backup definidas estritamente para 600."
-
-# C. Validar a assinatura binária do dump simulando uma listagem estrutural
-if ! pg_restore -l "$BACKUP_FILE" &> /dev/null; then
-    # Fallback caso a ferramenta local 'pg_restore' não esteja instalada no host Ubuntu,
-    # executa a verificação diretamente dentro do container do postgres
-    if ! docker exec -i "$CONTAINER_NAME" pg_restore -l < "$BACKUP_FILE" &> /dev/null; then
-        log "ERROR" "O arquivo de backup gerado falhou no teste de validação do pg_restore. Backup corrompido!"
-        rm -f "$BACKUP_FILE"
-        exit 1
-    fi
+# --- Execução do Backup em SQL Limpo (.sql) ---
+log "INFO" "💾 [2/4] Gerando script SQL em texto limpo (.sql)..."
+# shellcheck disable=SC2086
+if ! docker exec -i $PG_PASS_ENV "$CONTAINER_NAME" \
+    pg_dump -U "$DB_USER" -d "$DB_NAME" --format=plain > "$BACKUP_SQL_FILE"; then
+    log "ERROR" "Falha crítica na execução do comando pg_dump (formato SQL limpo)."
+    rm -f "$BACKUP_BIN_FILE" "$BACKUP_SQL_FILE"
+    exit 1
 fi
-log "INFO" "Integridade física e estrutural do arquivo de backup validada com sucesso."
 
-# --- Limpeza de backups antigos (Rotação) ---
-log "INFO" "🧹 [2/3] Iniciando rotação: procurando dumps antigos com mais de $RETENTION_DAYS dias..."
+# --- Validação de Integridade e Proteção de Acesso ---
+log "INFO" "🔒 [3/4] Validando integridade física dos arquivos e configurando privilégios..."
 
-# Executa a remoção apenas em arquivos que correspondam perfeitamente ao padrão gerado
-OLD_BACKUPS_COUNT=$(find "$BACKUP_DIR" -type f -name "cfo_backup_*.dump" -mtime +$RETENTION_DAYS | wc -l)
+# A. Aplica imediatamente o Princípio do Privilégio Mínimo (chmod 600)
+chmod 600 "$BACKUP_BIN_FILE" "$BACKUP_SQL_FILE"
+log "INFO" "Permissões de acesso aos arquivos definidas estritamente para 600 (Apenas proprietário)."
+
+# B. Validação do arquivo binário (.dump) simulando leitura estrutural do cabeçalho
+if ! docker exec -i "$CONTAINER_NAME" pg_restore -l < "$BACKUP_BIN_FILE" &> /dev/null; then
+    log "ERROR" "O arquivo binário gerado falhou na validação de integridade estrutural (pg_restore)."
+    rm -f "$BACKUP_BIN_FILE" "$BACKUP_SQL_FILE"
+    exit 1
+fi
+
+# C. Validação do arquivo SQL (.sql) procurando tag de sucesso
+if ! tail -n 10 "$BACKUP_SQL_FILE" | grep -q "PostgreSQL database dump complete"; then
+    log "ERROR" "O arquivo SQL limpo gerado está incompleto ou corrompido (falha na assinatura final)."
+    rm -f "$BACKUP_BIN_FILE" "$BACKUP_SQL_FILE"
+    exit 1
+fi
+
+log "INFO" "Integridade física e estrutural de ambos os backups validada com sucesso absoluto."
+
+# --- Limpeza de backups antigos (Rotação de Retenção) ---
+log "INFO" "🧹 [4/4] Rotacionando backups antigos com mais de $RETENTION_DAYS dias..."
+
+# Encontra e conta arquivos obsoletos correspondentes ao padrão do projeto
+OLD_BACKUPS_COUNT=$(find "$BACKUP_DIR" -type f \( -name "cfo_backup_*.dump" -o -name "cfo_clean_*.sql" \) -mtime +$RETENTION_DAYS | wc -l)
 
 if [[ "$OLD_BACKUPS_COUNT" -gt 0 ]]; then
-    find "$BACKUP_DIR" -type f -name "cfo_backup_*.dump" -mtime +$RETENTION_DAYS -delete
-    log "INFO" "Removidos $OLD_BACKUPS_COUNT arquivos de backup obsoletos."
+    find "$BACKUP_DIR" -type f \( -name "cfo_backup_*.dump" -o -name "cfo_clean_*.sql" \) -mtime +$RETENTION_DAYS -delete
+    log "INFO" "Removidos $OLD_BACKUPS_COUNT arquivos de backup obsoletos do armazenamento."
 else
-    log "INFO" "Nenhum arquivo de backup antigo para rotacionar."
+    log "INFO" "Nenhum arquivo de backup obsoleto encontrado para rotatividade."
 fi
 
-# --- Conclusão ---
-log "INFO" "✅ [3/3] Backup concluído com sucesso!"
-log "INFO" "Local do arquivo: $BACKUP_FILE"
-log "INFO" "Tamanho do backup: $(du -sh "$BACKUP_FILE" | cut -f1)"
+# --- Relatório Final de Conclusão ---
+log "INFO" "✅ Processo de backup duplo concluído com sucesso!"
+log "INFO" "Dump Binário de Restauração: $BACKUP_BIN_FILE ($(du -sh "$BACKUP_BIN_FILE" | cut -f1))"
+log "INFO" "SQL Limpo de Auditoria: $BACKUP_SQL_FILE ($(du -sh "$BACKUP_SQL_FILE" | cut -f1))"
+

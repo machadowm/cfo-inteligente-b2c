@@ -18,7 +18,7 @@ from services.turno_service import TurnoService
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://cfo_evolution:8080")
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://localhost:8080")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "evolution_secret_key")
 
 @asynccontextmanager

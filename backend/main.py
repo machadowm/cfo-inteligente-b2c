@@ -828,4 +828,3 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
     except Exception as e:
         logger.exception(f"Erro crítico no Webhook Evolution: {e}")
         return {"status": "error", "detail": str(e)}
-

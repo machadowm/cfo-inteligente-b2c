@@ -351,4 +351,3 @@ class TransacaoService:
                 }
         except Exception as exc:
             return {"status": "error", "message": f"Falha ao consolidar o extrato diário: {exc}"}
-

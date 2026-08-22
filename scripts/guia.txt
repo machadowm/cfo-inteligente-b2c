@@ -1,0 +1,61 @@
+Guia Prático: Operação e Execução Segura de Scripts (SRE) - Projeto CFO B2C
+1. Introdução à Filosofia de Operações "Bank-Grade"
+O Projeto CFO Inteligente B2C não é apenas uma ferramenta de automação financeira; é um ecossistema crítico que processa transações de alta precisão em uma infraestrutura  On-Premise/Bare-Metal  (Ubuntu Server 26.04 LTS sobre Hyper-V). Em um cenário de dados sensíveis e auditoria contábil, a resiliência deve ser tratada sob rigor corporativo. Este guia transforma a manutenção manual em uma esteira de confiabilidade, elevando o sistema ao patamar "Bank-Grade" através do controle estrito do código hospedado no repositório oficial: https://github.com/machadowm/cfo-inteligente-b2c.Para sustentar esta operação, regemo-nos por dois pilares fundamentais:
+* Idempotência:  A capacidade de executar o mesmo script múltiplas vezes sem alterar o resultado final ou causar efeitos colaterais. Se um contêiner ou registro já existe, o script deve validar e prosseguir, nunca duplicar.
+* Imutabilidade:  Tratamos o ambiente de produção como um espelho fiel do GitHub. Não existem "ajustes manuais" no servidor; qualquer alteração deve ser versionada, testada e aplicada via deploy automatizado, garantindo previsibilidade absoluta.Esta mentalidade é o que permite a transição segura para o provisionamento de serviços críticos.
+2. Quadrante de Provisionamento e Pareamento: setup_whatsapp.sh
+A estabilidade da  Evolution API  e dos serviços  FastAPI  exige um isolamento rigoroso. No Ubuntu 26.04, a integridade do sistema operacional é prioridade, o que demanda uma abordagem técnica específica para a gestão de pacotes Python.
+Análise Técnica (PEP 668)
+A conformidade com o  PEP 668  no Ubuntu moderno é mandatória. A instalação global de pacotes Python via pip é bloqueada para evitar a corrupção das bibliotecas do sistema (o "externally managed environment"). Por isso, o uso de ambientes virtuais (.venv) para o backend e auxiliares não é opcional; é a única forma de garantir silos herméticos que protegem o Kernel e a aplicação simultaneamente.
+Otimização de Interface (UX de Terminal)
+O provisionamento utiliza o qrencode para gerar o pareamento via WhatsApp. Para maximizar a taxa de sucesso:
+* Renderização UTF-8:  O terminal deve estar em modo maximizado. Janelas pequenas causam quebras nos blocos UTF-8, impedindo que a câmera do dispositivo móvel processe o QR Code.
+* Protocolo de Tempo:  Estabelecemos uma janela de pareamento de 1 minuto. Esta restrição de SRE evita o consumo desnecessário de File Descriptors e previne sessões "zumbis" no motor Baileys.
+3. Quadrante de Deploy e Atualização Imutável: update.sh
+A consistência do código-fonte garante que os microsserviços operem de forma previsível. O processo de deploy deve ser encarado como a imposição de um estado validado, e não como uma simples atualização de arquivos.
+Mecânica de Sincronização
+Para garantir que o servidor reflita exatamente o repositório https://github.com/machadowm/cfo-inteligente-b2c, evitamos o git pull tradicional, que pode falhar em caso de conflitos locais. O padrão tático de SRE é:
+1. git fetch origin main : Sincroniza as referências remotas.
+2. git reset --hard origin/main : O "Padrão Ouro". Este comando descarta qualquer alteração residual ou lixo digital na VM, garantindo paridade total com a fonte da verdade.
+Gestão de Downtime e Hardening
+Utilizamos docker compose up -d --build para recriar apenas os contêineres cujas imagens sofreram alteração.
+* Persistência de Dados:  O PostgreSQL permanece online, preservando o banco.
+* Hardening de Redis:  Para operações "Bank-Grade", é vital que o Redis esteja configurado com --appendonly yes. Isso garante que estados de memória (FSM) e dados de  debouncing  não sejam perdidos em caso de reinicialização do contêiner, mantendo o fluxo conversacional intacto.
+4. Quadrante de Manutenção e Limpeza de Infraestrutura: cleanup_sre.sh
+Logs em ambientes  Bare-Metal  são perigos silenciosos. Sem uma política de limpeza, o acúmulo de logs do Docker pode causar exaustão de disco e  kernel panic  nos serviços financeiros.
+A Diferença Crítica: rm vs truncate
+A manutenção de nível sênior diferencia a exclusão física da truncagem lógica:
+* rm  (Erro Comum):  Deletar um arquivo de log ativo cria um "File Descriptor órfão". O processo (daemon do Docker) continua escrevendo em um ponteiro de arquivo que não existe mais no sistema de arquivos, mas que continua ocupando espaço físico no disco.
+* truncate -s 0  (Padrão SRE):  Esvazia o conteúdo do arquivo instantaneamente sem interromper o processo de escrita ou exigir o reinício do serviço. O espaço é liberado imediatamente no sistema operacional.
+Higiene de Imagens
+Builds frequentes deixam camadas obsoletas ("dangling images"). O comando docker image prune -f é essencial para manter o armazenamento da Hyper-V otimizado para os dados produtivos.
+5. Quadrante de Salvaguarda Contábil: backup_db.sh e Automação Cron
+O maior ativo do projeto CFO B2C são os dados financeiros gravados com precisão NUMERIC(14,4). Estes dados são protegidos por  Row-Level Security (RLS) , e qualquer falha na integridade destas tabelas compromete a operação.
+Automação via Cron
+O agendador cron opera em um ambiente isolado (shell não interativo). Para garantir a execução Bank-Grade:
+* Caminhos e Binários Absolutos:  O cron não herda o $PATH do seu usuário SSH. É obrigatório definir caminhos absolutos tanto para o script quanto para os binários internos (ex: /usr/bin/docker exec).
+* Variável RLS:  O script de backup e as conexões de serviço devem estar alinhados à variável de tenant correta: app.current_tenant_id. Este é o identificador que garante que o PostgreSQL filtre corretamente o acesso aos dados em nível de linha.
+Rotação de Backup
+Para equilibrar segurança e economia de recursos no Bare-Metal, aplicamos a retenção de 7 dias via find -mtime +7 -delete. Isso garante uma janela de recuperação atômica sem exaurir o armazenamento da VM.
+6. Checklists de Auditoria e Próximos Passos
+A disciplina na execução desses scripts é o que diferencia um sistema em testes de uma operação financeira robusta.
+Tabela de Auditoria Estratégica
+Ação de SRE,Objetivo Estratégico
+git reset --hard,Impor imutabilidade e paridade com o repositório GitHub.
+Redis --appendonly yes,Proteger estados da FSM contra perda de dados em memória.
+truncate -s 0,Limpar logs sem criar File Descriptors órfãos no Kernel.
+app.current_tenant_id,Validar isolamento Multi-Tenant via RLS (Row-Level Security).
+Comandos de Resgate (Saúde Rápida)
+# Verificação de status dos microsserviços
+/usr/bin/docker compose ps
+
+
+# Auditoria de logs em tempo real (Identificar falhas de webhook)
+/usr/bin/docker compose logs -f --tail 50
+
+
+# Verificação de saúde de disco (Crucial para detectar log bloating)
+/usr/bin/df -h
+
+
+Instrução Final:  Mantenha o cofre de segredos (.env) protegido e atualizado. Nunca execute scripts de deploy ou provisionamento sem antes validar o git status. A automação só é segura quando a fonte da verdade é respeitada.

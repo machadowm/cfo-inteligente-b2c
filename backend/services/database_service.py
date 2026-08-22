@@ -93,7 +93,7 @@ class DatabaseService:
                 """
                 SELECT id, telefone, nome, meta_mensal_faturamento, dias_uteis_mes, nome_social, possui_multiplos_veiculos
                 FROM public.motoristas
-                WHERE REPLACE(REPLACE(REPLACE(REPLACE(telefone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '') LIKE '%' || $1 || '%'
+                WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(telefone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '') LIKE '%' || $1 || '%'
                 LIMIT 1;
                 """,
                 tel_limpo[-8:]
@@ -159,10 +159,10 @@ class DatabaseService:
                     """
                     INSERT INTO public.caixas_provisao (motorista_id, nome_caixa, saldo_atual)
                     VALUES 
-                        ($1::uuid, 'Manutenção Corretiva (Pneus/Freios)', 0.00),
-                        ($1::uuid, 'Amortização de IPVA/Seguro', 0.00)
+                        ($1::uuid, 'Manutenção Corretiva (Pneus/Freios)', 0.00),\n                        ($1::uuid, 'Amortização de IPVA/Seguro', 0.00)
                     ON CONFLICT DO NOTHING;
                     """,
                     motorista_id
                 )
                 return motorista_id
+

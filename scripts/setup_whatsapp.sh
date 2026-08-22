@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# Script de Conexão WhatsApp - Geração e Exibição de QR Code Automático
-# Arquitetura Assíncrona Não-Bloqueante (Zero Event-Loop Blocking)
-# Versão Defensiva com Tradução Dinâmica de DNS e Renderização UTF-8 no Terminal
+# Script de Provisionamento e Conexão WhatsApp - Evolution API (v2.3.7)
+# Arquitetura Assíncrona Não-Bloqueante com Auto-Criação e Registro de Webhook
+# Versão v4 - Corrigido erro de sintaxe Python (true -> True)
 # ==============================================================================
 
 import asyncio
@@ -25,10 +25,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configurações originais lidas do .env ou fallbacks
+# Configurações lidas do .env com fallbacks de segurança
 EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://localhost:8080")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "evolution_secret_key")
 INSTANCE_NAME = os.getenv("EVOLUTION_INSTANCE_NAME", "cfo_bot")
+INSTANCE_TOKEN = os.getenv("EVOLUTION_INSTANCE_TOKEN", "meu_token_seguro")
+
+# Webhook apontando para o container do FastAPI dentro da rede do Docker
+WEBHOOK_URL = "http://cfo_fastapi:8000/webhooks/evolution"
 
 def resolver_url_api(url_original: str) -> str:
     """
@@ -37,10 +41,8 @@ def resolver_url_api(url_original: str) -> str:
     """
     if "cfo_evolution" in url_original:
         try:
-            # Tenta resolver o nome do container
             socket.gethostbyname("cfo_evolution")
         except socket.gaierror:
-            # Se falhar gaierror, estamos no Host. Traduz para localhost exposto na porta 8080
             url_traduzida = url_original.replace("cfo_evolution", "127.0.0.1")
             logger.info(f"⚡ Host do container 'cfo_evolution' não resolvível no host. Chaveando dinamicamente para: {url_traduzida}")
             return url_traduzida
@@ -52,7 +54,6 @@ def renderizar_qrcode_terminal(raw_code: str):
     diretamente no terminal em blocos UTF-8 para escaneamento imediato de fricção zero.
     """
     try:
-        # Tenta executar o qrencode enviando a string do token criptográfico para o stdin
         process = subprocess.Popen(
             ["qrencode", "-t", "UTF8"],
             stdin=subprocess.PIPE,
@@ -80,34 +81,85 @@ def renderizar_qrcode_terminal(raw_code: str):
         print("👉 sudo apt update && sudo apt install -y qrencode")
         print("═" * 80 + "\n")
 
-async def baixar_qrcode():
-    """
-    Comunica com a Evolution API e descarrega o QR Code sem bloquear o Event Loop.
-    """
+async def provisionar_e_conectar():
     api_url_resolvida = resolver_url_api(EVOLUTION_API_URL)
-    url = f"{api_url_resolvida}/instance/connect/{INSTANCE_NAME}"
-    headers = {"apikey": EVOLUTION_API_KEY}
+    headers = {"apikey": EVOLUTION_API_KEY, "Content-Type": "application/json"}
 
-    logger.info(f"A solicitar geração de QR Code para a instância: '{INSTANCE_NAME}'...")
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        # 1. Verifica se a instância já existe (GET /instance/fetchInstances)
+        logger.info("Auditando instâncias existentes na Evolution API...")
+        try:
+            instances_resp = await client.get(f"{api_url_resolvida}/instance/fetchInstances", headers=headers)
+            instances_resp.raise_for_status()
+            instances = instances_resp.json()
+            
+            # Varre para encontrar cfo_bot
+            instancia_existe = False
+            for inst in instances:
+                if inst.get("name") == INSTANCE_NAME or inst.get("instanceName") == INSTANCE_NAME:
+                    instancia_existe = True
+                    break
+        except Exception:
+            logger.warning("Não foi possível listar as instâncias de forma preliminar. Tentando fluxo resiliente...")
+            instancia_existe = False
 
-    try:
-        # Contexto assíncrono para a requisição HTTP com timeout estrito
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
+        # 2. Se a instância não existir, cria-a via POST /instance/create
+        if not instancia_existe:
+            logger.info(f"Instância '{INSTANCE_NAME}' não localizada. Iniciando criação (POST)...")
+            create_url = f"{api_url_resolvida}/instance/create"
+            create_payload = {
+                "instanceName": INSTANCE_NAME,
+                "token": INSTANCE_TOKEN,
+                "qrcode": True,
+                "integration": "WHATSAPP-BAILEYS"
+            }
+            try:
+                create_resp = await client.post(create_url, json=create_payload, headers=headers)
+                create_resp.raise_for_status()
+                logger.info(f"✅ Instância '{INSTANCE_NAME}' criada com sucesso!")
+                
+                # Atraso tático para dar tempo do Prisma processar as tabelas internas no Postgres
+                await asyncio.sleep(2.0)
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Falha crítica na criação da instância: {e.response.text}")
+                return
 
-            payload = response.json()
+        # 3. Configura/Sobrescreve o Webhook para a rota correta (POST /webhook/set/{instance})
+        logger.info(f"Configurando Webhook apontando para: {WEBHOOK_URL}")
+        webhook_url = f"{api_url_resolvida}/webhook/set/{INSTANCE_NAME}"
+        webhook_payload = {
+            "webhook": {
+                "enabled": True, # Corrigido de true (sintaxe JSON) para True (sintaxe Python)
+                "url": WEBHOOK_URL,
+                "byEvents": False,
+                "base64": False,
+                "events": ["MESSAGES_UPSERT", "CONNECTION_UPDATE"]
+            }
+        }
+        try:
+            webhook_resp = await client.post(webhook_url, json=webhook_payload, headers=headers)
+            webhook_resp.raise_for_status()
+            logger.info("✅ Webhook acoplado de forma íntegra!")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Falha ao acoplar Webhook na instância: {e.response.text}")
 
-            # Extração tática do código de pareamento puro e da imagem Base64
+        # 4. Solicita a geração do QR Code (GET /instance/connect/{instance})
+        logger.info(f"Solicitando geração de QR Code de conexão...")
+        connect_url = f"{api_url_resolvida}/instance/connect/{INSTANCE_NAME}"
+        try:
+            connect_resp = await client.get(connect_url, headers=headers)
+            connect_resp.raise_for_status()
+            payload = connect_resp.json()
+
+            # Extração do código textual e imagem base64
             raw_code = payload.get("code") or payload.get("qrcode", {}).get("code")
             base64_img = payload.get("base64") or payload.get("qrcode", {}).get("base64")
 
-            # Valida se a API retornou dados válidos
             if not base64_img:
-                logger.warning("QR Code não retornado. A instância pode já estar conectada ou em handshake.")
+                logger.warning("Aviso: QR Code não retornado. O dispositivo pode já estar conectado.")
                 return
 
-            # Extrai e limpa a string base64 do prefixo se existir
+            # Limpeza do cabeçalho Base64
             if "," in base64_img:
                 base64_data = base64_img.split(",")[1]
             else:
@@ -115,28 +167,26 @@ async def baixar_qrcode():
 
             image_data = base64.b64decode(base64_data)
 
+            # Gravação segura do PNG em disco em thread separada
             filename = "qrcode_direto.png"
             filepath = Path(filename)
-
-            # RESOLUÇÃO ASYNC230: Delega o Disk I/O síncrono para uma Thread separada.
             await asyncio.to_thread(filepath.write_bytes, image_data)
-            logger.info(f"💾 Imagem do QR Code gravada com sucesso em: '{filename}'")
+            logger.info(f"💾 Cópia física gravada com sucesso em: '{filename}'")
 
-            # EXIBIÇÃO AUTOMÁTICA DO QR CODE NO TERMINAL CLI
+            # Renderização nativa no terminal SSH
             if raw_code:
                 renderizar_qrcode_terminal(raw_code)
             else:
-                logger.warning("Código textual de emparelhamento não localizado na resposta.")
+                logger.warning("Código de pareamento textual ausente no payload de retorno.")
 
-    except httpx.HTTPStatusError as e:
-        logger.error(f"[ERRO HTTP] Falha na comunicação com a API (Status: {e.response.status_code}): {e.response.text}")
-    except Exception:
-        logger.exception("[FALHA CRÍTICA] Erro interno imprevisto na geração do QR Code.")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Erro ao conectar e obter QR Code: {e.response.text}")
+        except Exception:
+            logger.exception("Falha imprevista na fase de conexão criptográfica.")
 
 if __name__ == "__main__":
     try:
-        # Ponto de entrada moderno do asyncio
-        asyncio.run(baixar_qrcode())
+        asyncio.run(provisionar_e_conectar())
     except KeyboardInterrupt:
-        logger.info("Operação cancelada pelo utilizador.")
+        logger.info("Operação cancelada pelo usuário.")
 

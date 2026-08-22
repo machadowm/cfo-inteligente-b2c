@@ -13,6 +13,7 @@ from services.database_service import DatabaseService
 from services.redis_fsm import RedisFSMService
 from services.transacao_service import TransacaoService
 from services.turno_service import TurnoService
+from services.help_service import HelpService
 
 # Logs de Observabilidade
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -206,12 +207,12 @@ async def registrar_erro_e_verificar_escape(remote_jid: str, tenant_id: str, fsm
         # Mensagem de escape forçada
         mensagem_escape = (
             "⚠️ *Múltiplos Erros Consecutivos!*\n"
-            "Seu fluxo atual foi interrompido e limpo para evitar travamento.\n\n"
-            "Por favor, envie um dos comandos rápidos ou valores livres para começar de novo:\n"
-            "🟢 *Iniciar* (ou 'iniciar 1399')\n"
-            "🏁 *Fechar* (ou 'fechar 1450')\n"
-            "⏸️ *Pausar* / *Retomar*\n"
-            "📊 *Status* (resumo do dia)\n"
+            "Seu fluxo atual foi interrompido e limpo para evitar travamento.\\n\\n"
+            "Por favor, envie um dos comandos rápidos ou valores livres para começar de novo:\\n"
+            "🟢 *Iniciar* (ou 'iniciar 1399')\\n"
+            "🏁 *Fechar* (ou 'fechar 1450')\\n"
+            "⏸️ *Pausar* / *Retomar*\\n"
+            "📊 *Status* (resumo do dia)\\n"
             "💰 *[Valor]* (ex: 'ganhei 100' ou 'gastei 40 almoço')"
         )
         await enviar_whatsapp(remote_jid, mensagem_escape)
@@ -279,8 +280,8 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                 await RedisFSMService.definir_estado(fsm_key, "AGUARDANDO_NOME")
                 background_tasks.add_task(
                     enviar_whatsapp, remote_jid, 
-                    "Fala, motorista! Seja bem-vindo ao *CFO Inteligente B2C* 🚀\n"
-                    "Percebi que você ainda não tem cadastro por aqui. Vamos resolver isso em 1 minuto de forma simples!\n\n"
+                    "Fala, motorista! Seja bem-vindo ao *CFO Inteligente B2C* 🚀\\n"
+                    "Percebi que você ainda não tem cadastro por aqui. Vamos resolver isso em 1 minuto de forma simples!\\n\\n"
                     "Para começar, digite o seu **nome completo**:"
                 )
                 return {"status": "onboarding_step_nome"}
@@ -291,7 +292,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     return {"status": "onboarding_escaped" if escapou else "onboarding_invalid_name"}
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_VEICULO|name:{texto_bruto}")
-                background_tasks.add_task(enviar_whatsapp, remote_jid, f"Prazer em te conhecer, *{texto_bruto}*! 🚗\nQual é o **modelo e marca** do seu principal veículo de trabalho?")
+                background_tasks.add_task(enviar_whatsapp, remote_jid, f"Prazer em te conhecer, *{texto_bruto}*! 🚗\\nQual é o **modelo e marca** do seu principal veículo de trabalho?")
                 return {"status": "onboarding_step_veiculo"}
 
             elif estado_atual.startswith("AGUARDANDO_VEICULO"):
@@ -300,13 +301,13 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_COMBUSTIVEL|name:{nome}|veiculo:{texto_bruto}")
                 background_tasks.add_task(
                     enviar_whatsapp, remote_jid, 
-                    f"Show! E qual é o tipo de combustível ou motorização do seu {texto_bruto}? ⛽\n\n"
-                    "Responda exatamente com uma das opções:\n"
-                    "👉 *Gasolina*\n"
-                    "👉 *Etanol*\n"
-                    "👉 *Flex*\n"
-                    "👉 *Hibrido*\n"
-                    "👉 *Eletrico*\n"
+                    f"Show! E qual é o tipo de combustível ou motorização do seu {texto_bruto}? ⛽\\n\\n"
+                    "Responda exatamente com uma das opções:\\n"
+                    "👉 *Gasolina*\\n"
+                    "👉 *Etanol*\\n"
+                    "👉 *Flex*\\n"
+                    "👉 *Hibrido*\\n"
+                    "👉 *Eletrico*\\n"
                     "👉 *GNV*"
                 )
                 return {"status": "onboarding_step_combustivel"}
@@ -402,8 +403,8 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     await RedisFSMService.limpar_buffer(fsm_key)
                     background_tasks.add_task(
                         enviar_whatsapp, remote_jid, 
-                        f"Cadastro concluído com sucesso, {nome}! 🛡️\n"
-                        f"O seu cofre contábil está ativo e configurado para o seu *{veiculo}* ({placa}).\n\n"
+                        f"Cadastro concluído com sucesso, {nome}! 🛡️\\n"
+                        f"O seu cofre contábil está ativo e configurado para o seu *{veiculo}* ({placa}).\\n\\n"
                         "Envie *'Iniciar'* ou *'Iniciar turno'* acompanhado do seu odômetro atual para começar!"
                     )
                     return {"status": "onboarding_completed"}
@@ -460,8 +461,8 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                 await RedisFSMService.limpar_buffer(fsm_key)
                 background_tasks.add_task(
                     enviar_whatsapp, remote_jid, 
-                    f"Cadastro concluído com sucesso, {nome}! 🛡️\n"
-                    f"O seu cofre contábil está ativo e configurado para o seu *{veiculo}* ({placa}).\n\n"
+                    f"Cadastro concluído com sucesso, {nome}! 🛡️\\n"
+                    f"O seu cofre contábil está ativo e configurado para o seu *{veiculo}* ({placa}).\\n\\n"
                     "Envie *'Iniciar'* ou *'Iniciar turno'* acompanhado do seu odômetro atual para começar!"
                 )
                 return {"status": "onboarding_completed"}
@@ -471,6 +472,25 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
         # =========================================================================
         motorista_id = str(motorista["id"])
         fsm_turno_key = f"turno_flow:{tenant_id}"
+
+        # =========================================================================
+        # PASSO 0: INTERCEPTOR DE AJUDA GLOBAL (Stateless - Não altera FSM)
+        # =========================================================================
+        palavras_ajuda = ["ajuda", "help", "socorro", "como", "explicar"]
+        if any(w in texto_limpo for w in palavras_ajuda):
+            partes = texto_limpo.split()
+            topico = "geral"
+            for i, palavra in enumerate(partes):
+                if palavra in palavras_ajuda and i + 1 < len(partes):
+                    topico_potencial = partes[i+1]
+                    if topico_potencial in ["metas", "contrato", "lancamentos", "turno"]:
+                        topico = topico_potencial
+                        break
+            
+            resposta_ajuda = HelpService.obter_ajuda(topico)
+            background_tasks.add_task(enviar_whatsapp, remote_jid, resposta_ajuda)
+            return {"status": "help_provided", "topic": topico}
+
         estado_turno = await RedisFSMService.obter_estado(fsm_turno_key)
 
         # Pre-parse de comandos e intents
@@ -501,8 +521,8 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     await conn.execute(
                         """
                         UPDATE public.veiculos 
-                        SET locadora = , custo_aluguel_semanal = , franquia_km_semanal = , contrato_personalizado = TRUE
-                        WHERE motorista_id = ::uuid AND ativo = TRUE;
+                        SET locadora = $1, custo_aluguel_semanal = $2, franquia_km_semanal = $3, contrato_personalizado = TRUE
+                        WHERE motorista_id = $4::uuid AND ativo = TRUE;
                         """,
                         locadora, aluguel_semanal, franquia, motorista_id
                     )

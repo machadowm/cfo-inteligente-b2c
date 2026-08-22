@@ -73,4 +73,3 @@ class RedisFSMService:
         """Reseta o contador de erros consecutivos do tenant."""
         client = await RedisFSMService.get_client()
         await client.delete(f"errors:{key}")
-

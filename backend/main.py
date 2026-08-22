@@ -18,7 +18,7 @@ from services.turno_service import TurnoService
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://localhost:8080")
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://cfo_evolution:8080")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "evolution_secret_key")
 
 @asynccontextmanager
@@ -121,6 +121,21 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     else:
         lista_despesas_str = "• Nenhuma despesa registrada neste turno.\n"
 
+    rodape_sugestao = ""
+    if not res.get("contrato_personalizado", False):
+        rodape_sugestao = (
+            "\n\n"
+            "Willian, este cálculo de hoje usou o custo padrão de *Aluguel da Zarp (R$ 170,14/dia)*. "
+            "Mas queremos que seu lucro líquido seja 100% real. Como você trabalha nas ruas hoje? "
+            "Escolha uma opção para ajustarmos o bot ao seu bolso:\n\n"
+            "1️⃣ *Carro Alugado* (Zarp, Movida, Mottu, etc.):\n"
+            "👉 Envie: *'atualizar contrato [Locadora] [Aluguel Semanal] [Franquia KM]'* (ex: *atualizar contrato Zarp 1020 1500*)\n\n"
+            "2️⃣ *Carro Próprio Quitado* (sem mensalidade, apenas provisão de manutenção):\n"
+            "👉 Envie: *'atualizar contrato Proprietario [Manutenção Diária] 0'* (ex: *atualizar contrato Proprietario 15 0*)\n\n"
+            "3️⃣ *Carro Financiado* (mensalidade + manutenção):\n"
+            "👉 Envie: *'atualizar contrato Financiado [Pro-Rata Mensalidade + Manutenção] 0'* (ex: *atualizar contrato Financiado 45 0*)"
+        )
+
     return (
         f"🏁 *FECHAMENTO DE TURNO - DRE EXECUTIVO DIÁRIO*\n"
         f"👤 Motorista: *{nome_motorista}*\n"
@@ -146,6 +161,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
         f"• Rendimento Médio do Turno: *{res.get('km_por_litro', 0.0):.2f} km/L*\n"
         f"• Atingimento Meta Diária (R$ {meta_diaria:.2f}): *{perc_meta:.1f}%*\n\n"
         f"🛡️ *Cofre Contábil Atualizado! Fechamento registrado com sucesso. Bom descanso!*"
+        f"{rodape_sugestao}"
     )
 
 async def enviar_whatsapp(remote_jid: str, texto: str):
@@ -297,8 +313,8 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
 
             elif estado_atual.startswith("AGUARDANDO_COMBUSTIVEL"):
                 partes = estado_atual.split("|")
-                nome = partes[0].split("name:")[1]
-                veiculo = partes[1].split("veiculo:")[1]
+                nome = partes[1].split("name:")[1]
+                veiculo = partes[2].split("veiculo:")[1]
                 
                 comb_input = texto_bruto.lower().replace("é", "e").replace("í", "i").strip()
                 combustiveis_suportados = ["gasolina", "etanol", "flex", "hibrido", "eletrico", "gnv"]
@@ -314,9 +330,9 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
 
             elif estado_atual.startswith("AGUARDANDO_PLACA"):
                 partes = estado_atual.split("|")
-                nome = partes[0].split("name:")[1]
-                veiculo = partes[1].split("veiculo:")[1]
-                combustivel = partes[2].split("combustivel:")[1]
+                nome = partes[1].split("name:")[1]
+                veiculo = partes[2].split("veiculo:")[1]
+                combustivel = partes[3].split("combustivel:")[1]
                 
                 placa_limpa = re.sub(r'[^A-Za-z0-9]', '', texto_bruto).upper()
                 if len(placa_limpa) != 7:
@@ -330,10 +346,10 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
 
             elif estado_atual.startswith("AGUARDANDO_CAPACIDADE_TANQUE"):
                 partes = estado_atual.split("|")
-                nome = partes[0].split("name:")[1]
-                veiculo = partes[1].split("veiculo:")[1]
-                combustivel = partes[2].split("combustivel:")[1]
-                placa = partes[3].split("placa:")[1]
+                nome = partes[1].split("name:")[1]
+                veiculo = partes[2].split("veiculo:")[1]
+                combustivel = partes[3].split("combustivel:")[1]
+                placa = partes[4].split("placa:")[1]
                 
                 tanque_val = converter_para_float(texto_bruto)
                 if tanque_val < 0:
@@ -394,11 +410,11 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
 
             elif estado_atual.startswith("AGUARDANDO_CAPACIDADE_BATERIA"):
                 partes = estado_atual.split("|")
-                nome = partes[0].split("name:")[1]
-                veiculo = partes[1].split("veiculo:")[1]
-                combustivel = partes[2].split("combustivel:")[1]
-                placa = partes[3].split("placa:")[1]
-                tanque_val = float(partes[4].split("tanque:")[1])
+                nome = partes[1].split("name:")[1]
+                veiculo = partes[2].split("veiculo:")[1]
+                combustivel = partes[3].split("combustivel:")[1]
+                placa = partes[4].split("placa:")[1]
+                tanque_val = float(partes[5].split("tanque:")[1])
                 
                 bateria_val = converter_para_float(texto_bruto)
                 if bateria_val < 0:
@@ -471,19 +487,26 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
             partes = texto_bruto.split()
             try:
                 locadora = partes[2] if len(partes) > 2 else "Localiza Zarp"
-                aluguel = converter_para_float(partes[3]) if len(partes) > 3 else 1020.85
+                aluguel_input = converter_para_float(partes[3]) if len(partes) > 3 else 1020.85
                 franquia = converter_para_float(partes[4]) if len(partes) > 4 else 1505.00
+                
+                # Para proprietário/quitado/financiado, o custo diário é passado.
+                # Multiplicamos por 6 para que o rateio pro-rata diário (aluguel_semanal / 6.0) dê exatamente o valor diário.
+                if locadora.lower() in ["proprietario", "quitado", "financiado"]:
+                    aluguel_semanal = aluguel_input * 6.0
+                else:
+                    aluguel_semanal = aluguel_input
                 
                 async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                     await conn.execute(
                         """
                         UPDATE public.veiculos 
-                        SET locadora = $1, custo_aluguel_semanal = $2, franquia_km_semanal = $3
-                        WHERE motorista_id = $4::uuid AND ativo = TRUE;
+                        SET locadora = , custo_aluguel_semanal = , franquia_km_semanal = , contrato_personalizado = TRUE
+                        WHERE motorista_id = ::uuid AND ativo = TRUE;
                         """,
-                        locadora, aluguel, franquia, motorista_id
+                        locadora, aluguel_semanal, franquia, motorista_id
                     )
-                background_tasks.add_task(enviar_whatsapp, remote_jid, f"✅ Contrato atualizado com sucesso para *{locadora}*! Aluguel rateado recalculado. 🛡️")
+                background_tasks.add_task(enviar_whatsapp, remote_jid, f"✅ Contrato atualizado com sucesso para *{locadora}*! Aluguel rateado recalculado e cofre adaptado. 🛡️")
             except Exception as e:
                 logger.error(f"Erro ao atualizar contrato: {e}")
                 background_tasks.add_task(enviar_whatsapp, remote_jid, "⚠️ Formato inválido. Use ex: *'atualizar contrato Zarp 1020.85 1505' *")
@@ -785,3 +808,4 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
     except Exception as e:
         logger.exception(f"Erro crítico no Webhook Evolution: {e}")
         return {"status": "error", "detail": str(e)}
+

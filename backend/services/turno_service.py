@@ -121,7 +121,7 @@ class TurnoService:
                     SELECT t.id, t.km_inicial, t.data_inicio, v.id as veiculo_id,
                            v.estoque_financeiro, v.tipo_combustivel, v.is_flex, v.is_hibrido, v.is_eletrico, v.capacidade_tanque, v.capacidade_bateria,
                            v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal, v.valor_km_excedente,
-                           v.escala_trabalho, m.meta_mensal_faturamento, m.dias_uteis_mes
+                           v.escala_trabalho, v.contrato_personalizado, m.meta_mensal_faturamento, m.dias_uteis_mes
                     FROM public.turnos t
                     JOIN public.veiculos v ON v.id = t.veiculo_id
                     JOIN public.motoristas m ON m.id = t.motorista_id
@@ -404,6 +404,7 @@ class TurnoService:
                 "escala_trabalho": turno["escala_trabalho"] or "De quarta a segunda (6 dias)",
                 "franquia_km_semanal": float(turno["franquia_km_semanal"] or 1505.0),
                 "valor_km_excedente": float(turno["valor_km_excedente"] or 0.75),
+                "contrato_personalizado": bool(turno["contrato_personalizado"]),
                 "detalhe_queima": " | ".join(detalhe_queima),
                 "despesas_detalhadas": despesas_detalhadas
             }
@@ -479,3 +480,4 @@ class TurnoService:
                 return int(row["total"]) if row else 0
         except Exception:
             return 1 # Fallback conservador para evitar loop
+

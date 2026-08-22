@@ -107,7 +107,8 @@ class DatabaseService:
                 """
                 SELECT id, placa, modelo, tipo_combustivel, estoque_financeiro, locadora,
                        custo_aluguel_semanal, franquia_km_semanal, valor_km_excedente, escala_trabalho,
-                       is_flex, qtd_tanques, is_hibrido, is_eletrico, capacidade_tanque, capacidade_bateria
+                       is_flex, qtd_tanques, is_hibrido, is_eletrico, capacidade_tanque, capacidade_bateria,
+                       contrato_personalizado
                 FROM public.veiculos
                 WHERE motorista_id = $1::uuid AND ativo = TRUE
                 ORDER BY created_at DESC LIMIT 1;

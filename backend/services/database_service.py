@@ -166,4 +166,3 @@ class DatabaseService:
                     motorista_id
                 )
                 return motorista_id
-

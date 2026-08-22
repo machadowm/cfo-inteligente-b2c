@@ -73,4 +73,3 @@ class HelpService:
         """Retorna o texto de ajuda formatado para o tópico correspondente."""
         topico_limpo = topico.lower().strip()
         return HelpService._TEXTOS.get(topico_limpo, HelpService._TEXTOS["geral"])
-

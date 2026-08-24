@@ -365,7 +365,7 @@ class TurnoService:
                         detalhe_queima.append(f"Elétrico: {float(kwh_queimados):.1f} kWh (R$ {float(custo_queimado_bateria):.2f})")
 
                 # 2.2. CONSUMO DE LÍQUIDO (Se restou KM para queimar ou se é veículo combustão/Flex)
-                if km_restante > 0 and not turno["is_eletrico"]:
+                if km_restante > 0 and not is_eletrico:
                     liq = estoque["liquido"]
                     total_litros = Decimal(str(liq.get("litros", 0.0)))
                     custo_total_liq = Decimal(str(liq.get("custo_total", 0.0)))

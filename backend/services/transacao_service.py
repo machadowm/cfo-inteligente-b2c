@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import hashlib
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, Any, Optional
 import asyncpg
@@ -78,6 +79,12 @@ class TransacaoService:
         # Permite valor zero especificamente para recargas solares ou domésticas gratuitas
         is_recarga_gratuita = "solar" in desc_limpa or "casa" in desc_limpa or "gratis" in desc_limpa or "tomada" in desc_limpa
         permitir_zero = categoria.lower() == "combustivel" and is_recarga_gratuita
+
+        # GAP: wpp_msg_id None não dispara ON CONFLICT (NULL != NULL em SQL).
+        # Gera um hash determinístico para garantir idempotência mesmo em mensagens sem ID.
+        if not wpp_msg_id:
+            _raw = f"{motorista_id}|{tipo_movimentacao}|{categoria}|{valor}|{(descricao or '')}"
+            wpp_msg_id = "hash:" + hashlib.sha256(_raw.encode()).hexdigest()[:32]
 
         try:
             tipo_validado = TransacaoService._validar_tipo_movimentacao(tipo_movimentacao)
@@ -185,9 +192,9 @@ class TransacaoService:
                             qtd_atual = Decimal(str(dados_comb.get("litros", 0.0)))
                             custo_atual = Decimal(str(dados_comb.get("custo_total", 0.0)))
 
-                            # Extrai litros
+                            # Extrai litros — \b garante que "l" não case com "lava", "legal", etc.
                             litros_novos = Decimal("0.00")
-                            litros_match = re.search(r'(\d+[\.,]?\d*)\s*(?:litros|litro|l)', desc_limpa)
+                            litros_match = re.search(r'(\d+[\.,]?\d*)\s*(?:litros|litro|\bl\b)', desc_limpa)
                             if litros_match:
                                 litros_novos = Decimal(litros_match.group(1).replace(',', '.'))
                             else:
@@ -204,8 +211,9 @@ class TransacaoService:
                                 }
 
                             # Determina se é Gasolina, Etanol ou Mistura padrão Flex
-                            is_gasolina = "gasolina" in desc_limpa or "gas" in desc_limpa
-                            is_etanol = "etanol" in desc_limpa or "alcool" in desc_limpa or "alc" in desc_limpa
+                            # Usa \b para evitar que "gastei", "gastos", "legal" etc. sejam detectados como combustível
+                            is_gasolina = "gasolina" in desc_limpa or bool(re.search(r'\bgas\b', desc_limpa))
+                            is_etanol = "etanol" in desc_limpa or bool(re.search(r'\balcool\b', desc_limpa)) or bool(re.search(r'\balc\b', desc_limpa))
 
                             gas_atual = Decimal(str(dados_comb.get("gasolina_litros", qtd_atual if veiculo["tipo_combustivel"].lower() == "gasolina" else 0.0)))
                             eta_atual = Decimal(str(dados_comb.get("etanol_litros", qtd_atual if veiculo["tipo_combustivel"].lower() == "etanol" else 0.0)))
@@ -246,6 +254,7 @@ class TransacaoService:
                         )
 
                 # 3. Insere a transação no Ledger de forma idempotente
+                # wpp_msg_id nunca será NULL aqui — o hash determinístico acima garante isso.
                 query_insert = """
                     INSERT INTO public.transacoes (
                         motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria, valor, descricao, wpp_msg_id

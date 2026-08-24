@@ -33,7 +33,48 @@ class TurnoService:
         if km_decimal < 0:
             raise ValueError(f"O valor de {campo} não pode ser negativo.")
 
-        return km_decimal
+        return km_decimal    @staticmethod
+    def _garantir_estrutura_estoque(estoque: dict) -> dict:
+        """
+        Retrocompatibilidade: adiciona chaves ausentes sem sobrescrever dados existentes.
+        A sub-chave 'meta' é a fonte única de verdade para flags de motorização e capacidades físicas do veículo — as colunas correspondentes foram removidas da tabela veiculos.
+        """
+        if "meta" not in estoque:
+            estoque["meta"] = {
+                "tipo_veiculo": "gasolina",
+                "is_flex": False,
+                "is_hibrido": False,
+                "is_eletrico": False,
+                "capacidade_tanque_l": 50.0,
+                "capacidade_bateria_kwh": 0.0,
+                "qtd_tanques": 1,
+            }
+        if "liquido" not in estoque:
+            estoque["liquido"] = {
+                "litros": 0.0,
+                "custo_total": 0.0,
+                "gasolina_litros": 0.0,
+                "etanol_litros": 0.0,
+                "gasolina_proporcao": 1.0,
+                "etanol_proporcao": 0.0,
+                "km_l_gasolina": 12.0,
+                "km_l_etanol": 8.5,
+            }
+        if "eletricidade" not in estoque:
+            estoque["eletricidade"] = {
+                "kwh": 0.0,
+                "custo_total": 0.0,
+                "km_kwh": 6.5,
+            }
+        if "gnv" not in estoque:
+            estoque["gnv"] = {
+                "m3": 0.0,
+                "custo_total": 0.0,
+                "km_m3": 14.0,
+            }
+        return estoque
+
+
 
     @staticmethod
     async def abrir_turno(motorista_id: str, veiculo_id: str, km_inicial: float) -> Dict[str, Any]:

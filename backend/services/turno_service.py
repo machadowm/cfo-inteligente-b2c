@@ -33,7 +33,9 @@ class TurnoService:
         if km_decimal < 0:
             raise ValueError(f"O valor de {campo} não pode ser negativo.")
 
-        return km_decimal    @staticmethod
+        return km_decimal
+
+    @staticmethod
     def _garantir_estrutura_estoque(estoque: dict) -> dict:
         """
         Retrocompatibilidade: adiciona chaves ausentes sem sobrescrever dados existentes.

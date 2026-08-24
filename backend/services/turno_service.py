@@ -1,394 +1,529 @@
-import os
 import json
 import logging
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 from typing import Dict, Any, Optional
+
 import pytz
 import asyncpg
+
 from services.database_service import DatabaseService
 
 logger = logging.getLogger(__name__)
 
 TZ_BR = pytz.timezone("America/Sao_Paulo")
 
+
 def agora_brasil() -> datetime:
     """Retorna o timestamp corrente sincronizado no fuso de Brasília (America/Sao_Paulo)."""
     return datetime.now(TZ_BR)
 
+
 class TurnoService:
     """
-    Serviço Operacional e Contábil de Turnos.
-    Oferece suporte à queima híbrida inteligente de energia veicular (energia solar com custo amortizado + mix combustível líquido Flex),
-    cálculo de DRE Executivo com Decimal de alta precisão, timezone seguro e auditoria detalhada de gastos.
+    Motor de Queima, Competência e DRE.
+
+    Implementa o Algoritmo Power Split Híbrido (EV Priority):
+      1. Prioriza consumo da bateria elétrica (kWh) nos veículos Elétrico/Híbrido.
+      2. Redireciona KMs excedentes para o tanque único Flex com rendimento médio ponderado.
+      3. Suporte a GNV como fonte alternativa de combustão.
+      4. Em estoque zerado, recorre a estimativa proporcional via ledger do turno.
+
+    A amortização do custo de combustível é calculada pelo CMP (Custo Médio Ponderado)
+    real acumulado no JSONB 'estoque_financeiro', garantindo aderência ao Regime de
+    Competência no fechamento do DRE.
     """
+
+    # ------------------------------------------------------------------ helpers
 
     @staticmethod
     def _validar_km(valor_km: float, campo: str) -> Decimal:
         try:
-            km_decimal = Decimal(str(valor_km))
+            km = Decimal(str(valor_km))
         except (InvalidOperation, ValueError) as exc:
             raise ValueError(f"O valor de {campo} está mal formatado.") from exc
-
-        if km_decimal < 0:
+        if km < Decimal("0"):
             raise ValueError(f"O valor de {campo} não pode ser negativo.")
+        return km
 
-        return km_decimal
+    @staticmethod
+    def _garantir_estrutura_estoque(estoque: dict) -> dict:
+        """Retrocompatibilidade: adiciona chaves ausentes sem sobrescrever dados existentes."""
+        if "liquido" not in estoque:
+            estoque["liquido"] = {
+                "litros": 0.0,
+                "custo_total": 0.0,
+                "gasolina_litros": 0.0,
+                "etanol_litros": 0.0,
+                "gasolina_proporcao": 1.0,
+                "etanol_proporcao": 0.0,
+                "km_l_gasolina": 12.0,
+                "km_l_etanol": 8.5,
+            }
+        if "eletricidade" not in estoque:
+            estoque["eletricidade"] = {
+                "kwh": 0.0,
+                "custo_total": 0.0,
+                "km_kwh": 6.5,
+            }
+        if "gnv" not in estoque:
+            estoque["gnv"] = {
+                "m3": 0.0,
+                "custo_total": 0.0,
+                "km_m3": 14.0,
+            }
+        return estoque
+
+    # ------------------------------------------------------------------ público
 
     @staticmethod
     async def abrir_turno(motorista_id: str, veiculo_id: str, km_inicial: float) -> Dict[str, Any]:
         """
-        Abre um novo turno para o motorista com validação rigorosa de monotonicidade do odômetro
-        em relação ao último fechamento registrado deste veículo.
+        Abre um novo turno com validação de monotonicidade estrita do odômetro
+        em relação ao último fechamento registrado para este veículo.
         """
         try:
-            km_inicial_decimal = TurnoService._validar_km(km_inicial, "km_inicial")
+            km_ini = TurnoService._validar_km(km_inicial, "km_inicial")
         except ValueError as exc:
-            return {"sucesso": False, "erro": f"❌ {str(exc)}", "tipo_erro": "KM_INVALIDO"}
+            return {"sucesso": False, "erro": f"❌ {exc}", "tipo_erro": "KM_INVALIDO"}
 
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
-                # 1. Verifica se já existe QUALQUER turno ativo aberto para o motorista
+
+                # Garante que não há turno em aberto
                 turno_ativo = await conn.fetchrow(
                     "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento', 'em_pausa');",
-                    motorista_id
+                    motorista_id,
                 )
                 if turno_ativo:
                     return {
                         "sucesso": False,
                         "erro": "⚠️ Você já possui uma jornada em andamento. Encerre o turno atual antes de abrir outro.",
-                        "tipo_erro": "TURNO_JA_ATIVO"
+                        "tipo_erro": "TURNO_JA_ATIVO",
                     }
 
-                # 2. Busca o último turno encerrado deste veículo para validar monotonicidade do odômetro
-                ultimo_turno = await conn.fetchrow(
+                # Valida monotonicidade contra o odômetro final do turno anterior
+                ultimo = await conn.fetchrow(
                     """
                     SELECT km_final FROM public.turnos
                     WHERE veiculo_id = $1::uuid AND status = 'concluido' AND km_final IS NOT NULL
                     ORDER BY data_fim DESC LIMIT 1;
                     """,
-                    veiculo_id
+                    veiculo_id,
                 )
-
-                if ultimo_turno and ultimo_turno["km_final"] is not None:
-                    km_final_anterior = Decimal(str(ultimo_turno["km_final"]))
-                    if km_inicial_decimal < km_final_anterior:
-                        # Retorna erro amigável sem limpar a máquina de estados FSM
+                if ultimo and ultimo["km_final"] is not None:
+                    km_anterior = Decimal(str(ultimo["km_final"]))
+                    if km_ini < km_anterior:
+                        km_ini_fmt = f"{float(km_ini):,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                        km_ant_fmt = f"{float(km_anterior):,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
                         return {
                             "sucesso": False,
-                            "erro": f"⚠️ *Odômetro Divergente!*\nO valor informado (*{float(km_inicial_decimal):.1f} km*) é menor que o odômetro final do último turno deste veículo (*{float(km_final_anterior):.1f} km*).\n\nPor favor, envie o **valor correto** atual do painel do seu veículo:",
-                            "tipo_erro": "ODOMETRO_DIVERGENTE"
+                            "erro": (
+                                f"⚠️ *Odômetro Divergente!*\n"
+                                f"O valor informado (*{km_ini_fmt} km*) é menor que o odômetro final do último turno "
+                                f"(*{km_ant_fmt} km*).\n\n"
+                                f"Por favor, envie o *valor correto* atual do painel do seu veículo:"
+                            ),
+                            "tipo_erro": "ODOMETRO_DIVERGENTE",
                         }
 
-                # 3. Insere o turno com carimbo de tempo oficial do fuso horário brasileiro
                 row = await conn.fetchrow(
                     """
                     INSERT INTO public.turnos (motorista_id, veiculo_id, km_inicial, status, data_inicio)
                     VALUES ($1::uuid, $2::uuid, $3, 'ABERTO', $4)
                     RETURNING id, km_inicial, data_inicio;
                     """,
-                    motorista_id, veiculo_id, km_inicial_decimal, agora_brasil()
+                    motorista_id, veiculo_id, km_ini, agora_brasil(),
                 )
-
                 return {
                     "sucesso": True,
                     "turno_id": str(row["id"]),
                     "km_inicial": float(row["km_inicial"]),
-                    "data_inicio": row["data_inicio"]
+                    "data_inicio": row["data_inicio"],
                 }
 
-        except Exception as e:
+        except Exception as exc:
             logger.exception("Erro crítico ao abrir turno.")
-            return {"sucesso": False, "erro": f"Erro interno ao abrir turno: {e}", "tipo_erro": "ERRO_INTERNO"}
+            return {"sucesso": False, "erro": f"Erro interno ao abrir turno: {exc}", "tipo_erro": "ERRO_INTERNO"}
 
     @staticmethod
     async def fechar_turno_com_dre(motorista_id: str, km_final: float) -> Dict[str, Any]:
         """
-        Encerra o turno ativo, realiza o Power Split da queima híbrida (Bateria/Eletricidade + Combustível Flex)
-        com base no CMP do estoque real, e gera o DRE Executivo do Turno.
+        Encerra o turno ativo e executa o algoritmo completo de fechamento contábil:
+
+          1. Valida monotonicidade estrita do odômetro (km_final >= km_inicial).
+          2. Calcula tempo operacional total e efetivo (bruto menos pausas acumuladas).
+          3. Power Split Híbrido (EV Priority):
+               - Fase 1: Queima da bateria elétrica (kWh) até esgotar autonomia ou km_restante.
+               - Fase 2: Queima do GNV (m³) se configurado.
+               - Fase 3: Queima do tanque único Flex com rendimento médio ponderado do blend.
+               - Fase 4: Fallback proporcional via ledger do turno se estoque JSONB zerado.
+          4. Atualiza o JSONB 'estoque_financeiro' do veículo com os volumes residuais.
+          5. Apura o DRE: faturamento bruto, custos variáveis (pista + queima amortizada),
+             rateio pro-rata de custo fixo contratual e lucro líquido real.
+          6. Persiste snapshot contábil na tabela 'fechamento_diario'.
         """
         try:
-            km_final_decimal = TurnoService._validar_km(km_final, "km_final")
+            km_fin = TurnoService._validar_km(km_final, "km_final")
         except ValueError as exc:
-            return {"sucesso": False, "erro": f"❌ {str(exc)}", "tipo_erro": "KM_INVALIDO"}
+            return {"sucesso": False, "erro": f"❌ {exc}", "tipo_erro": "KM_INVALIDO"}
 
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
-                # 1. Resgata os dados operacionais do turno, veículo e motorista
+
+                # ---------------------------------------------------------------
+                # 1. Resgata dados do turno ativo, veículo e motorista
+                # ---------------------------------------------------------------
                 turno = await conn.fetchrow(
                     """
-                    SELECT t.id, t.km_inicial, t.data_inicio, v.id as veiculo_id,
-                           v.estoque_financeiro, v.tipo_combustivel, v.is_flex, v.is_hibrido, v.is_eletrico, v.capacidade_tanque, v.capacidade_bateria,
-                           v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal, v.valor_km_excedente,
-                           v.escala_trabalho, v.contrato_personalizado, m.meta_mensal_faturamento, m.dias_uteis_mes
+                    SELECT
+                        t.id, t.km_inicial, t.data_inicio,
+                        v.id AS veiculo_id,
+                        v.estoque_financeiro, v.tipo_combustivel,
+                        v.is_flex, v.is_hibrido, v.is_eletrico,
+                        v.capacidade_tanque, v.capacidade_bateria,
+                        v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal,
+                        v.valor_km_excedente, v.escala_trabalho, v.contrato_personalizado,
+                        m.meta_mensal_faturamento, m.dias_uteis_mes
                     FROM public.turnos t
                     JOIN public.veiculos v ON v.id = t.veiculo_id
                     JOIN public.motoristas m ON m.id = t.motorista_id
-                    WHERE t.motorista_id = $1::uuid AND t.status IN ('ABERTO', 'em_andamento', 'em_pausa')
-                    ORDER BY t.data_inicio DESC LIMIT 1;
+                    WHERE t.motorista_id = $1::uuid
+                      AND t.status IN ('ABERTO', 'em_andamento', 'em_pausa')
+                    ORDER BY t.data_inicio DESC
+                    LIMIT 1;
                     """,
-                    motorista_id
+                    motorista_id,
                 )
 
                 if not turno:
                     return {
                         "sucesso": False,
                         "erro": "⚠️ Nenhum turno ativo em andamento foi localizado para este motorista.",
-                        "tipo_erro": "NENHUM_TURNO_ATIVO"
+                        "tipo_erro": "NENHUM_TURNO_ATIVO",
                     }
 
                 turno_id = str(turno["id"])
                 veiculo_id = str(turno["veiculo_id"])
-                km_inicial_decimal = Decimal(str(turno["km_inicial"]))
+                km_ini = Decimal(str(turno["km_inicial"]))
 
-                # Validação de odômetro final
-                if km_final_decimal < km_inicial_decimal:
+                # Validação de monotonicidade estrita do odômetro final
+                if km_fin < km_ini:
+                    km_fin_fmt = f"{float(km_fin):,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    km_ini_fmt = f"{float(km_ini):,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
                     return {
                         "sucesso": False,
-                        "erro": f"⚠️ *Odômetro Final Divergente!*\nO valor informado (*{float(km_final_decimal):.1f} km*) é inferior ao inicial registrado no início do turno (*{float(km_inicial_decimal):.1f} km*).\n\nPor favor, envie o **valor correto** atual do painel do seu veículo:",
-                        "tipo_erro": "ODOMETRO_DIVERGENTE"
+                        "erro": (
+                            f"⚠️ *Odômetro Final Divergente!*\n"
+                            f"O valor informado (*{km_fin_fmt} km*) é inferior ao odômetro inicial "
+                            f"(*{km_ini_fmt} km*).\n\n"
+                            f"Por favor, envie o *valor correto* atual do painel do seu veículo:"
+                        ),
+                        "tipo_erro": "ODOMETRO_DIVERGENTE",
                     }
 
-                km_rodados = km_final_decimal - km_inicial_decimal
-                hora_fim_real = agora_brasil()
+                km_rodados = km_fin - km_ini
+                hora_fim = agora_brasil()
 
-                # Encerra temporalmente o turno
+                # Marca o turno como concluído imediatamente (antes das queries analíticas)
                 await conn.execute(
                     "UPDATE public.turnos SET km_final = $1, data_fim = $2, status = 'concluido' WHERE id = $3::uuid;",
-                    km_final_decimal, hora_fim_real, turno_id
+                    km_fin, hora_fim, turno_id,
                 )
 
                 dt_inicio = turno["data_inicio"]
                 if dt_inicio.tzinfo is not None:
                     dt_inicio = dt_inicio.astimezone(TZ_BR)
 
-                # Cálculo de tempo operacional
-                tempo_total_min = max(Decimal("1"), Decimal(str(int((hora_fim_real - dt_inicio).total_seconds() / 60))))
-                pausas_row = await conn.fetchval(
-                    "SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(fim_pausa, CURRENT_TIMESTAMP) - inicio_pausa))/60), 0) FROM public.pausas_turno WHERE turno_id = $1::uuid;",
-                    turno_id
+                # ---------------------------------------------------------------
+                # 2. Cálculo de tempo operacional efetivo (bruto - pausas)
+                # ---------------------------------------------------------------
+                tempo_total_min = max(
+                    Decimal("1"),
+                    Decimal(str(int((hora_fim - dt_inicio).total_seconds() / 60))),
                 )
-                tempo_pausas_min = Decimal(str(int(pausas_row or 0)))
-                tempo_efetivo_min = max(Decimal("1.00"), tempo_total_min - tempo_pausas_min)
-                horas_trabalhadas = (tempo_efetivo_min / Decimal("60.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                pausas_val = await conn.fetchval(
+                    """
+                    SELECT COALESCE(
+                        SUM(EXTRACT(EPOCH FROM (COALESCE(fim_pausa, CURRENT_TIMESTAMP) - inicio_pausa)) / 60),
+                        0
+                    )
+                    FROM public.pausas_turno
+                    WHERE turno_id = $1::uuid;
+                    """,
+                    turno_id,
+                )
+                tempo_pausas_min = Decimal(str(int(pausas_val or 0)))
+                tempo_efetivo_min = max(Decimal("1"), tempo_total_min - tempo_pausas_min)
+                horas_trabalhadas = (tempo_efetivo_min / Decimal("60")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
 
-                # 2. LÓGICA DE QUEIMA HÍBRIDA MULTI-SOURCE DE ENERGIA (Power Split)
-                estoque_raw = turno["estoque_financeiro"]
-                estoque = json.loads(estoque_raw) if isinstance(estoque_raw, str) else (estoque_raw or {})
-                
-                # Garante chaves padronizadas de estoque
-                if "liquido" not in estoque:
-                    estoque["liquido"] = {
-                        "litros": 0.0,
-                        "custo_total": 0.0,
-                        "gasolina_litros": 0.0,
-                        "etanol_litros": 0.0,
-                        "gasolina_proporcao": 1.0,
-                        "etanol_proporcao": 0.0,
-                        "km_l_gasolina": 12.0,
-                        "km_l_etanol": 8.5
-                    }
-                if "eletricidade" not in estoque:
-                    estoque["eletricidade"] = {
-                        "kwh": 0.0,
-                        "custo_total": 0.0,
-                        "km_kwh": 6.5
-                    }
+                # ---------------------------------------------------------------
+                # 3. Power Split Híbrido — Queima Multi-Energia (EV Priority)
+                # ---------------------------------------------------------------
+                raw_est = turno["estoque_financeiro"]
+                estoque: dict = json.loads(raw_est) if isinstance(raw_est, str) else (raw_est or {})
+                estoque = TurnoService._garantir_estrutura_estoque(estoque)
 
                 custo_combustivel_queimado = Decimal("0.00")
-                total_unidades_queimadas_liq = Decimal("0.00")
-                total_unidades_queimadas_ele = Decimal("0.00")
-                detalhe_queima = []
-
+                unidades_queimadas_liq = Decimal("0.00")
+                unidades_queimadas_ele = Decimal("0.00")
+                unidades_queimadas_gnv = Decimal("0.00")
+                detalhe_queima: list[str] = []
                 km_restante = km_rodados
 
-                # 2.1. SE FOR HÍBRIDO OU ELÉTRICO: Prioriza consumo da bateria elétrica (EV Mode / Solar CMP)
-                if (turno["is_hibrido"] or turno["is_eletrico"]) and km_restante > 0:
+                # --- 3.1 Fase Elétrica (EV Priority) ---
+                if (turno["is_hibrido"] or turno["is_eletrico"]) and km_restante > Decimal("0"):
                     eletro = estoque["eletricidade"]
-                    kwh_disponivel = Decimal(str(eletro.get("kwh", 0.0)))
-                    custo_bateria = Decimal(str(eletro.get("custo_total", 0.0)))
-                    km_kwh_rendimento = Decimal(str(eletro.get("km_kwh", 6.5)))
+                    kwh_disp = Decimal(str(eletro.get("kwh", 0.0)))
+                    custo_bat = Decimal(str(eletro.get("custo_total", 0.0)))
+                    km_kwh = Decimal(str(eletro.get("km_kwh", 6.5)))
 
-                    if kwh_disponivel > 0 and km_kwh_rendimento > 0:
-                        # CMP por kWh (Se carregou com solar em casa a custo zero, o custo unitário será menor!)
-                        custo_medio_kwh = custo_bateria / kwh_disponivel
-                        kwh_necessarios = km_restante / km_kwh_rendimento
-                        kwh_queimados = min(kwh_disponivel, kwh_necessarios)
-                        
-                        custo_queimado_bateria = kwh_queimados * custo_medio_kwh
-                        custo_combustivel_queimado += custo_queimado_bateria
-                        total_unidades_queimadas_ele += kwh_queimados
-                        km_restante -= (kwh_queimados * km_kwh_rendimento)
+                    if kwh_disp > Decimal("0") and km_kwh > Decimal("0"):
+                        cmp_kwh = custo_bat / kwh_disp
+                        kwh_necessarios = km_restante / km_kwh
+                        kwh_queimados = min(kwh_disp, kwh_necessarios)
+                        custo_bat_queimado = (kwh_queimados * cmp_kwh).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP
+                        )
 
-                        # Updates no dicionário do Redis/JSONB
-                        eletro["kwh"] = float((kwh_disponivel - kwh_queimados).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                        eletro["custo_total"] = float(max(Decimal("0.00"), custo_bateria - custo_queimado_bateria).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                        detalhe_queima.append(f"Elétrico: {float(kwh_queimados):.1f} kWh (R$ {float(custo_queimado_bateria):.2f})")
+                        custo_combustivel_queimado += custo_bat_queimado
+                        unidades_queimadas_ele += kwh_queimados
+                        km_restante -= (kwh_queimados * km_kwh)
 
-                # 2.2. CONSUMO DE LÍQUIDO (Se restou KM para queimar ou se é veículo combustão/Flex)
-                if km_restante > 0 and not turno["is_eletrico"]:
+                        eletro["kwh"] = float(
+                            max(Decimal("0"), kwh_disp - kwh_queimados).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        )
+                        eletro["custo_total"] = float(
+                            max(Decimal("0"), custo_bat - custo_bat_queimado).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        )
+                        detalhe_queima.append(
+                            f"Elétrico: {float(kwh_queimados):.1f} kWh (R$ {float(custo_bat_queimado):.2f})"
+                        )
+
+                # --- 3.2 Fase GNV ---
+                tipo_comb = (turno["tipo_combustivel"] or "").lower()
+                if tipo_comb == "gnv" and km_restante > Decimal("0"):
+                    gnv = estoque["gnv"]
+                    m3_disp = Decimal(str(gnv.get("m3", 0.0)))
+                    custo_gnv = Decimal(str(gnv.get("custo_total", 0.0)))
+                    km_m3 = Decimal(str(gnv.get("km_m3", 14.0)))
+
+                    if m3_disp > Decimal("0") and km_m3 > Decimal("0"):
+                        cmp_m3 = custo_gnv / m3_disp
+                        m3_necessarios = km_restante / km_m3
+                        m3_queimados = min(m3_disp, m3_necessarios)
+                        custo_gnv_queimado = (m3_queimados * cmp_m3).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP
+                        )
+
+                        custo_combustivel_queimado += custo_gnv_queimado
+                        unidades_queimadas_gnv += m3_queimados
+                        km_restante -= (m3_queimados * km_m3)
+
+                        gnv["m3"] = float(
+                            max(Decimal("0"), m3_disp - m3_queimados).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        )
+                        gnv["custo_total"] = float(
+                            max(Decimal("0"), custo_gnv - custo_gnv_queimado).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        )
+                        detalhe_queima.append(
+                            f"GNV: {float(m3_queimados):.1f} m³ (R$ {float(custo_gnv_queimado):.2f})"
+                        )
+
+                # --- 3.3 Fase Combustão Líquida (Flex) ---
+                if km_restante > Decimal("0") and not turno["is_eletrico"] and tipo_comb != "gnv":
                     liq = estoque["liquido"]
                     total_litros = Decimal(str(liq.get("litros", 0.0)))
-                    custo_total_liq = Decimal(str(liq.get("custo_total", 0.0)))
+                    custo_liq = Decimal(str(liq.get("custo_total", 0.0)))
 
-                    if total_litros > 0:
+                    if total_litros > Decimal("0"):
                         km_l_gas = Decimal(str(liq.get("km_l_gasolina", 12.0)))
                         km_l_eta = Decimal(str(liq.get("km_l_etanol", 8.5)))
                         p_gas = Decimal(str(liq.get("gasolina_proporcao", 1.0)))
                         p_eta = Decimal(str(liq.get("etanol_proporcao", 0.0)))
 
-                        # Rendimento médio ponderado da mistura no tanque único
+                        # Rendimento médio ponderado do blend atual no tanque único
                         km_l_medio = (p_gas * km_l_gas) + (p_eta * km_l_eta)
-                        if km_l_medio <= 0:
+                        if km_l_medio <= Decimal("0"):
                             km_l_medio = Decimal("10.0")
 
                         litros_necessarios = km_restante / km_l_medio
                         litros_queimados = min(total_litros, litros_necessarios)
 
-                        # Divide a queima proporcionalmente entre gasolina e etanol do tanque único
+                        # Queima proporcional entre gasolina e etanol do blend
                         gas_queimado = litros_queimados * p_gas
                         eta_queimado = litros_queimados * p_eta
 
-                        # Computa amortização pelos respectivos Custos Médios Ponderados (CMP)
-                        custo_liquido_queimado = (custo_total_liq / total_litros) * litros_queimados
-                        custo_combustivel_queimado += custo_liquido_queimado
-                        total_unidades_queimadas_liq += litros_queimados
+                        # Amortização pelo CMP do tanque
+                        cmp_liq = custo_liq / total_litros
+                        custo_liq_queimado = (litros_queimados * cmp_liq).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP
+                        )
+
+                        custo_combustivel_queimado += custo_liq_queimado
+                        unidades_queimadas_liq += litros_queimados
                         km_restante -= (litros_queimados * km_l_medio)
 
-                        # Atualiza estoques de sub-combustíveis
-                        novo_gas_litros = max(Decimal("0.00"), Decimal(str(liq.get("gasolina_litros", 0.0))) - gas_queimado)
-                        novo_eta_litros = max(Decimal("0.00"), Decimal(str(liq.get("etanol_litros", 0.0))) - eta_queimado)
-                        novo_total_litros = novo_gas_litros + novo_eta_litros
+                        novo_gas = max(Decimal("0"), Decimal(str(liq.get("gasolina_litros", 0.0))) - gas_queimado)
+                        novo_eta = max(Decimal("0"), Decimal(str(liq.get("etanol_litros", 0.0))) - eta_queimado)
+                        novo_total = novo_gas + novo_eta
 
-                        liq["gasolina_litros"] = float(novo_gas_litros.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                        liq["etanol_litros"] = float(novo_eta_litros.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                        liq["litros"] = float(novo_total_litros.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                        liq["custo_total"] = float(max(Decimal("0.00"), custo_total_liq - custo_liquido_queimado).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                        
-                        # Recalcula as proporções do restante
-                        if novo_total_litros > 0:
-                            liq["gasolina_proporcao"] = float((novo_gas_litros / novo_total_litros).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
-                            liq["etanol_proporcao"] = float((novo_eta_litros / novo_total_litros).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+                        liq["gasolina_litros"] = float(novo_gas.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                        liq["etanol_litros"] = float(novo_eta.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                        liq["litros"] = float(novo_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                        liq["custo_total"] = float(
+                            max(Decimal("0"), custo_liq - custo_liq_queimado).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        )
+                        # Recalcula proporções do blend residual
+                        if novo_total > Decimal("0"):
+                            liq["gasolina_proporcao"] = float(
+                                (novo_gas / novo_total).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                            )
+                            liq["etanol_proporcao"] = float(
+                                (novo_eta / novo_total).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                            )
                         else:
                             liq["gasolina_proporcao"] = 1.0
                             liq["etanol_proporcao"] = 0.0
 
-                        detalhe_queima.append(f"Combustão: {float(litros_queimados):.1f} L (R$ {float(custo_liquido_queimado):.2f})")
-
-                # Se o estoque virtual estava zerado e ainda restou KM para queimar, usa fallbacks.
-                # ATENÇÃO: Este caminho indica deriva de estoque — o JSONB não foi atualizado corretamente
-                # em algum abastecimento anterior. O custo aqui é uma ESTIMATIVA, não um CMP real.
-                if km_restante > 0:
-                    total_abastecido_turno_val = await conn.fetchval(
-                        "SELECT COALESCE(SUM(valor), 0.0000) FROM public.transacoes WHERE motorista_id = $1::uuid AND turno_id = $2::uuid AND categoria = 'combustivel' AND estornado = FALSE;",
-                        motorista_id, turno_id
-                    )
-                    total_abastecido_turno_fallback = Decimal(str(total_abastecido_turno_val or "0.00"))
-
-                    if total_abastecido_turno_fallback > 0:
-                        # Estima a proporção do abastecimento consumida com base na km restante vs km total do turno.
-                        # Se km_rodados == 0, usa 100% como custo conservador.
-                        proporcao_consumida = (km_restante / km_rodados) if km_rodados > 0 else Decimal("1.00")
-                        proporcao_consumida = min(Decimal("1.00"), proporcao_consumida)
-                        custo_estimado = (total_abastecido_turno_fallback * proporcao_consumida).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                        custo_combustivel_queimado += custo_estimado
-                        logger.warning(
-                            f"[Fallback CMP] Motorista {motorista_id}: estoque JSONB zerado com {km_restante:.1f} km restantes. "
-                            f"Estimativa proporcional de combustível: R$ {float(custo_estimado):.2f} ({float(proporcao_consumida)*100:.0f}% de R$ {float(total_abastecido_turno_fallback):.2f})."
+                        detalhe_queima.append(
+                            f"Combustão: {float(litros_queimados):.1f} L (R$ {float(custo_liq_queimado):.2f})"
                         )
-                        detalhe_queima.append(f"Estimativa Combustível: R$ {float(custo_estimado):.2f}")
-                    else:
-                        # Nenhum abastecimento registrado no ledger — usa custo por km padrão como último recurso
-                        custo_estimado = (km_restante * Decimal("0.48")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                        custo_combustivel_queimado += custo_estimado
-                        detalhe_queima.append(f"Custo Estimado (sem estoque): R$ {float(custo_estimado):.2f}")
 
-                # Salva o estoque total recalculado
+                # --- 3.4 Fallback: estoque JSONB zerado — estimativa proporcional via ledger ---
+                if km_restante > Decimal("0"):
+                    abast_val = await conn.fetchval(
+                        """
+                        SELECT COALESCE(SUM(valor), 0.0000)
+                        FROM public.transacoes
+                        WHERE motorista_id = $1::uuid AND turno_id = $2::uuid
+                          AND categoria = 'combustivel' AND estornado = FALSE;
+                        """,
+                        motorista_id, turno_id,
+                    )
+                    abast_total = Decimal(str(abast_val or "0.00"))
+
+                    if abast_total > Decimal("0"):
+                        # Estima proporção do custo com base na km restante vs km total
+                        prop = (km_restante / km_rodados) if km_rodados > Decimal("0") else Decimal("1")
+                        prop = min(Decimal("1"), prop)
+                        custo_est = (abast_total * prop).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        custo_combustivel_queimado += custo_est
+                        logger.warning(
+                            "[Fallback CMP] Motorista %s: estoque JSONB zerado com %.1f km restantes. "
+                            "Estimativa proporcional: R$ %.2f (%.0f%% de R$ %.2f).",
+                            motorista_id, float(km_restante),
+                            float(custo_est), float(prop) * 100, float(abast_total),
+                        )
+                        detalhe_queima.append(f"Estimativa Combustível: R$ {float(custo_est):.2f}")
+                    else:
+                        # Nenhum abastecimento registrado — custo por km padrão de mercado
+                        custo_est = (km_restante * Decimal("0.48")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        custo_combustivel_queimado += custo_est
+                        detalhe_queima.append(f"Custo Estimado (sem estoque): R$ {float(custo_est):.2f}")
+
+                # Persiste o estoque atualizado
                 await conn.execute(
                     "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
-                    json.dumps(estoque), veiculo_id
+                    json.dumps(estoque), veiculo_id,
                 )
 
-                # 3. APURAÇÃO CONTÁBIL E EXTRAÇÃO DE DESPESAS DETALHADAS DO TURNO
-                financeiro = await conn.fetchrow(
-                    "SELECT "
-                    "    COALESCE(SUM(CASE WHEN tipo_movimentacao = 'receita' THEN valor ELSE 0 END), 0.0000) as faturamento, "
-                    "    COALESCE(SUM(CASE WHEN tipo_movimentacao = 'despesa' AND categoria != 'combustivel' THEN valor ELSE 0 END), 0.0000) as despesas_operacionais, "
-                    "    COALESCE(SUM(CASE WHEN tipo_movimentacao = 'despesa' AND categoria = 'combustivel' THEN valor ELSE 0 END), 0.0000) as total_abastecido "
-                    "FROM public.transacoes "
-                    "WHERE motorista_id = $1::uuid AND (turno_id = $2::uuid OR (turno_id IS NULL AND data_transacao >= $3)) AND estornado = FALSE;",
-                    motorista_id, turno_id, dt_inicio
+                # ---------------------------------------------------------------
+                # 4. Apuração contábil do DRE
+                # ---------------------------------------------------------------
+                fin = await conn.fetchrow(
+                    """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN tipo_movimentacao = 'receita' THEN valor ELSE 0 END), 0.0000) AS faturamento,
+                        COALESCE(SUM(CASE WHEN tipo_movimentacao = 'despesa' AND categoria != 'combustivel' THEN valor ELSE 0 END), 0.0000) AS outras_despesas,
+                        COALESCE(SUM(CASE WHEN tipo_movimentacao = 'despesa' AND categoria = 'combustivel' THEN valor ELSE 0 END), 0.0000) AS total_abastecido
+                    FROM public.transacoes
+                    WHERE motorista_id = $1::uuid
+                      AND (turno_id = $2::uuid OR (turno_id IS NULL AND data_transacao >= $3))
+                      AND estornado = FALSE;
+                    """,
+                    motorista_id, turno_id, dt_inicio,
                 )
 
-                faturamento_bruto = Decimal(str(financeiro["faturamento"]))
-                outras_despesas_variaveis = Decimal(str(financeiro["despesas_operacionais"]))
-                total_abastecido_turno = Decimal(str(financeiro["total_abastecido"]))
-                
-                # Custo variável total da jornada compreende despesas de pista + custo amortizado da queima multi-energia
-                custo_variavel_total = outras_despesas_variaveis + custo_combustivel_queimado
+                faturamento_bruto = Decimal(str(fin["faturamento"]))
+                outras_despesas = Decimal(str(fin["outras_despesas"]))
+                total_abastecido_turno = Decimal(str(fin["total_abastecido"]))
 
-                # Busca da listagem detalhada de despesas individuais para transparência de fechamento
+                # Custo variável total = despesas de pista + custo amortizado de queima
+                custo_variavel_total = outras_despesas + custo_combustivel_queimado
+
+                # Detalhamento individual das despesas para o DRE
                 despesas_lista = await conn.fetch(
-                    "SELECT categoria, valor, descricao "
-                    "FROM public.transacoes "
-                    "WHERE motorista_id = $1::uuid AND (turno_id = $2::uuid OR (turno_id IS NULL AND data_transacao >= $3)) "
-                    "  AND tipo_movimentacao = 'despesa' AND estornado = FALSE "
-                    "ORDER BY data_transacao ASC;",
-                    motorista_id, turno_id, dt_inicio
+                    """
+                    SELECT categoria, valor, descricao
+                    FROM public.transacoes
+                    WHERE motorista_id = $1::uuid
+                      AND (turno_id = $2::uuid OR (turno_id IS NULL AND data_transacao >= $3))
+                      AND tipo_movimentacao = 'despesa' AND estornado = FALSE
+                    ORDER BY data_transacao ASC;
+                    """,
+                    motorista_id, turno_id, dt_inicio,
                 )
-
-                despesas_detalhadas = []
-                for d in despesas_lista:
-                    despesas_detalhadas.append({
+                despesas_detalhadas = [
+                    {
                         "categoria": d["categoria"],
                         "descricao_original": d["descricao"] or d["categoria"].replace("_", " ").capitalize(),
-                        "valor": float(d["valor"])
-                    })
+                        "valor": float(d["valor"]),
+                    }
+                    for d in despesas_lista
+                ]
 
-                # 4. ENGENHARIA DE CUSTO FIXO CONTRATUAL PRO-RATA (Localiza Zarp fallback)
-                custo_aluguel_semanal = Decimal(str(turno["custo_aluguel_semanal"] or "1020.85"))
-                custo_fixo_rateado = (custo_aluguel_semanal / Decimal("6.00")).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
-
-                # Pro-rata extra de despesas fixas cadastradas pelo motorista
+                # ---------------------------------------------------------------
+                # 5. Custo Fixo Contratual Pro-Rata (Aluguel / Locadora)
+                # ---------------------------------------------------------------
+                aluguel_semanal = Decimal(str(turno["custo_aluguel_semanal"] or "1020.85"))
+                custo_fixo_rateado = (aluguel_semanal / Decimal("6")).quantize(
+                    Decimal("0.02"), rounding=ROUND_HALF_UP
+                )
                 df_extra = await conn.fetchval(
                     "SELECT COALESCE(SUM(valor_pro_rata_diario), 0.0000) FROM public.despesas_fixas_mensais WHERE motorista_id = $1::uuid AND ativo = TRUE;",
-                    motorista_id
+                    motorista_id,
                 )
                 custo_fixo_total = custo_fixo_rateado + Decimal(str(df_extra or "0.00"))
 
-                # 5. DRE COMPLETO E LÓGICA DE PROVISÃO
-                lucro_liquido_real = faturamento_bruto - custo_variavel_total - custo_fixo_total
+                # ---------------------------------------------------------------
+                # 6. DRE Final
+                # ---------------------------------------------------------------
+                lucro_liquido = faturamento_bruto - custo_variavel_total - custo_fixo_total
 
-                # Indicadores de eficiência e produtividade
-                ganho_por_km = (faturamento_bruto / km_rodados) if km_rodados > 0 else Decimal("0.00")
-                custo_por_km = (custo_variavel_total + custo_fixo_total) / km_rodados if km_rodados > 0 else Decimal("0.00")
-                lucro_por_km = (lucro_liquido_real / km_rodados) if km_rodados > 0 else Decimal("0.00")
-                ganho_por_hora = (faturamento_bruto / horas_trabalhadas) if horas_trabalhadas > 0 else Decimal("0.00")
+                ganho_por_km = (faturamento_bruto / km_rodados) if km_rodados > Decimal("0") else Decimal("0")
+                custo_por_km = ((custo_variavel_total + custo_fixo_total) / km_rodados) if km_rodados > Decimal("0") else Decimal("0")
+                lucro_por_km = (lucro_liquido / km_rodados) if km_rodados > Decimal("0") else Decimal("0")
+                ganho_por_hora = (faturamento_bruto / horas_trabalhadas) if horas_trabalhadas > Decimal("0") else Decimal("0")
 
                 meta_mensal = Decimal(str(turno["meta_mensal_faturamento"] or "12000.00"))
                 dias_uteis = int(turno["dias_uteis_mes"] or 26)
 
-                # Rendimento contábil final de Km por Litro / kWh do turno (Ponderado se híbrido)
-                total_unidades_queimadas = total_unidades_queimadas_liq + total_unidades_queimadas_ele
-                km_por_unidade = (km_rodados / total_unidades_queimadas) if total_unidades_queimadas > 0 else Decimal("0.00")
+                total_unidades = unidades_queimadas_liq + unidades_queimadas_ele + unidades_queimadas_gnv
+                km_por_unidade = (km_rodados / total_unidades) if total_unidades > Decimal("0") else Decimal("0")
 
-                # Persiste o snapshot contábil na tabela fechamento_diario
+                # Persiste snapshot contábil
                 await conn.execute(
-                    "INSERT INTO public.fechamento_diario ("
-                    "    motorista_id, turno_id, faturamento_bruto, custo_variavel_direto, "
-                    "    custo_fixo_rateado, lucro_liquido_real, km_rodados, data_fechamento"
-                    ") VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, CURRENT_DATE);",
-                    motorista_id, turno_id, faturamento_bruto, custo_variavel_total,
-                    custo_fixo_total, lucro_liquido_real, km_rodados
+                    """
+                    INSERT INTO public.fechamento_diario
+                        (motorista_id, turno_id, faturamento_bruto, custo_variavel_direto,
+                         custo_fixo_rateado, lucro_liquido_real, km_rodados, data_fechamento)
+                    VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, CURRENT_DATE);
+                    """,
+                    motorista_id, turno_id,
+                    faturamento_bruto, custo_variavel_total,
+                    custo_fixo_total, lucro_liquido, km_rodados,
                 )
 
             return {
                 "sucesso": True,
                 "turno_id": turno_id,
-                "data_inicio": dt_inicio.strftime('%d/%m/%Y %H:%M'),
-                "data_fim": hora_fim_real.strftime('%d/%m/%Y %H:%M'),
-                "km_inicial": float(km_inicial_decimal),
-                "km_final": float(km_final_decimal),
+                "data_inicio": dt_inicio.strftime("%d/%m/%Y %H:%M"),
+                "data_fim": hora_fim.strftime("%d/%m/%Y %H:%M"),
+                "km_inicial": float(km_ini),
+                "km_final": float(km_fin),
                 "km_rodados": float(km_rodados),
                 "tempo_total_min": int(tempo_total_min),
                 "tempo_pausas_min": int(tempo_pausas_min),
@@ -397,15 +532,15 @@ class TurnoService:
                 "faturamento_bruto": float(faturamento_bruto),
                 "custo_combustivel_queimado": float(custo_combustivel_queimado),
                 "total_abastecido_turno": float(total_abastecido_turno),
-                "outras_despesas_variaveis": float(outras_despesas_variaveis),
+                "outras_despesas_variaveis": float(outras_despesas),
                 "custo_variavel": float(custo_variavel_total),
                 "custo_fixo_rateado": float(custo_fixo_total),
-                "lucro_liquido_real": float(lucro_liquido_real),
+                "lucro_liquido_real": float(lucro_liquido),
                 "ganho_por_km": float(ganho_por_km),
                 "custo_por_km": float(custo_por_km),
                 "lucro_por_km": float(lucro_por_km),
                 "ganho_por_hora": float(ganho_por_hora),
-                "km_por_litro": float(km_por_unidade), # Retorna a média de consumo ponderada do turno
+                "km_por_litro": float(km_por_unidade),
                 "meta_mensal": float(meta_mensal),
                 "dias_uteis": dias_uteis,
                 "locadora": turno["locadora"] or "Localiza Zarp",
@@ -414,22 +549,21 @@ class TurnoService:
                 "valor_km_excedente": float(turno["valor_km_excedente"] or 0.75),
                 "contrato_personalizado": bool(turno["contrato_personalizado"]),
                 "detalhe_queima": " | ".join(detalhe_queima),
-                "despesas_detalhadas": despesas_detalhadas
+                "despesas_detalhadas": despesas_detalhadas,
             }
 
-        except Exception as e:
+        except Exception as exc:
             logger.exception("Falha na consolidação diária do turno.")
-            return {"sucesso": False, "erro": f"Erro interno de processamento: {e}", "tipo_erro": "ERRO_INTERNO"}
+            return {"sucesso": False, "erro": f"Erro interno de processamento: {exc}", "tipo_erro": "ERRO_INTERNO"}
 
     @staticmethod
     async def pausar_turno(motorista_id: str) -> Dict[str, Any]:
-        """Aplica interrupção operacional (Pausa) na jornada de trabalho e insere na tabela pausas_turno."""
+        """Aplica interrupção operacional na jornada de trabalho e registra na tabela pausas_turno."""
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
-                    # Aceita 'ABERTO' (abertura inicial) e 'em_andamento' (retomada de pausa anterior)
-                    "SELECT id, status FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento') ORDER BY data_inicio DESC LIMIT 1;",
-                    motorista_id
+                    "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento') ORDER BY data_inicio DESC LIMIT 1;",
+                    motorista_id,
                 )
                 if not turno:
                     return {"sucesso": False, "erro": "❌ Não encontramos nenhuma jornada em andamento aberta para pausar."}
@@ -438,55 +572,56 @@ class TurnoService:
                 await conn.execute("UPDATE public.turnos SET status = 'em_pausa' WHERE id = $1::uuid;", turno_id)
                 await conn.execute(
                     "INSERT INTO public.pausas_turno (turno_id, motivo, inicio_pausa) VALUES ($1::uuid, 'Pausa Operacional', $2);",
-                    turno_id, agora_brasil()
+                    turno_id, agora_brasil(),
                 )
             return {"sucesso": True}
-        except Exception as e:
-            return {"sucesso": False, "erro": str(e)}
+        except Exception as exc:
+            return {"sucesso": False, "erro": str(exc)}
 
     @staticmethod
     async def retomar_turno(motorista_id: str) -> Dict[str, Any]:
-        """Finaliza a pausa aberta do turno ativo, calculando o tempo decorrido no fuso brasileiro."""
+        """Finaliza a pausa aberta do turno e seta status 'em_andamento'."""
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
-                    "SELECT id, status FROM public.turnos WHERE motorista_id = $1::uuid AND status = 'em_pausa' ORDER BY data_inicio DESC LIMIT 1;",
-                    motorista_id
+                    "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status = 'em_pausa' ORDER BY data_inicio DESC LIMIT 1;",
+                    motorista_id,
                 )
                 if not turno:
                     return {"sucesso": False, "erro": "❌ Não encontramos nenhuma jornada em pausa registrada no momento."}
 
                 turno_id = str(turno["id"])
-                # Seta 'em_andamento' (não 'ABERTO') para distinguir turnos retomados de turnos recém-abertos
                 await conn.execute("UPDATE public.turnos SET status = 'em_andamento' WHERE id = $1::uuid;", turno_id)
                 await conn.execute(
                     "UPDATE public.pausas_turno SET fim_pausa = $1 WHERE turno_id = $2::uuid AND fim_pausa IS NULL;",
-                    agora_brasil(), turno_id
+                    agora_brasil(), turno_id,
                 )
             return {"sucesso": True}
-        except Exception as e:
-            return {"sucesso": False, "erro": str(e)}
+        except Exception as exc:
+            return {"sucesso": False, "erro": str(exc)}
 
     @staticmethod
     async def verificar_transacoes_turno(motorista_id: str) -> int:
-        """Verifica se o motorista registrou lançamentos (faturamento ou despesa) durante a jornada atual (Read-Only)."""
+        """Verifica se há lançamentos no turno ativo (Read-Only). Retorna a contagem ou 1 em caso de erro."""
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
                     "SELECT id, data_inicio FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
-                    motorista_id
+                    motorista_id,
                 )
                 if not turno:
                     return 0
-
                 turno_id = str(turno["id"])
                 dt_inicio = turno["data_inicio"]
-
                 row = await conn.fetchrow(
-                    "SELECT COUNT(*) as total FROM public.transacoes "
-                    "WHERE motorista_id = $1::uuid AND (turno_id = $2::uuid OR (turno_id IS NULL AND data_transacao >= $3)) AND estornado = FALSE;",
-                    motorista_id, turno_id, dt_inicio
+                    """
+                    SELECT COUNT(*) AS total FROM public.transacoes
+                    WHERE motorista_id = $1::uuid
+                      AND (turno_id = $2::uuid OR (turno_id IS NULL AND data_transacao >= $3))
+                      AND estornado = FALSE;
+                    """,
+                    motorista_id, turno_id, dt_inicio,
                 )
                 return int(row["total"]) if row else 0
         except Exception:
-            return 1 # Fallback conservador para evitar loop
+            return 1  # Fallback conservador: não fecha sem aviso

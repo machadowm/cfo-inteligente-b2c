@@ -1,66 +1,111 @@
-import os
 import re
 import json
 import logging
 import hashlib
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, Any, Optional
+
 import asyncpg
+
 from services.database_service import DatabaseService
 
 logger = logging.getLogger(__name__)
 
+
 class TransacaoService:
     """
-    Serviço Financeiro (Ledger) de Alta Precisão (Decimal).
-    Oferece suporte a carregamento e abastecimento dinâmico de veículos Híbridos,
-    Flex de tanque único (blend homogêneo) e recargas elétricas (incluindo carregamento solar em casa com custo zero).
+    Ledger Financeiro de Alta Precisão (Decimal).
+
+    Implementa a Dicotomia Estoque vs. Queima (Regime de Caixa para abastecimentos
+    e Regime de Competência para queima no fechamento do turno):
+      - Abastecimento: converte o valor pago em volume físico e atualiza o JSONB
+        'estoque_financeiro' com recálculo de CMP. O valor NÃO entra no DRE como
+        despesa imediata.
+      - Consumo: amortização calculada no fechamento do turno por TurnoService.
+
+    Suporte multi-energia: tanque único Flex (blend gasolina/etanol), elétrico (kWh),
+    GNV (m³) e híbrido (EV Priority).
     """
+
     _TIPOS_MOVIMENTACAO_VALIDOS = {"receita", "despesa"}
     _PRECO_MEDIO_LITRO_FALLBACK = Decimal("5.85")
     _PRECO_MEDIO_KWH_FALLBACK = Decimal("1.20")
+    _PRECO_MEDIO_M3_GNV_FALLBACK = Decimal("4.50")
+
+    # ------------------------------------------------------------------ helpers
 
     @staticmethod
-    def _normalizar_tipo_movimentacao(tipo_movimentacao: str) -> str:
-        return tipo_movimentacao.strip().lower()
+    def _normalizar_tipo(tipo: str) -> str:
+        return tipo.strip().lower()
 
     @staticmethod
-    def _validar_tipo_movimentacao(tipo_movimentacao: str) -> str:
-        tipo_normalizado = TransacaoService._normalizar_tipo_movimentacao(tipo_movimentacao)
-        if tipo_normalizado not in TransacaoService._TIPOS_MOVIMENTACAO_VALIDOS:
-            raise ValueError("O tipo de movimentação deve ser 'receita' ou 'despesa'.")
-        return tipo_normalizado
+    def _validar_tipo(tipo: str) -> str:
+        t = TransacaoService._normalizar_tipo(tipo)
+        if t not in TransacaoService._TIPOS_MOVIMENTACAO_VALIDOS:
+            raise ValueError("Tipo de movimentação deve ser 'receita' ou 'despesa'.")
+        return t
 
     @staticmethod
     def _validar_valor(valor: float, permitir_zero: bool = False) -> Decimal:
         try:
-            valor_decimal = Decimal(str(valor))
+            d = Decimal(str(valor))
         except (InvalidOperation, ValueError) as exc:
             raise ValueError("Valor financeiro mal formatado.") from exc
-
         if permitir_zero:
-            if valor_decimal < 0:
+            if d < Decimal("0"):
                 raise ValueError("O valor financeiro não pode ser negativo.")
         else:
-            if valor_decimal <= 0:
-                raise ValueError("O valor financeiro deve ser estritamente maior que zero.")
+            if d <= Decimal("0"):
+                raise ValueError("O valor financeiro deve ser maior que zero.")
+        return d
 
-        return valor_decimal
+    @staticmethod
+    def _garantir_estrutura_estoque(estoque: dict) -> dict:
+        """
+        Garante que todas as chaves estruturais do JSONB multi-energia existam,
+        preenchendo com valores neutros para não quebrar operações de leitura.
+        """
+        if "liquido" not in estoque:
+            estoque["liquido"] = {
+                "litros": 0.0,
+                "custo_total": 0.0,
+                "gasolina_litros": 0.0,
+                "etanol_litros": 0.0,
+                "gasolina_proporcao": 1.0,
+                "etanol_proporcao": 0.0,
+                "km_l_gasolina": 12.0,
+                "km_l_etanol": 8.5,
+            }
+        if "eletricidade" not in estoque:
+            estoque["eletricidade"] = {
+                "kwh": 0.0,
+                "custo_total": 0.0,
+                "km_kwh": 6.5,
+            }
+        if "gnv" not in estoque:
+            estoque["gnv"] = {
+                "m3": 0.0,
+                "custo_total": 0.0,
+                "km_m3": 14.0,
+            }
+        return estoque
 
     @staticmethod
     def _mapear_erro_postgres(exc: Exception) -> Dict[str, Any]:
-        mensagem = str(exc)
-        if "PERIODO_FECHADO" in mensagem:
+        msg = str(exc)
+        if "PERIODO_FECHADO" in msg:
             return {
                 "status": "error",
-                "message": "⚠️ O período contábil já foi consolidado e trancado pela contabilidade. Não são permitidas alterações retroativas.",
-                "error_code": "PERIODO_FECHADO"
+                "message": "⚠️ O período contábil já foi consolidado. Não são permitidas alterações retroativas.",
+                "error_code": "PERIODO_FECHADO",
             }
         return {
             "status": "error",
-            "message": f"Falha na integridade do cofre contábil: {mensagem}",
-            "error_code": "ERRO_BANCO"
+            "message": f"Falha na integridade do cofre contábil: {msg}",
+            "error_code": "ERRO_BANCO",
         }
+
+    # ------------------------------------------------------------------ público
 
     @staticmethod
     async def registrar_transacao(
@@ -69,202 +114,285 @@ class TransacaoService:
         categoria: str,
         valor: float,
         descricao: Optional[str] = None,
-        wpp_msg_id: Optional[str] = None
+        wpp_msg_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Registra receitas e despesas. Se for abastecimento/recarga (combustível),
-        calcula dinamicamente a queima, a mistura no tanque ou carga da bateria sob limites físicos.
+        Registra uma receita ou despesa no ledger.
+
+        Para despesas do tipo 'combustivel':
+          1. Identifica o sub-estoque correto (líquido, elétrico ou GNV).
+          2. Valida a Barreira de Estanqueidade Física (não ultrapassa capacidade do tanque/bateria).
+          3. Extrai o volume físico da descrição (litros, kWh, m³) ou estima via CMP de fallback.
+          4. Executa o blend Flex proporcional no tanque único homogêneo.
+          5. Recalcula o CMP da energia após a mistura.
+          6. Persiste o JSONB atualizado no registro do veículo.
+
+        O valor pago NÃO é lançado como custo no DRE — permanece como ativo circulante
+        (estoque de energia) até a queima proporcional no fechamento do turno.
+
+        Idempotência: wpp_msg_id nunca será NULL — se vier vazio, gera hash SHA-256
+        determinístico para blindar contra retentativas duplicadas de rede.
         """
         desc_limpa = (descricao or "").lower()
-        # Permite valor zero especificamente para recargas solares ou domésticas gratuitas
-        is_recarga_gratuita = "solar" in desc_limpa or "casa" in desc_limpa or "gratis" in desc_limpa or "tomada" in desc_limpa
-        permitir_zero = categoria.lower() == "combustivel" and is_recarga_gratuita
+        is_recarga_gratuita = any(
+            w in desc_limpa for w in ("solar", "casa", "gratis", "tomada", "gratuito")
+        )
+        e_combustivel = categoria.lower() == "combustivel"
+        permitir_zero = e_combustivel and is_recarga_gratuita
 
-        # GAP: wpp_msg_id None não dispara ON CONFLICT (NULL != NULL em SQL).
-        # Gera um hash determinístico para garantir idempotência mesmo em mensagens sem ID.
+        # Garante wpp_msg_id único — ON CONFLICT (wpp_msg_id) não dispara para NULL em SQL
         if not wpp_msg_id:
-            _raw = f"{motorista_id}|{tipo_movimentacao}|{categoria}|{valor}|{(descricao or '')}"
-            wpp_msg_id = "hash:" + hashlib.sha256(_raw.encode()).hexdigest()[:32]
+            raw = f"{motorista_id}|{tipo_movimentacao}|{categoria}|{valor}|{desc_limpa}"
+            wpp_msg_id = "hash:" + hashlib.sha256(raw.encode()).hexdigest()[:32]
 
         try:
-            tipo_validado = TransacaoService._validar_tipo_movimentacao(tipo_movimentacao)
+            tipo_validado = TransacaoService._validar_tipo(tipo_movimentacao)
             valor_decimal = TransacaoService._validar_valor(valor, permitir_zero=permitir_zero)
         except ValueError as exc:
-            return {"status": "error", "message": f"❌ {str(exc)}", "error_code": "VALIDACAO"}
+            return {"status": "error", "message": f"❌ {exc}", "error_code": "VALIDACAO"}
 
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
-                # 1. Identifica se existe turno ativo para vincular a transação
-                turno_ativo = await conn.fetchrow(
+
+                # ------------------------------------------------------------------
+                # 1. Resolve turno ativo (para vinculação da transação)
+                # ------------------------------------------------------------------
+                turno_row = await conn.fetchrow(
                     """
-                    SELECT id, veiculo_id FROM public.turnos 
-                    WHERE motorista_id = $1::uuid AND status IN ('em_andamento', 'em_pausa', 'ABERTO', 'PAUSADO')
-                    ORDER BY data_inicio DESC LIMIT 1;
+                    SELECT id, veiculo_id
+                    FROM public.turnos
+                    WHERE motorista_id = $1::uuid
+                      AND status IN ('ABERTO', 'em_andamento', 'em_pausa')
+                    ORDER BY data_inicio DESC
+                    LIMIT 1;
                     """,
-                    motorista_id
+                    motorista_id,
                 )
-                turno_id = str(turno_ativo["id"]) if turno_ativo else None
-                veiculo_id = str(turno_ativo["veiculo_id"]) if turno_ativo else None
+                turno_id = str(turno_row["id"]) if turno_row else None
+                veiculo_id = str(turno_row["veiculo_id"]) if turno_row else None
 
-                # Se for lançamento fora de turno, busca o veículo principal ativo
+                # Fora de turno: busca veículo principal ativo
                 if not veiculo_id:
-                    veiculo_row = await conn.fetchrow(
+                    vei_row = await conn.fetchrow(
                         "SELECT id FROM public.veiculos WHERE motorista_id = $1::uuid AND ativo = TRUE LIMIT 1;",
-                        motorista_id
+                        motorista_id,
                     )
-                    veiculo_id = str(veiculo_row["id"]) if veiculo_row else None
+                    veiculo_id = str(vei_row["id"]) if vei_row else None
 
-                # 2. SE FOR ABASTECIMENTO OU RECARGA (DESPESA EM COMBUSTÍVEL)
-                if tipo_validado == "despesa" and categoria.lower() == "combustivel" and veiculo_id:
+                # ------------------------------------------------------------------
+                # 2. Lógica de abastecimento / recarga de energia
+                # ------------------------------------------------------------------
+                if tipo_validado == "despesa" and e_combustivel and veiculo_id:
                     veiculo = await conn.fetchrow(
                         """
-                        SELECT estoque_financeiro, tipo_combustivel, capacidade_tanque, capacidade_bateria, 
-                               is_flex, is_hibrido, is_eletrico 
-                        FROM public.veiculos WHERE id = $1::uuid;
+                        SELECT estoque_financeiro, tipo_combustivel,
+                               capacidade_tanque, capacidade_bateria,
+                               is_flex, is_hibrido, is_eletrico
+                        FROM public.veiculos
+                        WHERE id = $1::uuid;
                         """,
-                        veiculo_id
+                        veiculo_id,
                     )
-                    
+
                     if veiculo:
-                        # Limite de capacidade dinâmica recuperada diretamente do banco de dados (com fallbacks seguros)
-                        capacidade_tanque = Decimal(str(veiculo["capacidade_tanque"] or "50.00"))
-                        capacidade_bateria = Decimal(str(veiculo["capacidade_bateria"] or "30.00"))
+                        cap_tanque = Decimal(str(veiculo["capacidade_tanque"] or "50.00"))
+                        cap_bateria = Decimal(str(veiculo["capacidade_bateria"] or "30.00"))
 
-                        estoque_raw = veiculo["estoque_financeiro"]
-                        estoque = json.loads(estoque_raw) if isinstance(estoque_raw, str) else (estoque_raw or {})
-                        
-                        # Garante a estrutura de estoque multi-energia unificada (Backward Compatible)
-                        if "liquido" not in estoque:
-                            estoque["liquido"] = {
-                                "litros": 0.0,
-                                "custo_total": 0.0,
-                                "gasolina_litros": 0.0,
-                                "etanol_litros": 0.0,
-                                "gasolina_proporcao": 1.0,
-                                "etanol_proporcao": 0.0,
-                                "km_l_gasolina": 12.0,
-                                "km_l_etanol": 8.5
-                            }
-                        if "eletricidade" not in estoque:
-                            estoque["eletricidade"] = {
-                                "kwh": 0.0,
-                                "custo_total": 0.0,
-                                "km_kwh": 6.5
-                            }
+                        raw_est = veiculo["estoque_financeiro"]
+                        estoque: dict = (
+                            json.loads(raw_est) if isinstance(raw_est, str) else (raw_est or {})
+                        )
+                        estoque = TransacaoService._garantir_estrutura_estoque(estoque)
 
-                        # Determina se o abastecimento é elétrico ou combustível líquido
-                        is_eletrico_event = "kwh" in desc_limpa or "recarga" in desc_limpa or "solar" in desc_limpa or "eletrico" in desc_limpa or veiculo["is_eletrico"]
-                        
-                        if is_eletrico_event:
-                            # 2.1. RECARGA ELÉTRICA (BATERIA)
-                            dados_comb = estoque["eletricidade"]
-                            qtd_atual = Decimal(str(dados_comb.get("kwh", 0.0)))
-                            custo_atual = Decimal(str(dados_comb.get("custo_total", 0.0)))
+                        tipo_comb = (veiculo["tipo_combustivel"] or "gasolina").lower()
 
-                            # Extrai kWh
+                        # Determina a fonte de energia do evento
+                        is_evento_eletrico = (
+                            any(w in desc_limpa for w in ("kwh", "recarga", "solar", "eletrico", "tomada", "casa"))
+                            or bool(veiculo["is_eletrico"])
+                        )
+                        is_evento_gnv = (
+                            "gnv" in desc_limpa
+                            or "gas natural" in desc_limpa
+                            or tipo_comb == "gnv"
+                        ) and not is_evento_eletrico
+
+                        if is_evento_eletrico:
+                            # -------------------------------------------------------
+                            # 2-A  RECARGA ELÉTRICA (BATERIA)
+                            # -------------------------------------------------------
+                            eletro = estoque["eletricidade"]
+                            kwh_atual = Decimal(str(eletro.get("kwh", 0.0)))
+                            custo_atual = Decimal(str(eletro.get("custo_total", 0.0)))
+
                             kwh_novos = Decimal("0.00")
-                            kwh_match = re.search(r'(\d+[\.,]?\d*)\s*(?:kwh|kw|quilowatt)', desc_limpa)
-                            if kwh_match:
-                                kwh_novos = Decimal(kwh_match.group(1).replace(',', '.'))
+                            m = re.search(r"(\d+[\.,]?\d*)\s*(?:kwh|kw\b|quilowatt)", desc_limpa)
+                            if m:
+                                kwh_novos = Decimal(m.group(1).replace(",", "."))
+                            elif is_recarga_gratuita:
+                                kwh_novos = Decimal("15.00")  # Fallback: carga solar doméstica média
                             else:
-                                if is_recarga_gratuita:
-                                    kwh_novos = Decimal("15.00") # Fallback carga solar média de casa
-                                else:
-                                    kwh_novos = (valor_decimal / TransacaoService._PRECO_MEDIO_KWH_FALLBACK).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                                kwh_novos = (
+                                    valor_decimal / TransacaoService._PRECO_MEDIO_KWH_FALLBACK
+                                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-                            novo_volume = qtd_atual + kwh_novos
-                            if novo_volume > capacidade_bateria:
-                                vazio_disponivel = capacidade_bateria - qtd_atual
+                            novo_total_kwh = kwh_atual + kwh_novos
+                            if novo_total_kwh > cap_bateria:
+                                livre = cap_bateria - kwh_atual
                                 return {
                                     "status": "error",
-                                    "message": f"⚠️ *Capacidade da Bateria Excedida!*\nUma recarga de *{kwh_novos:.2f} kWh* excede a capacidade (*{capacidade_bateria:.1f} kWh*).\n\n"
-                                               f"Sua bateria já possui *{qtd_atual:.1f} kWh*. Você pode adicionar no máximo *{vazio_disponivel:.2f} kWh*.",
-                                    "error_code": "EXCEDE_CAPACIDADE"
+                                    "message": (
+                                        f"⚠️ *Capacidade da Bateria Excedida!*\n"
+                                        f"Uma recarga de *{kwh_novos:.2f} kWh* ultrapassa a capacidade máxima "
+                                        f"(*{cap_bateria:.1f} kWh*).\n\n"
+                                        f"Bateria atual: *{kwh_atual:.1f} kWh*. "
+                                        f"Espaço livre: *{livre:.2f} kWh*."
+                                    ),
+                                    "error_code": "EXCEDE_CAPACIDADE",
                                 }
 
-                            novo_custo = custo_atual + valor_decimal
-                            dados_comb["kwh"] = float(novo_volume.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                            dados_comb["custo_total"] = float(novo_custo.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                            eletro["kwh"] = float(
+                                novo_total_kwh.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            )
+                            eletro["custo_total"] = float(
+                                (custo_atual + valor_decimal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            )
+
+                        elif is_evento_gnv:
+                            # -------------------------------------------------------
+                            # 2-B  ABASTECIMENTO GNV (m³)
+                            # -------------------------------------------------------
+                            gnv = estoque["gnv"]
+                            m3_atual = Decimal(str(gnv.get("m3", 0.0)))
+                            custo_atual = Decimal(str(gnv.get("custo_total", 0.0)))
+
+                            m3_novos = Decimal("0.00")
+                            m = re.search(r"(\d+[\.,]?\d*)\s*(?:m3|m³|metro)", desc_limpa)
+                            if m:
+                                m3_novos = Decimal(m.group(1).replace(",", "."))
+                            else:
+                                m3_novos = (
+                                    valor_decimal / TransacaoService._PRECO_MEDIO_M3_GNV_FALLBACK
+                                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+                            gnv["m3"] = float(
+                                (m3_atual + m3_novos).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            )
+                            gnv["custo_total"] = float(
+                                (custo_atual + valor_decimal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            )
 
                         else:
-                            # 2.2. ABASTECIMENTO LÍQUIDO (GASOLINA/ETANOL NO TANQUE ÚNICO)
-                            dados_comb = estoque["liquido"]
-                            qtd_atual = Decimal(str(dados_comb.get("litros", 0.0)))
-                            custo_atual = Decimal(str(dados_comb.get("custo_total", 0.0)))
+                            # -------------------------------------------------------
+                            # 2-C  ABASTECIMENTO LÍQUIDO (TANQUE ÚNICO FLEX/GASOLINA/ETANOL)
+                            # -------------------------------------------------------
+                            liq = estoque["liquido"]
+                            litros_atual = Decimal(str(liq.get("litros", 0.0)))
+                            custo_atual = Decimal(str(liq.get("custo_total", 0.0)))
 
-                            # Extrai litros — \b garante que "l" não case com "lava", "legal", etc.
                             litros_novos = Decimal("0.00")
-                            litros_match = re.search(r'(\d+[\.,]?\d*)\s*(?:litros|litro|\bl\b)', desc_limpa)
-                            if litros_match:
-                                litros_novos = Decimal(litros_match.group(1).replace(',', '.'))
+                            # \bl\b garante que "l" não case com "lava", "legal", "ligei", etc.
+                            m = re.search(r"(\d+[\.,]?\d*)\s*(?:litros|litro|\bl\b)", desc_limpa)
+                            if m:
+                                litros_novos = Decimal(m.group(1).replace(",", "."))
                             else:
-                                litros_novos = (valor_decimal / TransacaoService._PRECO_MEDIO_LITRO_FALLBACK).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                                litros_novos = (
+                                    valor_decimal / TransacaoService._PRECO_MEDIO_LITRO_FALLBACK
+                                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-                            novo_volume = qtd_atual + litros_novos
-                            if novo_volume > capacidade_tanque:
-                                vazio_disponivel = capacidade_tanque - qtd_atual
+                            novo_total_litros = litros_atual + litros_novos
+                            if novo_total_litros > cap_tanque:
+                                livre = cap_tanque - litros_atual
                                 return {
                                     "status": "error",
-                                    "message": f"⚠️ *Capacidade do Tanque Excedida!*\nO abastecimento de *{litros_novos:.2f} L* excede a capacidade (*{capacidade_tanque:.1f} L*).\n\n"
-                                               f"Seu tanque já possui *{qtd_atual:.1f} L*. Você pode adicionar no máximo *{vazio_disponivel:.2f} L*.",
-                                    "error_code": "EXCEDE_CAPACIDADE"
+                                    "message": (
+                                        f"⚠️ *Capacidade do Tanque Excedida!*\n"
+                                        f"O abastecimento de *{litros_novos:.2f} L* ultrapassa a capacidade máxima "
+                                        f"(*{cap_tanque:.1f} L*).\n\n"
+                                        f"Tanque atual: *{litros_atual:.1f} L*. "
+                                        f"Espaço livre: *{livre:.2f} L*."
+                                    ),
+                                    "error_code": "EXCEDE_CAPACIDADE",
                                 }
 
-                            # Determina se é Gasolina, Etanol ou Mistura padrão Flex
-                            # Usa \b para evitar que "gastei", "gastos", "legal" etc. sejam detectados como combustível
-                            is_gasolina = "gasolina" in desc_limpa or bool(re.search(r'\bgas\b', desc_limpa))
-                            is_etanol = "etanol" in desc_limpa or bool(re.search(r'\balcool\b', desc_limpa)) or bool(re.search(r'\balc\b', desc_limpa))
+                            # Alquimia Flex: classifica o combustível pelo descritor
+                            # \bgas\b para não casar "gastei", "gastos", etc.
+                            is_gasolina = "gasolina" in desc_limpa or bool(re.search(r"\bgas\b", desc_limpa))
+                            is_etanol = (
+                                "etanol" in desc_limpa
+                                or bool(re.search(r"\balcool\b", desc_limpa))
+                                or bool(re.search(r"\balc\b", desc_limpa))
+                            )
 
-                            gas_atual = Decimal(str(dados_comb.get("gasolina_litros", qtd_atual if veiculo["tipo_combustivel"].lower() == "gasolina" else 0.0)))
-                            eta_atual = Decimal(str(dados_comb.get("etanol_litros", qtd_atual if veiculo["tipo_combustivel"].lower() == "etanol" else 0.0)))
+                            gas_atual = Decimal(
+                                str(liq.get("gasolina_litros", float(litros_atual) if tipo_comb == "gasolina" else 0.0))
+                            )
+                            eta_atual = Decimal(
+                                str(liq.get("etanol_litros", float(litros_atual) if tipo_comb == "etanol" else 0.0))
+                            )
 
                             if is_gasolina:
                                 gas_atual += litros_novos
                             elif is_etanol:
                                 eta_atual += litros_novos
                             else:
-                                # Caso não especificado em veículo Flex, divide meio a meio
+                                # Combustível não especificado em veículo Flex: divide 50/50
                                 if veiculo["is_flex"] or veiculo["is_hibrido"]:
-                                    gas_atual += litros_novos / 2
-                                    eta_atual += litros_novos / 2
-                                elif veiculo["tipo_combustivel"].lower() == "etanol":
+                                    metade = litros_novos / Decimal("2")
+                                    gas_atual += metade
+                                    eta_atual += metade
+                                elif tipo_comb == "etanol":
                                     eta_atual += litros_novos
                                 else:
                                     gas_atual += litros_novos
 
-                            total_calculado = gas_atual + eta_atual
-                            
-                            # Atualiza as proporções químicas exatas no tanque
-                            if total_calculado > 0:
-                                dados_comb["gasolina_proporcao"] = float((gas_atual / total_calculado).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
-                                dados_comb["etanol_proporcao"] = float((eta_atual / total_calculado).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+                            total_calc = gas_atual + eta_atual
+
+                            # Recalcula proporções exatas do blend homogêneo
+                            if total_calc > Decimal("0"):
+                                liq["gasolina_proporcao"] = float(
+                                    (gas_atual / total_calc).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                                )
+                                liq["etanol_proporcao"] = float(
+                                    (eta_atual / total_calc).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                                )
                             else:
-                                dados_comb["gasolina_proporcao"] = 1.0
-                                dados_comb["etanol_proporcao"] = 0.0
+                                liq["gasolina_proporcao"] = 1.0
+                                liq["etanol_proporcao"] = 0.0
 
-                            dados_comb["gasolina_litros"] = float(gas_atual.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                            dados_comb["etanol_litros"] = float(eta_atual.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                            dados_comb["litros"] = float(total_calculado.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                            dados_comb["custo_total"] = float((custo_atual + valor_decimal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                            liq["gasolina_litros"] = float(
+                                gas_atual.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            )
+                            liq["etanol_litros"] = float(
+                                eta_atual.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            )
+                            liq["litros"] = float(
+                                total_calc.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            )
+                            # Novo CMP = (Custo Total Antigo + Valor Novo) / Volume Total Novo
+                            liq["custo_total"] = float(
+                                (custo_atual + valor_decimal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            )
 
-                        # Salva o estoque recalculado de volta no veículo
+                        # Persiste o estoque recalculado no JSONB do veículo
                         await conn.execute(
                             "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
-                            json.dumps(estoque), veiculo_id
+                            json.dumps(estoque),
+                            veiculo_id,
                         )
 
-                # 3. Insere a transação no Ledger de forma idempotente
-                # wpp_msg_id nunca será NULL aqui — o hash determinístico acima garante isso.
-                query_insert = """
-                    INSERT INTO public.transacoes (
-                        motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria, valor, descricao, wpp_msg_id
-                    )
-                    VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8)
+                # ------------------------------------------------------------------
+                # 3. Insere a transação no ledger (idempotência via wpp_msg_id)
+                # ------------------------------------------------------------------
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO public.transacoes
+                        (motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria, valor, descricao, wpp_msg_id)
+                    VALUES
+                        ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8)
                     ON CONFLICT (wpp_msg_id) DO NOTHING
                     RETURNING id, data_transacao;
-                """
-                row = await conn.fetchrow(
-                    query_insert,
+                    """,
                     motorista_id,
                     turno_id,
                     veiculo_id,
@@ -272,33 +400,35 @@ class TransacaoService:
                     categoria,
                     valor_decimal,
                     descricao,
-                    wpp_msg_id
+                    wpp_msg_id,
                 )
 
                 if row is None:
-                    logger.warning(f"Lançamento duplicado evitado por idempotência contábil (MsgID: {wpp_msg_id}).")
+                    logger.warning("Lançamento duplicado bloqueado por idempotência (MsgID: %s).", wpp_msg_id)
                     return {
                         "status": "duplicate",
                         "message": "⚠️ Esse lançamento já foi guardado anteriormente no cofre contábil.",
-                        "error_code": "DUPLICADA"
+                        "error_code": "DUPLICADA",
                     }
 
-                msg_valor_formatado = f"R$ {float(valor_decimal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                val_fmt = f"R$ {float(valor_decimal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 return {
                     "status": "success",
-                    "message": f"✅ Lançamento de *{msg_valor_formatado}* guardado no cofre! 🛡️",
+                    "message": f"✅ Lançamento de *{val_fmt}* guardado no cofre! 🛡️",
                     "transacao_id": str(row["id"]),
                     "turno_id": turno_id,
-                    "data_transacao": row["data_transacao"]
+                    "data_transacao": row["data_transacao"],
                 }
 
         except asyncpg.PostgresError as exc:
-            logger.exception("Exceção relacional no PostgreSQL ao registrar transação.")
+            logger.exception("Exceção PostgreSQL ao registrar transação.")
             return TransacaoService._mapear_erro_postgres(exc)
+
+    # ------------------------------------------------------------------ extras
 
     @staticmethod
     async def estornar_transacao(motorista_id: str, transacao_id: str) -> Dict[str, Any]:
-        """Aplica inversão lógica de lançamento (Soft-Delete) preservando a trilha de auditoria contábil."""
+        """Soft-delete lógico de um lançamento preservando a trilha de auditoria contábil."""
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 row = await conn.fetchrow(
@@ -308,28 +438,28 @@ class TransacaoService:
                     WHERE id = $1::uuid AND motorista_id = $2::uuid AND estornado = FALSE
                     RETURNING id, tipo_movimentacao, valor;
                     """,
-                    transacao_id, motorista_id
+                    transacao_id,
+                    motorista_id,
                 )
-
                 if row is None:
                     return {
                         "status": "error",
                         "message": "❌ Lançamento não encontrado, não pertence ao seu perfil ou já foi estornado.",
-                        "error_code": "TRANSACAO_INEXISTENTE"
+                        "error_code": "TRANSACAO_INEXISTENTE",
                     }
-
-                valor_estornado = float(row["valor"])
+                val = float(row["valor"])
                 tipo = str(row["tipo_movimentacao"]).capitalize()
+                val_fmt = f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 return {
                     "status": "success",
-                    "message": f"🔄 Estorno concluído! {tipo} de *R$ {valor_estornado:,.2f}* anulada com sucesso no cofre.".replace(",", "X").replace(".", ",").replace("X", ".")
+                    "message": f"🔄 Estorno concluído! {tipo} de *{val_fmt}* anulada com sucesso no cofre.",
                 }
         except asyncpg.PostgresError as exc:
             return TransacaoService._mapear_erro_postgres(exc)
 
     @staticmethod
     async def obter_resumo_diario(motorista_id: str, data_referencia_iso: str) -> Dict[str, Any]:
-        """Calcula o DRE parcial rápido do dia de forma altamente performática em nível de banco de dados."""
+        """DRE parcial rápido do dia calculado inteiramente em nível de banco de dados."""
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 row = await conn.fetchrow(
@@ -342,21 +472,19 @@ class TransacaoService:
                       AND estornado = FALSE
                       AND DATE(data_transacao AT TIME ZONE 'America/Sao_Paulo') = $2::date;
                     """,
-                    motorista_id, data_referencia_iso
+                    motorista_id,
+                    data_referencia_iso,
                 )
-
                 receitas = Decimal(str(row["total_receitas"]))
                 despesas = Decimal(str(row["total_despesas"]))
-                saldo_liquido = receitas - despesas
-
                 return {
                     "status": "success",
                     "data": data_referencia_iso,
                     "financeiro": {
                         "receitas": float(receitas),
                         "despesas": float(despesas),
-                        "saldo_liquido": float(saldo_liquido)
-                    }
+                        "saldo_liquido": float(receitas - despesas),
+                    },
                 }
         except Exception as exc:
-            return {"status": "error", "message": f"Falha ao consolidar o extrato diário: {exc}"}
+            return {"status": "error", "message": f"Falha ao consolidar extrato diário: {exc}"}

@@ -133,7 +133,8 @@ class DatabaseService:
         """
         async with cls.get_connection() as conn:
             async with conn.transaction():
-                # Insere ou recupera o motorista de forma idempotente
+                # Insere ou recupera o motorista de forma idempotente.
+                # ON CONFLICT (telefone) atualiza o nome para refletir correções de cadastro.
                 row_motorista = await conn.fetchrow(
                     """
                     INSERT INTO public.motoristas (telefone, nome)
@@ -145,24 +146,28 @@ class DatabaseService:
                 )
                 motorista_id = str(row_motorista["id"])
 
-                # Cria o veículo inicial associado ao motorista recém-criado
-                # Configurando uma matriz de estoque financeiro compatível com múltiplos reservatórios
+                # Cria o veículo inicial com a estrutura de estoque multi-energia completa.
+                # ON CONFLICT (placa) para evitar duplicatas em caso de reconexão no onboarding.
+                # As flags is_flex/is_hibrido/is_eletrico e capacidades serão atualizadas
+                # pelo webhook de onboarding logo após este INSERT.
                 await conn.execute(
                     """
                     INSERT INTO public.veiculos (motorista_id, modelo, placa, tipo_combustivel, estoque_financeiro)
                     VALUES ($1::uuid, $2, $3, $4, $5::jsonb)
-                    ON CONFLICT DO NOTHING;
+                    ON CONFLICT (placa) DO NOTHING;
                     """,
                     motorista_id, veiculo_modelo, placa, combustivel,
                     '{"liquido": {"litros": 0.0, "custo_total": 0.0, "gasolina_litros": 0.0, "etanol_litros": 0.0, "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0, "km_l_gasolina": 12.0, "km_l_etanol": 8.5}, "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5}}'
                 )
 
-                # Cria caixinhas de provisões básicas para o motorista de forma automática
+                # Cria as caixas de provisão padrão. ON CONFLICT (motorista_id, nome_caixa)
+                # evita duplicatas se o onboarding for repetido (ex: motorista cadastrado 2x).
                 await conn.execute(
                     """
                     INSERT INTO public.caixas_provisao (motorista_id, nome_caixa, saldo_atual)
-                    VALUES 
-                        ($1::uuid, 'Manutenção Corretiva (Pneus/Freios)', 0.00),\n                        ($1::uuid, 'Amortização de IPVA/Seguro', 0.00)
+                    VALUES
+                        ($1::uuid, 'Manutenção Corretiva (Pneus/Freios)', 0.00),
+                        ($1::uuid, 'Amortização de IPVA/Seguro', 0.00)
                     ON CONFLICT DO NOTHING;
                     """,
                     motorista_id

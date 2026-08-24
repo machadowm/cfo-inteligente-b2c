@@ -30,8 +30,7 @@ async def lifespan(app: FastAPI):
     logger.info("Draining connections graciosamente...")
     await DatabaseService.close_pool()
     try:
-        redis_client = await RedisFSMService.get_client()
-        await redis_client.aclose()
+        await RedisFSMService.close_client()
     except Exception as e:
         logger.error(f"Falha ao fechar conexão com Redis: {e}")
 
@@ -74,11 +73,12 @@ def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
     aluguel_diario = info["custo_aluguel_semanal"] / 6.0
     franquia_diaria = info["franquia_km_semanal"] / 7.0
     meta_diaria = info["meta_mensal"] / info["dias_uteis"]
-    
+    km_inicial_fmt = f"{info['km_inicial']:,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
     return (
         f"📥 *DADOS PARCIAIS DO TURNO DE HOJE ({info['data_turno']})*\n\n"
         f"• Início: *{info['data_inicio_hora']}*\n"
-        f"• KM Inicial: *{info['km_inicial']:,.1f} km*\n".replace(",", ".") +
+        f"• KM Inicial: *{km_inicial_fmt} km*\n"
         f"• Combustível Lançado: *R$ {info['total_abastecido']:.2f}*\n\n"
         f"⚙️ *CUSTOS DO CONTRATO ({info['locadora']})*\n\n"
         f"• Escala: *{info['escala_trabalho']}*\n"
@@ -96,15 +96,15 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     horas = int(res["tempo_total_min"] // 60)
     minutos = int(res["tempo_total_min"] % 60)
     duracao_str = f"{horas}h {minutos}min" if horas > 0 else f"{minutos} min"
-    
-    km_rodados = res["km_rodados"] if res["km_rodados"] > 0 else 1.0
+
+    km_rodados = res["km_rodados"]
     horas_trab = res["horas_trabalhadas"] if res["horas_trabalhadas"] > 0 else 1.0
     fat = res["faturamento_bruto"]
     c_var = res["custo_variavel"]
     c_fixo = res["custo_fixo_rateado"]
     lucro = res["lucro_liquido_real"]
-    
-    faturamento_por_km = fat / km_rodados
+
+    faturamento_por_km = (fat / km_rodados) if km_rodados > 0 else 0.0
     faturamento_por_hora = fat / horas_trab
     lucro_por_hora = lucro / horas_trab
     margem_lucro = (lucro / fat * 100.0) if fat > 0 else 0.0
@@ -137,14 +137,18 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
             "👉 Envie: *'atualizar contrato Financiado [Pro-Rata Mensalidade + Manutenção] 0'* (ex: *atualizar contrato Financiado 45 0*)"
         )
 
+    km_ini_fmt = f"{res['km_inicial']:,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    km_fin_fmt = f"{res['km_final']:,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    km_rod_fmt = f"{km_rodados:,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
     return (
         f"🏁 *FECHAMENTO DE TURNO - DRE EXECUTIVO DIÁRIO*\n"
         f"👤 Motorista: *{nome_motorista}*\n"
         f"──────────────────────────────\n\n"
         f"⏱️ *1. RESUMO OPERACIONAL*\n"
         f"• Horário: *{res['data_inicio']}* às *{res['data_fim']}* ({duracao_str})\n"
-        f"• Odômetro: *{res['km_inicial']:,.1f} km* ➔ *{res['km_final']:,.1f} km*\n".replace(",", ".") +
-        f"• Distância Rodada: *{km_rodados:,.1f} km*\n\n".replace(",", ".") +
+        f"• Odômetro: *{km_ini_fmt} km* ➔ *{km_fin_fmt} km*\n"
+        f"• Distância Rodada: *{km_rod_fmt} km*\n\n"
         f"📊 *2. DEMONSTRATIVO DE RESULTADO (DRE)*\n"
         f"• (+) Faturamento Bruto: *R$ {fat:.2f}*\n"
         f"• (-) Custos Variáveis:\n"
@@ -207,12 +211,12 @@ async def registrar_erro_e_verificar_escape(remote_jid: str, tenant_id: str, fsm
         # Mensagem de escape forçada
         mensagem_escape = (
             "⚠️ *Múltiplos Erros Consecutivos!*\n"
-            "Seu fluxo atual foi interrompido e limpo para evitar travamento.\\n\\n"
-            "Por favor, envie um dos comandos rápidos ou valores livres para começar de novo:\\n"
-            "🟢 *Iniciar* (ou 'iniciar 1399')\\n"
-            "🏁 *Fechar* (ou 'fechar 1450')\\n"
-            "⏸️ *Pausar* / *Retomar*\\n"
-            "📊 *Status* (resumo do dia)\\n"
+            "Seu fluxo atual foi interrompido e limpo para evitar travamento.\n\n"
+            "Por favor, envie um dos comandos rápidos ou valores livres para começar de novo:\n"
+            "🟢 *Iniciar* (ou 'iniciar 1399')\n"
+            "🏁 *Fechar* (ou 'fechar 1450')\n"
+            "⏸️ *Pausar* / *Retomar*\n"
+            "📊 *Status* (resumo do dia)\n"
             "💰 *[Valor]* (ex: 'ganhei 100' ou 'gastei 40 almoço')"
         )
         await enviar_whatsapp(remote_jid, mensagem_escape)
@@ -279,9 +283,9 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
             if estado_atual == "IDLE" or not estado_atual:
                 await RedisFSMService.definir_estado(fsm_key, "AGUARDANDO_NOME")
                 background_tasks.add_task(
-                    enviar_whatsapp, remote_jid, 
-                    "Fala, motorista! Seja bem-vindo ao *CFO Inteligente B2C* 🚀\\n"
-                    "Percebi que você ainda não tem cadastro por aqui. Vamos resolver isso em 1 minuto de forma simples!\\n\\n"
+                    enviar_whatsapp, remote_jid,
+                    "Fala, motorista! Seja bem-vindo ao *CFO Inteligente B2C* 🚀\n"
+                    "Percebi que você ainda não tem cadastro por aqui. Vamos resolver isso em 1 minuto de forma simples!\n\n"
                     "Para começar, digite o seu **nome completo**:"
                 )
                 return {"status": "onboarding_step_nome"}
@@ -292,7 +296,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     return {"status": "onboarding_escaped" if escapou else "onboarding_invalid_name"}
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_VEICULO|name:{texto_bruto}")
-                background_tasks.add_task(enviar_whatsapp, remote_jid, f"Prazer em te conhecer, *{texto_bruto}*! 🚗\\nQual é o **modelo e marca** do seu principal veículo de trabalho?")
+                background_tasks.add_task(enviar_whatsapp, remote_jid, f"Prazer em te conhecer, *{texto_bruto}*! 🚗\nQual é o **modelo e marca** do seu principal veículo de trabalho?")
                 return {"status": "onboarding_step_veiculo"}
 
             elif estado_atual.startswith("AGUARDANDO_VEICULO"):
@@ -300,14 +304,14 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_COMBUSTIVEL|name:{nome}|veiculo:{texto_bruto}")
                 background_tasks.add_task(
-                    enviar_whatsapp, remote_jid, 
-                    f"Show! E qual é o tipo de combustível ou motorização do seu {texto_bruto}? ⛽\\n\\n"
-                    "Responda exatamente com uma das opções:\\n"
-                    "👉 *Gasolina*\\n"
-                    "👉 *Etanol*\\n"
-                    "👉 *Flex*\\n"
-                    "👉 *Hibrido*\\n"
-                    "👉 *Eletrico*\\n"
+                    enviar_whatsapp, remote_jid,
+                    f"Show! E qual é o tipo de combustível ou motorização do seu {texto_bruto}? ⛽\n\n"
+                    "Responda exatamente com uma das opções:\n"
+                    "👉 *Gasolina*\n"
+                    "👉 *Etanol*\n"
+                    "👉 *Flex*\n"
+                    "👉 *Hibrido*\n"
+                    "👉 *Eletrico*\n"
                     "👉 *GNV*"
                 )
                 return {"status": "onboarding_step_combustivel"}
@@ -326,7 +330,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_PLACA|name:{nome}|veiculo:{veiculo}|combustivel:{comb_input}")
-                background_tasks.add_task(enviar_whatsapp, remote_jid, f"Perfeito! E qual é a **placa do seu veículo**? (Ex: ABC-1234 ou ABC1D23)")
+                background_tasks.add_task(enviar_whatsapp, remote_jid, "Perfeito! E qual é a **placa do seu veículo**? (Ex: ABC-1234 ou ABC1D23)")
                 return {"status": "onboarding_step_placa"}
 
             elif estado_atual.startswith("AGUARDANDO_PLACA"):
@@ -342,7 +346,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CAPACIDADE_TANQUE|name:{nome}|veiculo:{veiculo}|combustivel:{combustivel}|placa:{placa_limpa}")
-                background_tasks.add_task(enviar_whatsapp, remote_jid, "Legal! Agora me diz qual a **capacidade máxima do tanque** em litros do seu veículo? (Se for elétrico puro, responda *0*):")
+                background_tasks.add_task(enviar_whatsapp, remote_jid, "Legal! Agora me diz qual a **capacidade máxima do tanque** em litros do seu veículo?\n(Se for elétrico puro, responda *0*):")
                 return {"status": "onboarding_step_tanque"}
 
             elif estado_atual.startswith("AGUARDANDO_CAPACIDADE_TANQUE"):
@@ -360,7 +364,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     
                 if combustivel in ["hibrido", "eletrico"]:
                     await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CAPACIDADE_BATERIA|name:{nome}|veiculo:{veiculo}|combustivel:{combustivel}|placa:{placa}|tanque:{tanque_val}")
-                    background_tasks.add_task(enviar_whatsapp, remote_jid, "E qual a **capacidade da bateria** em kWh do seu veículo? (Ex: 30):")
+                    background_tasks.add_task(enviar_whatsapp, remote_jid, "E qual a **capacidade da bateria** em kWh do seu veículo?\n(Ex: 30):")
                     return {"status": "onboarding_step_bateria"}
                 else:
                     # Cadastro atômico para veículos de combustão convencional ou GNV
@@ -399,12 +403,12 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                             )
                     except Exception as e:
                         logger.error(f"Falha ao salvar onboarding no banco: {e}")
-                    
+
                     await RedisFSMService.limpar_buffer(fsm_key)
                     background_tasks.add_task(
-                        enviar_whatsapp, remote_jid, 
-                        f"Cadastro concluído com sucesso, {nome}! 🛡️\\n"
-                        f"O seu cofre contábil está ativo e configurado para o seu *{veiculo}* ({placa}).\\n\\n"
+                        enviar_whatsapp, remote_jid,
+                        f"Cadastro concluído com sucesso, {nome}! 🛡️\n"
+                        f"O seu cofre contábil está ativo e configurado para o seu *{veiculo}* ({placa}).\n\n"
                         "Envie *'Iniciar'* ou *'Iniciar turno'* acompanhado do seu odômetro atual para começar!"
                     )
                     return {"status": "onboarding_completed"}
@@ -448,7 +452,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                         }
                         await conn.execute(
                             """
-                            UPDATE public.veiculos \n                            SET capacidade_tanque = $1, capacidade_bateria = $2, 
+                            UPDATE public.veiculos SET capacidade_tanque = $1, capacidade_bateria = $2,
                                 is_flex = $3, is_hibrido = $4, is_eletrico = $5,
                                 estoque_financeiro = $6::jsonb
                             WHERE motorista_id = $7::uuid AND ativo = TRUE;
@@ -460,9 +464,9 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     
                 await RedisFSMService.limpar_buffer(fsm_key)
                 background_tasks.add_task(
-                    enviar_whatsapp, remote_jid, 
-                    f"Cadastro concluído com sucesso, {nome}! 🛡️\\n"
-                    f"O seu cofre contábil está ativo e configurado para o seu *{veiculo}* ({placa}).\\n\\n"
+                    enviar_whatsapp, remote_jid,
+                    f"Cadastro concluído com sucesso, {nome}! 🛡️\n"
+                    f"O seu cofre contábil está ativo e configurado para o seu *{veiculo}* ({placa}).\n\n"
                     "Envie *'Iniciar'* ou *'Iniciar turno'* acompanhado do seu odômetro atual para começar!"
                 )
                 return {"status": "onboarding_completed"}
@@ -664,8 +668,8 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                         if total_tx == 0:
                             await RedisFSMService.definir_estado(fsm_turno_key, f"AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO|km:{km_digitado}")
                             resposta = (
-                                "⚠️ *Atenção, motorista!* Não encontrei nenhuma receita ou despesa registrada neste turno.\\n\\n"
-                                "Tem certeza absoluta que o faturamento de hoje foi R$ 0,00?\\n\\n"
+                                "⚠️ *Atenção, motorista!* Não encontrei nenhuma receita ou despesa registrada neste turno.\n\n"
+                                "Tem certeza absoluta que o faturamento de hoje foi R$ 0,00?\n\n"
                                 "Responda *'Confirmar'* para fechar assim mesmo ou envie o valor de uma despesa/receita."
                             )
                             background_tasks.add_task(enviar_whatsapp, remote_jid, resposta)
@@ -732,8 +736,8 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     if total_tx == 0:
                         await RedisFSMService.definir_estado(fsm_turno_key, f"AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO|km:{km_encontrado}")
                         resposta = (
-                            "⚠️ *Atenção, motorista!* Não encontrei nenhuma receita ou despesa registrada neste turno.\\n\\n"
-                            "Tem certeza absoluta que o faturamento de hoje foi R$ 0,00?\\n\\n"
+                            "⚠️ *Atenção, motorista!* Não encontrei nenhuma receita ou despesa registrada neste turno.\n\n"
+                            "Tem certeza absoluta que o faturamento de hoje foi R$ 0,00?\n\n"
                             "Responda *'Confirmar'* para fechar assim mesmo ou envie o valor de uma despesa/receita."
                         )
                         background_tasks.add_task(enviar_whatsapp, remote_jid, resposta)
@@ -805,7 +809,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                 if res_tx.get("status") == "duplicate":
                     resposta = "⚠️ Este lançamento já foi guardado anteriormente no cofre contábil."
                 else:
-                    resposta = f"❌ Falha ao salvar no cofre contábil:\\n_{res_tx.get('message')}_"
+                    resposta = f"❌ Falha ao salvar no cofre contábil:\n_{res_tx.get('message')}_"
 
             background_tasks.add_task(enviar_whatsapp, remote_jid, resposta)
             return {"status": "finance_logged"}
@@ -814,12 +818,12 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
         # 6. CATCH-ALL (Ajuda Contextual)
         # =========================================================================
         resposta_ajuda = (
-            "🤖 Não reconheci a ação! Aqui tens os comandos rápidos:\\n\\n"
-            "🟢 *Iniciar* (ou 'iniciar 1399')\\n"
-            "🏁 *Fechar* (ou 'fechar 1450')\\n"
-            "⏸️ *Pausar* / *Retomar*\\n"
-            "📊 *Status* (resumo do dia)\\n"
-            "💰 *[Valor]* (ex: 'ganhei 100' ou 'gastei 40 almoço')\\n\\n"
+            "🤖 Não reconheci a ação! Aqui tens os comandos rápidos:\n\n"
+            "🟢 *Iniciar* (ou 'iniciar 1399')\n"
+            "🏁 *Fechar* (ou 'fechar 1450')\n"
+            "⏸️ *Pausar* / *Retomar*\n"
+            "📊 *Status* (resumo do dia)\n"
+            "💰 *[Valor]* (ex: 'ganhei 100' ou 'gastei 40 almoço')\n\n"
             "Como posso ajudar agora?"
         )
         background_tasks.add_task(enviar_whatsapp, remote_jid, resposta_ajuda)

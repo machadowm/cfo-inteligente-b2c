@@ -127,6 +127,9 @@ class TransacaoService:
         valor: float,
         descricao: Optional[str] = None,
         wpp_msg_id: Optional[str] = None,
+        litros_informados: Optional[float] = None,
+        preco_por_litro: Optional[float] = None,
+        odometro_abastecimento: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Registra uma receita ou despesa no ledger.
@@ -134,10 +137,15 @@ class TransacaoService:
         Para despesas do tipo 'combustivel':
           1. Identifica o sub-estoque correto (líquido, elétrico ou GNV).
           2. Valida a Barreira de Estanqueidade Física (não ultrapassa capacidade do tanque/bateria).
-          3. Extrai o volume físico da descrição (litros, kWh, m³) ou estima via CMP de fallback.
+          3. Usa litros_informados se fornecido; caso contrário extrai da descrição ou estima via CMP.
           4. Executa o blend Flex proporcional no tanque único homogêneo.
           5. Recalcula o CMP da energia após a mistura.
           6. Persiste o JSONB atualizado no registro do veículo.
+
+        Campos opcionais de abastecimento:
+          - litros_informados: volume exato abastecido informado pelo motorista.
+          - preco_por_litro: preço unitário pago, salvo na transação para rastreabilidade.
+          - odometro_abastecimento: leitura do odômetro no momento do abastecimento.
 
         O valor pago NÃO é lançado como custo no DRE — permanece como ativo circulante
         (estoque de energia) até a queima proporcional no fechamento do turno.
@@ -298,14 +306,20 @@ class TransacaoService:
                             custo_atual = Decimal(str(liq.get("custo_total", 0.0)))
 
                             litros_novos = Decimal("0.00")
-                            # \bl\b garante que "l" não case com "lava", "legal", "ligei", etc.
-                            m = re.search(r"(\d+[\.,]?\d*)\s*(?:litros|litro|\bl\b)", desc_limpa)
-                            if m:
-                                litros_novos = Decimal(m.group(1).replace(",", "."))
+                            if litros_informados is not None and litros_informados > 0:
+                                # Valor exato fornecido pelo motorista via fluxo guiado
+                                litros_novos = Decimal(str(litros_informados)).quantize(
+                                    Decimal("0.001"), rounding=ROUND_HALF_UP
+                                )
                             else:
-                                litros_novos = (
-                                    valor_decimal / TransacaoService._PRECO_MEDIO_LITRO_FALLBACK
-                                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                                # Tenta extrair da descrição livre; \bl\b evita "lava", "legal", etc.
+                                m = re.search(r"(\d+[\.,]?\d*)\s*(?:litros|litro|\bl\b)", desc_limpa)
+                                if m:
+                                    litros_novos = Decimal(m.group(1).replace(",", "."))
+                                else:
+                                    litros_novos = (
+                                        valor_decimal / TransacaoService._PRECO_MEDIO_LITRO_FALLBACK
+                                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
                             novo_total_litros = litros_atual + litros_novos
                             if novo_total_litros > cap_tanque:
@@ -394,9 +408,10 @@ class TransacaoService:
                 row = await conn.fetchrow(
                     """
                     INSERT INTO public.transacoes
-                        (motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria, valor, descricao, wpp_msg_id)
+                        (motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria, valor, descricao,
+                         wpp_msg_id, litros_abastecidos, preco_por_litro, odometro_abastecimento)
                     VALUES
-                        ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8)
+                        ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11)
                     ON CONFLICT (wpp_msg_id) DO NOTHING
                     RETURNING id, data_transacao;
                     """,
@@ -408,6 +423,9 @@ class TransacaoService:
                     valor_decimal,
                     descricao,
                     wpp_msg_id,
+                    float(litros_informados) if litros_informados is not None else None,
+                    float(preco_por_litro) if preco_por_litro is not None else None,
+                    float(odometro_abastecimento) if odometro_abastecimento is not None else None,
                 )
 
                 if row is None:

@@ -612,6 +612,137 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
         # Usa str(estado_turno) defensivamente; obter_estado nunca retorna None mas pode
         # retornar "IDLE" — startswith em "IDLE" é seguro (retorna False).
         estado_confirmacao_zero = str(estado_turno).startswith("AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO")
+        estado_abastecimento = str(estado_turno).startswith("ABAST_")
+
+        # =========================================================================
+        # PASSO 1-B: INTERCEPTOR FSM DE ABASTECIMENTO GUIADO
+        #
+        # Fluxo de 3 etapas coletadas em sequência antes de registrar:
+        #   ABAST_LITROS   → pergunta quantos litros foram abastecidos
+        #   ABAST_PRECO    → pergunta o preço por litro
+        #   ABAST_ODOMETRO → pergunta o odômetro atual
+        # O estado carrega os dados acumulados via pipe: ABAST_PRECO|l:35.5
+        # Escape: "cancelar" / "sair" limpa o estado.
+        # =========================================================================
+        if estado_abastecimento:
+            if any(w in texto_limpo for w in ("cancelar", "cancel", "sair")):
+                await RedisFSMService.limpar_buffer(fsm_turno_key)
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                background_tasks.add_task(
+                    enviar_whatsapp, remote_jid,
+                    "✅ Abastecimento cancelado. Pode registrar manualmente se preferir.",
+                )
+                return {"status": "abast_cancelled"}
+
+            val_digitado = converter_para_float(texto_bruto)
+
+            # Extrai metadados do estado FSM (presentes a partir do gatilho ABAST_LITROS)
+            def _abast_get(partes_estado: list, prefixo: str, fallback: str = "") -> str:
+                for p in partes_estado:
+                    if p.startswith(prefixo):
+                        return p[len(prefixo):]
+                return fallback
+
+            # --- ETAPA 1: aguardando litros (estado inicia com ABAST_LITROS) ---
+            if str(estado_turno).startswith("ABAST_LITROS"):
+                partes_est = estado_turno.split("|")
+                tipo_comb_meta = _abast_get(partes_est, "t:", "gasolina")
+                valor_meta = _abast_get(partes_est, "v:", "0")
+                desc_meta = _abast_get(partes_est, "d:", "")
+                if val_digitado <= 0:
+                    escapou = await registrar_erro_e_verificar_escape(
+                        remote_jid, tenant_id, fsm_turno_key,
+                        "⚠️ Por favor, informe a quantidade de litros abastecidos (ex: *35* ou *35,5*):",
+                    )
+                    return {"status": "abast_escaped" if escapou else "abast_invalid_litros"}
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                await RedisFSMService.definir_estado(
+                    fsm_turno_key,
+                    f"ABAST_PRECO|l:{val_digitado}|t:{tipo_comb_meta}|v:{valor_meta}|d:{desc_meta}",
+                )
+                background_tasks.add_task(
+                    enviar_whatsapp, remote_jid,
+                    f"✅ *{val_digitado:.3f} litros* registrados!\n\n"
+                    "2️⃣ Qual foi o *preço por litro*? (ex: *5,99* ou *6.10*)",
+                )
+                return {"status": "abast_step_preco"}
+
+            # --- ETAPA 2: aguardando preço por litro ---
+            if str(estado_turno).startswith("ABAST_PRECO"):
+                partes_est = estado_turno.split("|")
+                litros = float(_abast_get(partes_est, "l:", "0"))
+                tipo_comb_meta = _abast_get(partes_est, "t:", "gasolina")
+                valor_meta = _abast_get(partes_est, "v:", "0")
+                desc_meta = _abast_get(partes_est, "d:", "")
+                if val_digitado <= 0:
+                    escapou = await registrar_erro_e_verificar_escape(
+                        remote_jid, tenant_id, fsm_turno_key,
+                        "⚠️ Por favor, informe o preço por litro (ex: *5,99*):",
+                    )
+                    return {"status": "abast_escaped" if escapou else "abast_invalid_preco"}
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                await RedisFSMService.definir_estado(
+                    fsm_turno_key,
+                    f"ABAST_ODOMETRO|l:{litros}|p:{val_digitado}|t:{tipo_comb_meta}|v:{valor_meta}|d:{desc_meta}",
+                )
+                background_tasks.add_task(
+                    enviar_whatsapp, remote_jid,
+                    f"✅ Preço *R$ {val_digitado:.3f}/L* registrado!\n\n"
+                    "3️⃣ Qual é a *quilometragem atual* do painel do veículo? (ex: *15.340*)",
+                )
+                return {"status": "abast_step_odometro"}
+
+            # --- ETAPA 3: aguardando odômetro ---
+            if str(estado_turno).startswith("ABAST_ODOMETRO"):
+                partes_est = estado_turno.split("|")
+                litros = float(_abast_get(partes_est, "l:", "0"))
+                preco = float(_abast_get(partes_est, "p:", "0"))
+                tipo_comb_abast = _abast_get(partes_est, "t:", "gasolina")
+                valor_meta_raw = _abast_get(partes_est, "v:", "0")
+                desc_abast_raw = _abast_get(partes_est, "d:", tipo_comb_abast)
+                # Usa valor informado pelo motorista; se não veio, calcula litros × preço
+                valor_meta = float(valor_meta_raw) if float(valor_meta_raw) > 0 else round(litros * preco, 2)
+                valor_registro = valor_meta
+                desc_abast = desc_abast_raw if desc_abast_raw else tipo_comb_abast
+
+                if val_digitado <= 100:
+                    escapou = await registrar_erro_e_verificar_escape(
+                        remote_jid, tenant_id, fsm_turno_key,
+                        "⚠️ Por favor, informe a quilometragem correta do painel (ex: *15.340*):",
+                    )
+                    return {"status": "abast_escaped" if escapou else "abast_invalid_odo"}
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                await RedisFSMService.limpar_buffer(fsm_turno_key)
+
+                res_tx = await TransacaoService.registrar_transacao(
+                    motorista_id=motorista_id,
+                    tipo_movimentacao="despesa",
+                    categoria="combustivel",
+                    valor=valor_registro,
+                    descricao=desc_abast,
+                    wpp_msg_id=wpp_msg_id,
+                    litros_informados=litros,
+                    preco_por_litro=preco,
+                    odometro_abastecimento=val_digitado,
+                )
+
+                if res_tx.get("status") == "success":
+                    total_fmt = f"R$ {valor_registro:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    km_fmt = f"{val_digitado:,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    resposta = (
+                        f"⛽ *Abastecimento registrado no cofre!* 🛡️\n\n"
+                        f"• Litros: *{litros:.3f} L*\n"
+                        f"• Preço/L: *R$ {preco:.3f}*\n"
+                        f"• Total pago: *{total_fmt}*\n"
+                        f"• Odômetro: *{km_fmt} km*"
+                    )
+                elif res_tx.get("status") == "duplicate":
+                    resposta = "⚠️ Este abastecimento já foi registrado anteriormente."
+                else:
+                    resposta = f"❌ Falha ao registrar: _{res_tx.get('message')}_"
+
+                background_tasks.add_task(enviar_whatsapp, remote_jid, resposta)
+                return {"status": "abast_completed"}
 
         if estado_aguarda_km or estado_confirmacao_zero:
 
@@ -978,6 +1109,79 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
             return {"status": "turno_resumed"}
 
         # =========================================================================
+        # PASSO 4.5: GATILHO DO FLUXO GUIADO DE ABASTECIMENTO
+        #
+        # Se a mensagem indica abastecimento de combustível líquido, GNV ou recarga
+        # elétrica, abre o fluxo FSM de coleta de dados antes de registrar.
+        # Palavras que claramente indicam recarga gratuita (solar/casa/tomada) sem
+        # valor monetário são tratadas diretamente como lançamento zero.
+        # =========================================================================
+        _palavras_abastecimento_liquido = (
+            "abastecer", "abasteci", "abasteço", "abastecimento",
+            "gasolin", "etanol", "posto", "combustiv",
+        )
+        _palavras_gnv = ("gnv", "gas natural")
+        _palavras_eletrico = ("recarga", "kwh", "carregando", "eletrico", "tomada", "solar", "casa")
+
+        is_evento_combustivel = any(w in texto_limpo for w in _palavras_abastecimento_liquido + _palavras_gnv + _palavras_eletrico)
+
+        if is_evento_combustivel:
+            valor_transacao = converter_para_float(texto_bruto)
+
+            # Recargas gratuitas (solar/casa/tomada sem valor) — dispara direto sem fluxo guiado
+            is_recarga_gratuita_gatilho = any(
+                w in texto_limpo for w in ("solar", "casa", "gratis", "tomada", "gratuito")
+            ) and valor_transacao == 0
+
+            # Abastecimento elétrico pago — também usa fluxo guiado (kWh em vez de litros)
+            is_eletrico_gatilho = any(w in texto_limpo for w in ("kwh", "recarga", "eletrico")) and not is_recarga_gratuita_gatilho
+
+            if is_recarga_gratuita_gatilho:
+                # Passa direto como lançamento zero (comportamento anterior)
+                res_tx = await TransacaoService.registrar_transacao(
+                    motorista_id=motorista_id,
+                    tipo_movimentacao="despesa",
+                    categoria="combustivel",
+                    valor=0.0,
+                    descricao=texto_bruto,
+                    wpp_msg_id=wpp_msg_id,
+                )
+                resposta = (
+                    "✅ Recarga gratuita registrada no cofre! 🛡️"
+                    if res_tx.get("status") == "success"
+                    else f"❌ Falha: _{res_tx.get('message')}_"
+                )
+                background_tasks.add_task(enviar_whatsapp, remote_jid, resposta)
+                return {"status": "finance_logged"}
+
+            # Determina tipo de combustível para passar ao fluxo e enriquecer a descrição
+            if any(w in texto_limpo for w in _palavras_gnv):
+                tipo_comb_label = "gnv"
+            elif is_eletrico_gatilho:
+                tipo_comb_label = "eletrico"
+            elif "etanol" in texto_limpo or bool(re.search(r"\balcool\b", texto_limpo)):
+                tipo_comb_label = "etanol"
+            else:
+                tipo_comb_label = "gasolina"
+
+            # Se a mensagem já traz valor total (ex: "gastei 120 gasolina"), preserva no estado
+            sufixo_valor = f"|v:{valor_transacao}" if valor_transacao > 0 else ""
+            sufixo_desc = f"|d:{texto_bruto}" if texto_bruto else ""
+
+            await RedisFSMService.definir_estado(
+                fsm_turno_key,
+                f"ABAST_LITROS|t:{tipo_comb_label}{sufixo_valor}{sufixo_desc}",
+            )
+            background_tasks.add_task(
+                enviar_whatsapp, remote_jid,
+                f"⛽ *Registrando abastecimento de {tipo_comb_label}!*\n\n"
+                "Para um registro preciso no cofre, preciso de 3 dados rápidos:\n\n"
+                "1️⃣ Quantos *litros* foram abastecidos? (ex: *35* ou *35,5*)\n\n"
+                "_Envie *cancelar* a qualquer momento para abortar._",
+            )
+            return {"status": "abast_flow_started"}
+
+        # =========================================================================
         # PASSO 5: LANÇAMENTOS FINANCEIROS LIVRES
         #
         # TRAVA DE PALAVRA-CHAVE: Para registrar um valor monetário, a mensagem DEVE
@@ -986,9 +1190,8 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
         # =========================================================================
         palavras_chave_financeiras = (
             "recebi", "ganhei", "faturei", "corrida", "uber", "99", "indrive", "faturamento", "ganho",
-            "gastei", "paguei", "despesa", "combustiv", "gasolin", "posto", "almoco",
-            "bala", "lava", "marmita", "mercado", "oleo", "pneu", "etanol", "gnv",
-            "recarga", "kwh", "solar", "tomada",
+            "gastei", "paguei", "despesa", "almoco",
+            "bala", "lava", "marmita", "mercado", "oleo", "pneu",
         )
         is_financeiro = any(w in texto_limpo for w in palavras_chave_financeiras)
         valor_transacao = converter_para_float(texto_bruto)
@@ -996,19 +1199,15 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
         if is_financeiro and valor_transacao > 0:
             is_despesa = any(
                 w in texto_limpo for w in (
-                    "gastei", "paguei", "despesa", "combustiv", "gasolin", "etanol", "gnv",
-                    "reabastec", "recarga", "posto", "almoco", "bala", "lava",
+                    "gastei", "paguei", "despesa",
+                    "almoco", "bala", "lava",
                     "marmita", "mercado", "oleo", "pneu",
                 )
             )
             tipo = "despesa" if is_despesa else "receita"
 
             if any(c in texto_limpo for c in
-                   ("gasolin", "etanol", "gnv", "reabastec", "recarga", "posto",
-                    "solar", "casa", "kwh", "tomada", "combustiv")):
-                cat = "combustivel"
-            elif any(c in texto_limpo for c in
-                     ("almoco", "marmita", "lanche", "refeicao", "comida", "rango")):
+                   ("almoco", "marmita", "lanche", "refeicao", "comida", "rango")):
                 cat = "alimentacao"
             elif any(c in texto_limpo for c in
                      ("lava", "oleo", "pneu", "oficina", "mecanico", "manutencao")):

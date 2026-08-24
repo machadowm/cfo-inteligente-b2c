@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict dJXcMxHn5FpQjDSNUlwaLLYUiQdsFreKc5aGKa19vUOcxvUifxDwz1AMokryrKE
+-- \restrict line removed: this metacommand is not valid SQL and fails in docker-entrypoint-initdb.d
 
 -- Dumped from database version 15.18
 -- Dumped by pg_dump version 15.18
@@ -1242,7 +1242,25 @@ CREATE TABLE public.veiculos (
     placa character varying(10) NOT NULL,
     modelo character varying(50) NOT NULL,
     tipo_combustivel character varying(30) NOT NULL,
-    estoque_financeiro jsonb DEFAULT '{"liquido": {"litros": 0, "custo_total": 0}, "eletricidade": {"kwh": 0, "custo_total": 0}}'::jsonb,
+    estoque_financeiro jsonb DEFAULT '{
+        "meta": {
+            "tipo_veiculo": "gasolina",
+            "is_flex": false,
+            "is_hibrido": false,
+            "is_eletrico": false,
+            "capacidade_tanque_l": 50.0,
+            "capacidade_bateria_kwh": 0.0,
+            "qtd_tanques": 1
+        },
+        "liquido": {
+            "litros": 0.0, "custo_total": 0.0,
+            "gasolina_litros": 0.0, "etanol_litros": 0.0,
+            "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0,
+            "km_l_gasolina": 12.0, "km_l_etanol": 8.5
+        },
+        "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5},
+        "gnv": {"m3": 0.0, "custo_total": 0.0, "km_m3": 14.0}
+    }'::jsonb,
     ativo boolean DEFAULT true,
     criado_em timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     locadora character varying(100) DEFAULT 'Localiza Zarp'::character varying,
@@ -1250,7 +1268,8 @@ CREATE TABLE public.veiculos (
     franquia_km_semanal numeric(10,2) DEFAULT 1505.00,
     valor_km_excedente numeric(10,4) DEFAULT 0.75,
     escala_trabalho character varying(100) DEFAULT 'De quarta a segunda (6 dias)'::character varying,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    contrato_personalizado boolean DEFAULT false NOT NULL
 );
 
 
@@ -1569,6 +1588,14 @@ ALTER TABLE ONLY public.caixas_provisao
 
 
 --
+-- Name: caixas_provisao caixas_provisao_motorista_nome_key; Type: CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.caixas_provisao
+    ADD CONSTRAINT caixas_provisao_motorista_nome_key UNIQUE (motorista_id, nome_caixa);
+
+
+--
 -- Name: despesas_fixas_mensais despesas_fixas_mensais_pkey; Type: CONSTRAINT; Schema: public; Owner: admin
 --
 
@@ -1678,6 +1705,14 @@ ALTER TABLE ONLY public.transacoes
 
 ALTER TABLE ONLY public.veiculos
     ADD CONSTRAINT veiculos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: veiculos veiculos_placa_key; Type: CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.veiculos
+    ADD CONSTRAINT veiculos_placa_key UNIQUE (placa);
 
 
 --
@@ -2737,5 +2772,5 @@ ALTER TABLE public.veiculos ENABLE ROW LEVEL SECURITY;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict dJXcMxHn5FpQjDSNUlwaLLYUiQdsFreKc5aGKa19vUOcxvUifxDwz1AMokryrKE
+-- \unrestrict line removed: this metacommand is not valid SQL and fails in docker-entrypoint-initdb.d
 

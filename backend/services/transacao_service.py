@@ -62,9 +62,21 @@ class TransacaoService:
     @staticmethod
     def _garantir_estrutura_estoque(estoque: dict) -> dict:
         """
-        Garante que todas as chaves estruturais do JSONB multi-energia existam,
-        preenchendo com valores neutros para não quebrar operações de leitura.
+        Garante que todas as chaves estruturais do JSONB existam.
+        A sub-chave 'meta' contém os dados físicos e de motorização do veículo
+        (capacidades, flags de tipo) — eliminando a necessidade de colunas
+        dedicadas na tabela veiculos.
         """
+        if "meta" not in estoque:
+            estoque["meta"] = {
+                "tipo_veiculo": "gasolina",
+                "is_flex": False,
+                "is_hibrido": False,
+                "is_eletrico": False,
+                "capacidade_tanque_l": 50.0,
+                "capacidade_bateria_kwh": 0.0,
+                "qtd_tanques": 1,
+            }
         if "liquido" not in estoque:
             estoque["liquido"] = {
                 "litros": 0.0,
@@ -162,7 +174,7 @@ class TransacaoService:
                     SELECT id, veiculo_id
                     FROM public.turnos
                     WHERE motorista_id = $1::uuid
-                      AND status IN ('ABERTO', 'em_andamento', 'em_pausa')
+                      AND status IN ('em_andamento', 'em_pausa')
                     ORDER BY data_inicio DESC
                     LIMIT 1;
                     """,
@@ -184,32 +196,27 @@ class TransacaoService:
                 # ------------------------------------------------------------------
                 if tipo_validado == "despesa" and e_combustivel and veiculo_id:
                     veiculo = await conn.fetchrow(
-                        """
-                        SELECT estoque_financeiro, tipo_combustivel,
-                               capacidade_tanque, capacidade_bateria,
-                               is_flex, is_hibrido, is_eletrico
-                        FROM public.veiculos
-                        WHERE id = $1::uuid;
-                        """,
+                        "SELECT estoque_financeiro, tipo_combustivel FROM public.veiculos WHERE id = $1::uuid;",
                         veiculo_id,
                     )
 
                     if veiculo:
-                        cap_tanque = Decimal(str(veiculo["capacidade_tanque"] or "50.00"))
-                        cap_bateria = Decimal(str(veiculo["capacidade_bateria"] or "30.00"))
-
                         raw_est = veiculo["estoque_financeiro"]
                         estoque: dict = (
                             json.loads(raw_est) if isinstance(raw_est, str) else (raw_est or {})
                         )
                         estoque = TransacaoService._garantir_estrutura_estoque(estoque)
 
-                        tipo_comb = (veiculo["tipo_combustivel"] or "gasolina").lower()
+                        # Capacidades e flags de motorização lidos do JSONB (sub-chave 'meta')
+                        meta = estoque["meta"]
+                        cap_tanque = Decimal(str(meta.get("capacidade_tanque_l", 50.0)))
+                        cap_bateria = Decimal(str(meta.get("capacidade_bateria_kwh", 0.0)))
+                        tipo_comb = (veiculo["tipo_combustivel"] or meta.get("tipo_veiculo", "gasolina")).lower()
 
                         # Determina a fonte de energia do evento
                         is_evento_eletrico = (
                             any(w in desc_limpa for w in ("kwh", "recarga", "solar", "eletrico", "tomada", "casa"))
-                            or bool(veiculo["is_eletrico"])
+                            or bool(meta.get("is_eletrico", False))
                         )
                         is_evento_gnv = (
                             "gnv" in desc_limpa
@@ -337,7 +344,7 @@ class TransacaoService:
                                 eta_atual += litros_novos
                             else:
                                 # Combustível não especificado em veículo Flex: divide 50/50
-                                if veiculo["is_flex"] or veiculo["is_hibrido"]:
+                                if meta.get("is_flex", False) or meta.get("is_hibrido", False):
                                     metade = litros_novos / Decimal("2")
                                     gas_atual += metade
                                     eta_atual += metade

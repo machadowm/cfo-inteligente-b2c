@@ -48,7 +48,22 @@ class TurnoService:
 
     @staticmethod
     def _garantir_estrutura_estoque(estoque: dict) -> dict:
-        """Retrocompatibilidade: adiciona chaves ausentes sem sobrescrever dados existentes."""
+        """
+        Retrocompatibilidade: adiciona chaves ausentes sem sobrescrever dados existentes.
+        A sub-chave 'meta' é a fonte única de verdade para flags de motorização e
+        capacidades físicas do veículo — as colunas correspondentes foram removidas
+        da tabela veiculos.
+        """
+        if "meta" not in estoque:
+            estoque["meta"] = {
+                "tipo_veiculo": "gasolina",
+                "is_flex": False,
+                "is_hibrido": False,
+                "is_eletrico": False,
+                "capacidade_tanque_l": 50.0,
+                "capacidade_bateria_kwh": 0.0,
+                "qtd_tanques": 1,
+            }
         if "liquido" not in estoque:
             estoque["liquido"] = {
                 "litros": 0.0,
@@ -92,7 +107,7 @@ class TurnoService:
 
                 # Garante que não há turno em aberto
                 turno_ativo = await conn.fetchrow(
-                    "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento', 'em_pausa');",
+                    "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('em_andamento', 'em_pausa');",
                     motorista_id,
                 )
                 if turno_ativo:
@@ -111,6 +126,7 @@ class TurnoService:
                     """,
                     veiculo_id,
                 )
+                # Nota: status='concluido' é o valor gravado pelo fechar_turno_com_dre
                 if ultimo and ultimo["km_final"] is not None:
                     km_anterior = Decimal(str(ultimo["km_final"]))
                     if km_ini < km_anterior:
@@ -130,7 +146,7 @@ class TurnoService:
                 row = await conn.fetchrow(
                     """
                     INSERT INTO public.turnos (motorista_id, veiculo_id, km_inicial, status, data_inicio)
-                    VALUES ($1::uuid, $2::uuid, $3, 'ABERTO', $4)
+                    VALUES ($1::uuid, $2::uuid, $3, 'em_andamento', $4)
                     RETURNING id, km_inicial, data_inicio;
                     """,
                     motorista_id, veiculo_id, km_ini, agora_brasil(),
@@ -180,8 +196,6 @@ class TurnoService:
                         t.id, t.km_inicial, t.data_inicio,
                         v.id AS veiculo_id,
                         v.estoque_financeiro, v.tipo_combustivel,
-                        v.is_flex, v.is_hibrido, v.is_eletrico,
-                        v.capacidade_tanque, v.capacidade_bateria,
                         v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal,
                         v.valor_km_excedente, v.escala_trabalho, v.contrato_personalizado,
                         m.meta_mensal_faturamento, m.dias_uteis_mes
@@ -189,7 +203,7 @@ class TurnoService:
                     JOIN public.veiculos v ON v.id = t.veiculo_id
                     JOIN public.motoristas m ON m.id = t.motorista_id
                     WHERE t.motorista_id = $1::uuid
-                      AND t.status IN ('ABERTO', 'em_andamento', 'em_pausa')
+                      AND t.status IN ('em_andamento', 'em_pausa')
                     ORDER BY t.data_inicio DESC
                     LIMIT 1;
                     """,
@@ -225,14 +239,13 @@ class TurnoService:
                 km_rodados = km_fin - km_ini
                 hora_fim = agora_brasil()
 
-                # Marca o turno como concluído imediatamente (antes das queries analíticas)
-                await conn.execute(
-                    "UPDATE public.turnos SET km_final = $1, data_fim = $2, status = 'concluido' WHERE id = $3::uuid;",
-                    km_fin, hora_fim, turno_id,
-                )
-
                 dt_inicio = turno["data_inicio"]
-                if dt_inicio.tzinfo is not None:
+                # Garante que dt_inicio é timezone-aware no mesmo fuso que hora_fim.
+                # asyncpg pode retornar timestamps com tzinfo=UTC (aware) ou sem tzinfo (naive).
+                # Sem este tratamento, a subtração hora_fim (TZ_BR aware) - dt_inicio (naive) lança TypeError.
+                if dt_inicio.tzinfo is None:
+                    dt_inicio = TZ_BR.localize(dt_inicio)
+                else:
                     dt_inicio = dt_inicio.astimezone(TZ_BR)
 
                 # ---------------------------------------------------------------
@@ -240,7 +253,7 @@ class TurnoService:
                 # ---------------------------------------------------------------
                 tempo_total_min = max(
                     Decimal("1"),
-                    Decimal(str(int((hora_fim - dt_inicio).total_seconds() / 60))),
+                    Decimal(str(round((hora_fim - dt_inicio).total_seconds() / 60))),
                 )
                 pausas_val = await conn.fetchval(
                     """
@@ -266,6 +279,11 @@ class TurnoService:
                 estoque: dict = json.loads(raw_est) if isinstance(raw_est, str) else (raw_est or {})
                 estoque = TurnoService._garantir_estrutura_estoque(estoque)
 
+                # Flags de motorização lidos da sub-chave 'meta' do JSONB
+                meta = estoque["meta"]
+                is_hibrido = bool(meta.get("is_hibrido", False))
+                is_eletrico = bool(meta.get("is_eletrico", False))
+
                 custo_combustivel_queimado = Decimal("0.00")
                 unidades_queimadas_liq = Decimal("0.00")
                 unidades_queimadas_ele = Decimal("0.00")
@@ -274,7 +292,7 @@ class TurnoService:
                 km_restante = km_rodados
 
                 # --- 3.1 Fase Elétrica (EV Priority) ---
-                if (turno["is_hibrido"] or turno["is_eletrico"]) and km_restante > Decimal("0"):
+                if (is_hibrido or is_eletrico) and km_restante > Decimal("0"):
                     eletro = estoque["eletricidade"]
                     kwh_disp = Decimal(str(eletro.get("kwh", 0.0)))
                     custo_bat = Decimal(str(eletro.get("custo_total", 0.0)))
@@ -303,7 +321,7 @@ class TurnoService:
                         )
 
                 # --- 3.2 Fase GNV ---
-                tipo_comb = (turno["tipo_combustivel"] or "").lower()
+                tipo_comb = (turno["tipo_combustivel"] or meta.get("tipo_veiculo", "")).lower()
                 if tipo_comb == "gnv" and km_restante > Decimal("0"):
                     gnv = estoque["gnv"]
                     m3_disp = Decimal(str(gnv.get("m3", 0.0)))
@@ -333,7 +351,7 @@ class TurnoService:
                         )
 
                 # --- 3.3 Fase Combustão Líquida (Flex) ---
-                if km_restante > Decimal("0") and not turno["is_eletrico"] and tipo_comb != "gnv":
+                if km_restante > Decimal("0") and not is_eletrico and tipo_comb != "gnv":
                     liq = estoque["liquido"]
                     total_litros = Decimal(str(liq.get("litros", 0.0)))
                     custo_liq = Decimal(str(liq.get("custo_total", 0.0)))
@@ -504,7 +522,13 @@ class TurnoService:
                 total_unidades = unidades_queimadas_liq + unidades_queimadas_ele + unidades_queimadas_gnv
                 km_por_unidade = (km_rodados / total_unidades) if total_unidades > Decimal("0") else Decimal("0")
 
-                # Persiste snapshot contábil
+                # Persiste snapshot contábil e marca o turno como concluído atomicamente.
+                # O UPDATE do turno é feito AQUI, não antes do DRE, para garantir que uma
+                # falha no meio do processamento não deixe o turno morto (concluído sem DRE).
+                await conn.execute(
+                    "UPDATE public.turnos SET km_final = $1, data_fim = $2, status = 'concluido' WHERE id = $3::uuid;",
+                    km_fin, hora_fim, turno_id,
+                )
                 await conn.execute(
                     """
                     INSERT INTO public.fechamento_diario
@@ -562,7 +586,7 @@ class TurnoService:
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
-                    "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento') ORDER BY data_inicio DESC LIMIT 1;",
+                    "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status = 'em_andamento' ORDER BY data_inicio DESC LIMIT 1;",
                     motorista_id,
                 )
                 if not turno:
@@ -606,7 +630,7 @@ class TurnoService:
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
-                    "SELECT id, data_inicio FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
+                    "SELECT id, data_inicio FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
                     motorista_id,
                 )
                 if not turno:

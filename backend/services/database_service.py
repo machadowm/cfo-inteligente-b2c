@@ -103,14 +103,15 @@ class DatabaseService:
 
     @classmethod
     async def buscar_veiculo_ativo_do_motorista(cls, motorista_id: str) -> Optional[asyncpg.Record]:
-        """Busca o veículo principal ativo associado ao tenant do motorista sob isolamento RLS."""
+        """Busca o veículo principal ativo associado ao tenant do motorista sob isolamento RLS.
+        As características físicas (capacidades, flags de motorização) residem no JSONB estoque_financeiro.meta.
+        """
         async with cls.get_tenant_connection(motorista_id) as conn:
             return await conn.fetchrow(
                 """
-                SELECT id, placa, modelo, tipo_combustivel, estoque_financeiro, locadora,
-                       custo_aluguel_semanal, franquia_km_semanal, valor_km_excedente, escala_trabalho,
-                       is_flex, qtd_tanques, is_hibrido, is_eletrico, capacidade_tanque, capacidade_bateria,
-                       contrato_personalizado
+                SELECT id, placa, modelo, tipo_combustivel, estoque_financeiro,
+                       locadora, custo_aluguel_semanal, franquia_km_semanal,
+                       valor_km_excedente, escala_trabalho, contrato_personalizado
                 FROM public.veiculos
                 WHERE motorista_id = $1::uuid AND ativo = TRUE
                 ORDER BY created_at DESC LIMIT 1;
@@ -146,10 +147,9 @@ class DatabaseService:
                 )
                 motorista_id = str(row_motorista["id"])
 
-                # Cria o veículo inicial com a estrutura de estoque multi-energia completa.
-                # ON CONFLICT (placa) para evitar duplicatas em caso de reconexão no onboarding.
-                # As flags is_flex/is_hibrido/is_eletrico e capacidades serão atualizadas
-                # pelo webhook de onboarding logo após este INSERT.
+                # Cria o veículo inicial. ON CONFLICT (placa) para onboarding idempotente.
+                # O estoque_financeiro.meta carregará as capacidades e flags logo após,
+                # no UPDATE do webhook de onboarding — por ora usa defaults neutros.
                 await conn.execute(
                     """
                     INSERT INTO public.veiculos (motorista_id, modelo, placa, tipo_combustivel, estoque_financeiro)
@@ -157,18 +157,19 @@ class DatabaseService:
                     ON CONFLICT (placa) DO NOTHING;
                     """,
                     motorista_id, veiculo_modelo, placa, combustivel,
-                    '{"liquido": {"litros": 0.0, "custo_total": 0.0, "gasolina_litros": 0.0, "etanol_litros": 0.0, "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0, "km_l_gasolina": 12.0, "km_l_etanol": 8.5}, "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5}}'
+                    '{"meta": {"tipo_veiculo": "gasolina", "is_flex": false, "is_hibrido": false, "is_eletrico": false, "capacidade_tanque_l": 50.0, "capacidade_bateria_kwh": 0.0, "qtd_tanques": 1}, "liquido": {"litros": 0.0, "custo_total": 0.0, "gasolina_litros": 0.0, "etanol_litros": 0.0, "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0, "km_l_gasolina": 12.0, "km_l_etanol": 8.5}, "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5}, "gnv": {"m3": 0.0, "custo_total": 0.0, "km_m3": 14.0}}'
                 )
 
-                # Cria as caixas de provisão padrão. ON CONFLICT (motorista_id, nome_caixa)
-                # evita duplicatas se o onboarding for repetido (ex: motorista cadastrado 2x).
+                # Cria as caixas de provisão padrão idempotentemente.
+                # ON CONFLICT (motorista_id, nome_caixa) requer UNIQUE (motorista_id, nome_caixa)
+                # definido no schema (caixas_provisao_motorista_nome_key).
                 await conn.execute(
                     """
                     INSERT INTO public.caixas_provisao (motorista_id, nome_caixa, saldo_atual)
                     VALUES
                         ($1::uuid, 'Manutenção Corretiva (Pneus/Freios)', 0.00),
                         ($1::uuid, 'Amortização de IPVA/Seguro', 0.00)
-                    ON CONFLICT DO NOTHING;
+                    ON CONFLICT (motorista_id, nome_caixa) DO NOTHING;
                     """,
                     motorista_id
                 )

@@ -10,7 +10,7 @@ services:
       TZ: America/Sao_Paulo
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init-v6.sql:/docker-entrypoint-initdb.d/init.sql:ro # ALINHAMENTO: Usa o schema mestre v6 com travas e colunas corretas
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro # ALINHAMENTO: Usa o schema mestre v6 com travas e colunas corretas
     ports:
       # Blindagem L4: Acesso apenas através do host local
       - "127.0.0.1:5432:5432"

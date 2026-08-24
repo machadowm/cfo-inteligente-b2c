@@ -435,10 +435,13 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                 placa = partes[4].split("placa:")[1]
 
                 tanque_val = converter_para_float(texto_bruto)
-                if tanque_val < 0:
+                # Elétrico puro pode ter tanque 0 (sem motor a combustão).
+                # Todos os outros tipos exigem tanque > 0 para que o CMP seja calculável.
+                tanque_minimo = 0 if combustivel == "eletrico" else 1
+                if tanque_val < tanque_minimo:
                     escapou = await registrar_erro_e_verificar_escape(
                         remote_jid, tenant_id, fsm_key,
-                        "⚠️ A capacidade não pode ser negativa. Digite novamente:",
+                        "⚠️ A capacidade do tanque deve ser maior que zero para veículos a combustão. Digite novamente:",
                     )
                     return {"status": "onboarding_escaped" if escapou else "onboarding_invalid_tank"}
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
@@ -462,39 +465,33 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                         combustivel=combustivel, placa=placa,
                     )
                     async with DatabaseService.get_tenant_connection(motorista_uuid) as conn:
-                        # Estoque inicial completo — todas as chaves obrigatórias presentes para evitar KeyError
-                        if combustivel == "gnv":
-                            estoque_dict = {
-                                "gnv": {"m3": 0.0, "custo_total": 0.0, "km_m3": 14.0},
-                                "liquido": {
-                                    "litros": 0.0, "custo_total": 0.0,
-                                    "gasolina_litros": 0.0, "etanol_litros": 0.0,
-                                    "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0,
-                                    "km_l_gasolina": 12.0, "km_l_etanol": 8.5,
-                                },
-                                "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5},
-                            }
-                        else:
-                            estoque_dict = {
-                                "liquido": {
-                                    "litros": 0.0, "custo_total": 0.0,
-                                    "gasolina_litros": 0.0, "etanol_litros": 0.0,
-                                    "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0,
-                                    "km_l_gasolina": 12.0, "km_l_etanol": 8.5,
-                                },
-                                "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5},
-                                "gnv": {"m3": 0.0, "custo_total": 0.0, "km_m3": 14.0},
-                            }
+                        # Todas as especificações físicas do veículo residem no JSONB (sub-chave 'meta').
+                        # Não há colunas físicas dedicadas na tabela veiculos.
+                        estoque_dict = {
+                            "meta": {
+                                "tipo_veiculo": combustivel,
+                                "is_flex": (combustivel == "flex"),
+                                "is_hibrido": False,
+                                "is_eletrico": False,
+                                "capacidade_tanque_l": float(tanque_val),
+                                "capacidade_bateria_kwh": 0.0,
+                                "qtd_tanques": 1,
+                            },
+                            "liquido": {
+                                "litros": 0.0, "custo_total": 0.0,
+                                "gasolina_litros": 0.0, "etanol_litros": 0.0,
+                                "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0,
+                                "km_l_gasolina": 12.0, "km_l_etanol": 8.5,
+                            },
+                            "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5},
+                            "gnv": {"m3": 0.0, "custo_total": 0.0, "km_m3": 14.0},
+                        }
                         await conn.execute(
                             """
                             UPDATE public.veiculos
-                            SET capacidade_tanque = $1, capacidade_bateria = 0.00,
-                                is_flex = $2, is_hibrido = FALSE, is_eletrico = FALSE,
-                                estoque_financeiro = $3::jsonb
-                            WHERE motorista_id = $4::uuid AND ativo = TRUE;
+                            SET estoque_financeiro = $1::jsonb
+                            WHERE motorista_id = $2::uuid AND ativo = TRUE;
                             """,
-                            tanque_val,
-                            (combustivel == "flex"),
                             json.dumps(estoque_dict),
                             motorista_uuid,
                         )
@@ -534,7 +531,18 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                         combustivel=combustivel, placa=placa,
                     )
                     async with DatabaseService.get_tenant_connection(motorista_uuid) as conn:
+                        # Veículo híbrido ou elétrico: capacidade_bateria_kwh vem da resposta do onboarding.
+                        # Todas as especificações físicas residem no JSONB (sub-chave 'meta').
                         estoque_dict = {
+                            "meta": {
+                                "tipo_veiculo": combustivel,
+                                "is_flex": (combustivel == "flex"),
+                                "is_hibrido": (combustivel == "hibrido"),
+                                "is_eletrico": (combustivel == "eletrico"),
+                                "capacidade_tanque_l": float(tanque_val),
+                                "capacidade_bateria_kwh": float(bateria_val),
+                                "qtd_tanques": 1,
+                            },
                             "liquido": {
                                 "litros": 0.0, "custo_total": 0.0,
                                 "gasolina_litros": 0.0, "etanol_litros": 0.0,
@@ -547,15 +555,9 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                         await conn.execute(
                             """
                             UPDATE public.veiculos
-                            SET capacidade_tanque = $1, capacidade_bateria = $2,
-                                is_flex = $3, is_hibrido = $4, is_eletrico = $5,
-                                estoque_financeiro = $6::jsonb
-                            WHERE motorista_id = $7::uuid AND ativo = TRUE;
+                            SET estoque_financeiro = $1::jsonb
+                            WHERE motorista_id = $2::uuid AND ativo = TRUE;
                             """,
-                            tanque_val, bateria_val,
-                            (combustivel == "flex"),
-                            (combustivel == "hibrido"),
-                            (combustivel == "eletrico"),
                             json.dumps(estoque_dict),
                             motorista_uuid,
                         )
@@ -607,7 +609,9 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
         # O processamento de lançamentos financeiros avulsos é BLOQUEADO aqui.
         # =========================================================================
         estado_aguarda_km = estado_turno in ("AGUARDANDO_KM_INICIAL", "AGUARDANDO_KM_FINAL")
-        estado_confirmacao_zero = estado_turno.startswith("AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO")
+        # Usa str(estado_turno) defensivamente; obter_estado nunca retorna None mas pode
+        # retornar "IDLE" — startswith em "IDLE" é seguro (retorna False).
+        estado_confirmacao_zero = str(estado_turno).startswith("AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO")
 
         if estado_aguarda_km or estado_confirmacao_zero:
 
@@ -715,7 +719,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                         ativo = await conn.fetchrow(
                             "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid "
-                            "AND status IN ('ABERTO', 'em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
+                            "AND status IN ('em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
                             motorista_id,
                         )
                     if ativo:
@@ -791,6 +795,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                         """,
                         locadora, aluguel_semanal, franquia, motorista_id,
                     )
+                    # Nota: contrato_personalizado é dado administrativo, não físico — mantém-se como coluna.
                 background_tasks.add_task(
                     enviar_whatsapp, remote_jid,
                     f"✅ Contrato atualizado para *{locadora}*! Aluguel rateado recalculado no cofre. 🛡️",
@@ -814,13 +819,13 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                     turno_ativo = await conn.fetchrow(
                         """
                         SELECT t.id, t.km_inicial, t.data_inicio,
-                               v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal,
-                               v.valor_km_excedente, v.escala_trabalho,
-                               m.meta_mensal_faturamento, m.dias_uteis_mes
+                           v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal,
+                           v.valor_km_excedente, v.escala_trabalho,
+                           m.meta_mensal_faturamento, m.dias_uteis_mes
                         FROM public.turnos t
                         JOIN public.veiculos v ON v.id = t.veiculo_id
                         JOIN public.motoristas m ON m.id = t.motorista_id
-                        WHERE t.motorista_id = $1::uuid AND t.status IN ('ABERTO', 'em_andamento', 'em_pausa')
+                        WHERE t.motorista_id = $1::uuid AND t.status IN ('em_andamento', 'em_pausa')
                         ORDER BY t.data_inicio DESC LIMIT 1;
                         """,
                         motorista_id,
@@ -871,8 +876,11 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
             w in texto_limpo for w in ("retomar", "voltar", "voltei", "continuar", "retom")
         )
 
-        # Extrai odômetro inline (número > 100 na mensagem)
-        numeros_msg = re.findall(r"\d+", texto_limpo.replace(".", "").replace(",", ""))
+        # Extrai odômetro inline (número > 100 na mensagem).
+        # Remove separadores de milhar (ponto e vírgula) ANTES de extrair os dígitos,
+        # para que "13.990" ou "13,990" sejam lidos como 13990 e não como "13" e "990".
+        texto_para_km = texto_limpo.replace(".", "").replace(",", "")
+        numeros_msg = re.findall(r"\d+", texto_para_km)
         km_encontrado = next((float(n) for n in numeros_msg if float(n) > 100), None)
 
         # =========================================================================
@@ -915,7 +923,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                 async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                     ativo = await conn.fetchrow(
                         "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid "
-                        "AND status IN ('ABERTO', 'em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
+                        "AND status IN ('em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
                         motorista_id,
                     )
                 if ativo:

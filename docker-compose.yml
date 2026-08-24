@@ -2,20 +2,25 @@ services:
   db:
     image: postgres:15-alpine
     container_name: cfo_postgres
-    restart: always
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-cfo_b2c}
       TZ: America/Sao_Paulo
     volumes:
-      - ./postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-v6.sql:/docker-entrypoint-initdb.d/init.sql:ro # ALINHAMENTO: Usa o schema mestre v6 com travas e colunas corretas
     ports:
       # Blindagem L4: Acesso apenas através do host local
       - "127.0.0.1:5432:5432"
     networks:
       - cfo_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-admin} -d $${POSTGRES_DB:-cfo_b2c}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     logging:
       driver: "json-file"
       options:
@@ -25,15 +30,20 @@ services:
   redis:
     image: redis:7-alpine
     container_name: cfo_redis
-    restart: always
+    restart: unless-stopped
     command: redis-server --appendonly yes
     volumes:
-      - ./redis_data:/data
+      - redis_data:/data
     ports:
       # Blindagem L4: Acesso apenas através do host local
       - "127.0.0.1:6379:6379"
     networks:
       - cfo_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     logging:
       driver: "json-file"
       options:
@@ -41,22 +51,26 @@ services:
         max-file: "3"
 
   minio:
-    image: minio/minio
+    image: minio/minio:RELEASE.2024-03-30T09-41-56Z # Tag fixada para evitar breaking changes do latest
     container_name: cfo_minio
-    restart: always
+    restart: unless-stopped
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     command: server /data --console-address ":9001"
     volumes:
-      - ./minio_data:/data
+      - minio_data:/data
     ports:
-      # Blindagem L4: Se precisar de acesso público direto (ex: gerar links de imagens) 
-      # para a internet, remova o "127.0.0.1:" destes portos.
+      # Blindagem L4: MinIO isolado internamente para acesso seguro via FastAPI
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     networks:
       - cfo_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     logging:
       driver: "json-file"
       options:
@@ -67,25 +81,25 @@ services:
     build:
       context: ./backend
     container_name: cfo_fastapi
-    restart: always
+    restart: unless-stopped
     depends_on:
-      - db
-      - redis
-      - minio
+      db:
+        condition: service_healthy # Sincronização de inicialização física
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
       - ./backend:/app
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD}@cfo_postgres:5432/${POSTGRES_DB:-cfo_b2c}
-      - REDIS_URL=redis://cfo_redis:6379/0
-      - MINIO_URL=http://cfo_minio:9000
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-cfo_b2c} # Uso do DNS interno do serviço (db)
+      - REDIS_URL=redis://redis:6379/0 # Uso do DNS interno do serviço (redis)
+      - MINIO_URL=http://minio:9000
       - TZ=America/Sao_Paulo
-      # Rotas Internas Críticas Resolvidas
-      - EVOLUTION_API_URL=http://cfo_evolution:8080
+      - EVOLUTION_API_URL=http://evolution_api:8080 # Ajustado para o nome do serviço interno da rede Docker
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
     ports:
-      # Exposto externamente para receber requisições se não houver um Nginx na frente
       - "8000:8000"
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
     networks:
       - cfo_network
     logging:
@@ -97,10 +111,12 @@ services:
   evolution_api:
     image: evoapicloud/evolution-api:v2.3.7
     container_name: cfo_evolution
-    restart: always
+    restart: unless-stopped
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       - NODE_OPTIONS=--dns-result-order=ipv4first
       - SERVER_PORT=8080
@@ -110,15 +126,14 @@ services:
       - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
       - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true
       - DATABASE_PROVIDER=postgresql
-      - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD}@cfo_postgres:5432/${POSTGRES_DB:-cfo_b2c}?schema=evolution
+      - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-cfo_b2c}?schema=evolution # Uso de DNS interno
       - CACHE_PROVIDER=redis
-      - CACHE_REDIS_URI=redis://cfo_redis:6379/1
+      - CACHE_REDIS_URI=redis://redis:6379/1 # Uso de DNS interno
       - DEL_INSTANCE=false
       - CONFIG_SESSION_PHONE=false
       - LOG_LEVEL=ERROR
       - TZ=America/Sao_Paulo
     ports:
-      # Exposto para que o WhatsApp web comunique
       - "8080:8080"
     networks:
       - cfo_network
@@ -131,6 +146,14 @@ services:
         max-size: "10m"
         max-file: "3"
 
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+
 networks:
   cfo_network:
     driver: bridge
+    driver_opts:
+      # Otimização crucial: Impede estouros e timeouts de pacotes no Hyper-V
+      com.docker.network.driver.mtu: 1350

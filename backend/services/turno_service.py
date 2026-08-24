@@ -163,7 +163,7 @@ class TurnoService:
                     dt_inicio = dt_inicio.astimezone(TZ_BR)
 
                 # Cálculo de tempo operacional
-                tempo_total_min = Decimal(str(int((hora_fim_real - dt_inicio).total_seconds() / 60)))
+                tempo_total_min = max(Decimal("1"), Decimal(str(int((hora_fim_real - dt_inicio).total_seconds() / 60))))
                 pausas_row = await conn.fetchval(
                     "SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(fim_pausa, CURRENT_TIMESTAMP) - inicio_pausa))/60), 0) FROM public.pausas_turno WHERE turno_id = $1::uuid;",
                     turno_id

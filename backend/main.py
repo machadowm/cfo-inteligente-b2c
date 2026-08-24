@@ -126,7 +126,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     if not res.get("contrato_personalizado", False):
         rodape_sugestao = (
             "\n\n"
-            "Willian, este cálculo de hoje usou o custo padrão de *Aluguel da Zarp (R$ 170,14/dia)*. "
+            f"{nome_motorista}, este cálculo de hoje usou o custo padrão de *Aluguel da Zarp (R$ 170,14/dia)*. "
             "Mas queremos que seu lucro líquido seja 100% real. Como você trabalha nas ruas hoje? "
             "Escolha uma opção para ajustarmos o bot ao seu bolso:\n\n"
             "1️⃣ *Carro Alugado* (Zarp, Movida, Mottu, etc.):\n"
@@ -256,7 +256,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
 
         remote_jid = data.get("key", {}).get("remoteJid", "")
         tenant_id = remote_jid.split("@")[0] if remote_jid else "unknown"
-        wpp_msg_id = data.get("key", {}).get("id", "unknown")
+        wpp_msg_id = data.get("key", {}).get("id") or None
         
         texto_bruto = (
             data.get("message", {}).get("conversation") or 
@@ -377,7 +377,13 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
                         async with DatabaseService.get_tenant_connection(motorista_uuid) as conn:
                             estoque_dict = {}
                             if combustivel == "gnv":
-                                estoque_dict = {"gnv": {"m3": 0.0, "custo_total": 0.0, "km_unidade": 14.0}}
+                                estoque_dict = {
+                                    "gnv": {"m3": 0.0, "custo_total": 0.0, "km_unidade": 14.0},
+                                    "liquido": {"litros": 0.0, "custo_total": 0.0, "gasolina_litros": 0.0,
+                                                "etanol_litros": 0.0, "gasolina_proporcao": 1.0,
+                                                "etanol_proporcao": 0.0, "km_l_gasolina": 12.0, "km_l_etanol": 8.5},
+                                    "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5}
+                                }
                             else:
                                 estoque_dict = {
                                     "liquido": {
@@ -498,7 +504,7 @@ async def evolution_webhook_routing(request: Request, background_tasks: Backgrou
         estado_turno = await RedisFSMService.obter_estado(fsm_turno_key)
 
         # Pre-parse de comandos e intents
-        tem_intencao_inicio = any(w in texto_limpo for w in ["iniciar", "comecar", "abrir", "bora", "turno", "inicio"])
+        tem_intencao_inicio = any(w in texto_limpo for w in ["iniciar", "comecar", "abrir", "bora", "inicio"])
         tem_intencao_fim = any(w in texto_limpo for w in ["encerrar", "fechar", "finalizar", "terminar", "fim"])
         tem_intencao_pausa = any(w in texto_limpo for w in ["pausa", "pausar", "pause", "pausei", "almocar"])
         tem_intencao_retomada = any(w in texto_limpo for w in ["retomar", "voltar", "voltei", "continuar", "retom"])

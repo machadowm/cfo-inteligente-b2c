@@ -76,7 +76,7 @@ class TurnoService:
                         # Retorna erro amigável sem limpar a máquina de estados FSM
                         return {
                             "sucesso": False,
-                            "erro": f"⚠️ *Odômetro Divergente!*\nO valor informado (*{float(km_inicial_decimal):.1f} km*) é menor que o odômetro final do último turno deste veículo (*{float(km_final_anterior):.1f} km*).\n\n"
+                            "erro": f"⚠️ *Odômetro Divergente!*\nO valor informado (*{float(km_inicial_decimal):.1f} km*) é menor que o odômetro final do último turno deste veículo (*{float(km_final_anterior):.1f} km*).\\n\\n"
                                    f"Por favor, envie o **valor correto** atual do painel do seu veículo:",
                             "tipo_erro": "ODOMETRO_DIVERGENTE"
                         }
@@ -146,7 +146,7 @@ class TurnoService:
                 if km_final_decimal < km_inicial_decimal:
                     return {
                         "sucesso": False,
-                        "erro": f"⚠️ *Odômetro Final Divergente!*\nO valor informado (*{float(km_final_decimal):.1f} km*) é inferior ao inicial registrado no início do turno (*{float(km_inicial_decimal):.1f} km*).\n\n"
+                        "erro": f"⚠️ *Odômetro Final Divergente!*\nO valor informado (*{float(km_final_decimal):.1f} km*) é inferior ao inicial registrado no início do turno (*{float(km_inicial_decimal):.1f} km*).\\n\\n"
                                f"Por favor, envie o **valor correto** atual do painel do seu veículo:",
                         "tipo_erro": "ODOMETRO_DIVERGENTE"
                     }
@@ -369,7 +369,7 @@ class TurnoService:
                     "INSERT INTO public.fechamento_diario ("
                     "    motorista_id, turno_id, faturamento_bruto, custo_variavel_direto, "
                     "    custo_fixo_rateado, lucro_liquido_real, km_rodados, data_fechamento"
-                    ") VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, CURRENT_DATE);",
+                    ") VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, CURRENT_DATE);" ,
                     motorista_id, turno_id, faturamento_bruto, custo_variavel_total,
                     custo_fixo_total, lucro_liquido_real, km_rodados
                 )
@@ -419,7 +419,7 @@ class TurnoService:
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
-                    "SELECT id, status FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento') ORDER BY data_inicio DESC LIMIT 1;",
+                    "SELECT id, status FROM public.turnos WHERE motorista_id = $1::uuid AND status = 'ABERTO' ORDER BY data_inicio DESC LIMIT 1;",
                     motorista_id
                 )
                 if not turno:
@@ -448,7 +448,7 @@ class TurnoService:
                     return {"sucesso": False, "erro": "❌ Não encontramos nenhuma jornada em pausa registrada no momento."}
 
                 turno_id = str(turno["id"])
-                await conn.execute("UPDATE public.turnos SET status = 'em_andamento' WHERE id = $1::uuid;", turno_id)
+                await conn.execute("UPDATE public.turnos SET status = 'ABERTO' WHERE id = $1::uuid;", turno_id)
                 await conn.execute(
                     "UPDATE public.pausas_turno SET fim_pausa = $1 WHERE turno_id = $2::uuid AND fim_pausa IS NULL;",
                     agora_brasil(), turno_id

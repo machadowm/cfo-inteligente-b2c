@@ -1,7 +1,7 @@
 import os
 import redis.asyncio as redis
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://:cfo_redis_password_2026@cfo_redis:6379/0")
+REDIS_URL = os.getenv("REDIS_URL", "redis://cfo_redis:6379/0")
 
 class RedisFSMService:
     """
@@ -73,3 +73,10 @@ class RedisFSMService:
         """Reseta o contador de erros consecutivos do tenant."""
         client = await RedisFSMService.get_client()
         await client.delete(f"errors:{key}")
+
+    @classmethod
+    async def close_client(cls):
+        """Encerra o cliente Redis e reseta o singleton para permitir reconexão limpa."""
+        if cls._client is not None:
+            await cls._client.aclose()
+            cls._client = None

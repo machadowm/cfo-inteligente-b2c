@@ -419,7 +419,7 @@ class TurnoService:
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
-                    "SELECT id, status FROM public.turnos WHERE motorista_id = $1::uuid AND status = 'ABERTO' ORDER BY data_inicio DESC LIMIT 1;",
+                    "SELECT id, status FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento') ORDER BY data_inicio DESC LIMIT 1;",
                     motorista_id
                 )
                 if not turno:
@@ -448,7 +448,7 @@ class TurnoService:
                     return {"sucesso": False, "erro": "❌ Não encontramos nenhuma jornada em pausa registrada no momento."}
 
                 turno_id = str(turno["id"])
-                await conn.execute("UPDATE public.turnos SET status = 'ABERTO' WHERE id = $1::uuid;", turno_id)
+                await conn.execute("UPDATE public.turnos SET status = 'em_andamento' WHERE id = $1::uuid;", turno_id)
                 await conn.execute(
                     "UPDATE public.pausas_turno SET fim_pausa = $1 WHERE turno_id = $2::uuid AND fim_pausa IS NULL;",
                     agora_brasil(), turno_id

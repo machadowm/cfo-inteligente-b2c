@@ -89,14 +89,16 @@ class DatabaseService:
         """Resolve os dados cadastrais básicos de um motorista com base em seu telefone."""
         async with cls.get_connection() as conn:
             tel_limpo = ''.join(filter(str.isdigit, telefone))
+            # Use the last 11 digits (full Brazilian mobile number: DDD + 9 digits) to avoid
+            # cross-tenant collisions that a shorter suffix match would allow.
             return await conn.fetchrow(
                 """
                 SELECT id, telefone, nome, meta_mensal_faturamento, dias_uteis_mes, nome_social, possui_multiplos_veiculos
                 FROM public.motoristas
-                WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(telefone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '') LIKE '%' || $1 || '%'
+                WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(telefone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '') LIKE '%' || $1
                 LIMIT 1;
                 """,
-                tel_limpo[-8:]
+                tel_limpo[-11:]
             )
 
     @classmethod

@@ -124,7 +124,9 @@ class TransacaoService:
                 # 2. Telemetria e Recalibração de Combustível
                 if tipo_validado == "despesa" and categoria.lower() == "combustivel" and veiculo_id:
                     veiculo = await conn.fetchrow(
-                        "SELECT estoque_financeiro, tipo_combustivel FROM public.veiculos WHERE id = $1::uuid;", 
+                        """SELECT estoque_financeiro, tipo_combustivel,
+                                  is_hibrido, is_eletrico, is_flex, capacidade_bateria
+                           FROM public.veiculos WHERE id = $1::uuid;""",
                         veiculo_id
                     )
                     

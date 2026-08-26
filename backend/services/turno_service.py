@@ -270,6 +270,8 @@ class TurnoService:
                     """
                     SELECT t.id, t.km_inicial, t.data_inicio, v.id as veiculo_id,
                            v.estoque_financeiro, v.tipo_combustivel,
+                           v.is_hibrido, v.is_eletrico, v.is_flex,
+                           v.capacidade_bateria,
                            v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal, v.valor_km_excedente,
                            v.escala_trabalho, v.contrato_personalizado, m.meta_mensal_faturamento, m.dias_uteis_mes
                     FROM public.turnos t
@@ -329,8 +331,9 @@ class TurnoService:
                 estoque = TurnoService._garantir_estrutura_estoque(estoque)
                 meta = estoque["meta"]
 
-                is_hibrido = bool(meta.get("is_hibrido", False))
-                is_eletrico = bool(meta.get("is_eletrico", False))
+                # Flags escalares têm precedência sobre JSONB.meta (banco de produção possui ambos)
+                is_hibrido = bool(turno.get("is_hibrido") if turno.get("is_hibrido") is not None else meta.get("is_hibrido", False))
+                is_eletrico = bool(turno.get("is_eletrico") if turno.get("is_eletrico") is not None else meta.get("is_eletrico", False))
                 tipo_comb = (turno["tipo_combustivel"] or meta.get("tipo_veiculo", "")).lower()
 
                 custo_combustivel_queimado = Decimal("0.00")

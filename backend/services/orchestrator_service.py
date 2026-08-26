@@ -573,6 +573,39 @@ class OrchestratorService:
         # =========================================================================
         # 3. INTERCEPÇÃO DA FSM DE JORNADA (Precedência Absoluta)
         # =========================================================================
+        if estado_turno and estado_turno.startswith("AGUARDANDO_VALOR_ABASTECIMENTO"):
+            # Estado: motorista declarou intenção de abastecer mas não informou o valor.
+            # O contexto da intenção original (descrição + tipo de combustível) foi
+            # serializado no próprio estado: AGUARDANDO_VALOR_ABASTECIMENTO|desc:{texto}
+            valor_informado = converter_para_float(texto_bruto)
+            if valor_informado > 0:
+                desc_original = estado_turno.split("|desc:")[1] if "|desc:" in estado_turno else texto_bruto
+                await RedisFSMService.limpar_buffer(fsm_turno_key)
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                res_tx = await TransacaoService.registrar_transacao(
+                    motorista_id=motorista_id,
+                    tipo_movimentacao='despesa',
+                    categoria='combustivel',
+                    valor=valor_informado,
+                    descricao=desc_original,
+                    wpp_msg_id=wpp_msg_id
+                )
+                if res_tx.get("status") == "success":
+                    valor_fmt = f"R$ {valor_informado:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    resposta = f"⛽ Abastecimento de  *{valor_fmt}*  registrado e estoque atualizado no cofre! 🛡"
+                elif res_tx.get("status") == "duplicate":
+                    resposta = "⚠ Este lançamento já foi guardado anteriormente no cofre contábil."
+                else:
+                    resposta = f"❌ Falha ao registrar: {res_tx.get('message')}"
+            else:
+                await registrar_erro_e_verificar_escape(
+                    remote_jid, tenant_id, fsm_turno_key,
+                    "⚠ Não consegui identificar o valor. Envie apenas o valor pago no abastecimento (ex:  *85,50* ):"
+                )
+                return
+            await enviar_whatsapp(remote_jid, resposta)
+            return
+
         if estado_turno in ["AGUARDANDO_KM_INICIAL", "AGUARDANDO_KM_FINAL"] or (estado_turno and estado_turno.startswith("AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO")):
             km_digitado = converter_para_float(texto_bruto)
 

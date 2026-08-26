@@ -154,11 +154,16 @@ class TransacaoService:
                         meta = estoque["meta"]
                         capacidade_tanque = Decimal(str(meta.get("capacidade_tanque_l", "50.0")))
                         capacidade_bateria = Decimal(str(meta.get("capacidade_bateria_kwh", "30.0")))
-                        
-                        # Detecção de Energia (Regex Expandida conformeGround Truth)
+                        tipo_veiculo = (veiculo["tipo_combustivel"] or meta.get("tipo_veiculo", "gasolina")).lower()
+
+                        # Detecção de Energia (Regex Expandida conforme Ground Truth)
                         is_eletrico_event = (
                             "kwh" in desc_limpa or "recarga" in desc_limpa or "solar" in desc_limpa or
                             "eletrico" in desc_limpa or bool(meta.get("is_eletrico", False))
+                        )
+                        is_gnv_event = (
+                            "gnv" in desc_limpa or "gas natural" in desc_limpa or
+                            "m3" in desc_limpa or tipo_veiculo == "gnv"
                         )
 
                         # 2.1. Recarga Elétrica
@@ -192,7 +197,25 @@ class TransacaoService:
                             dados_elet["custo_total"] = float((Decimal(str(dados_elet["custo_total"])) + valor_decimal).quantize(Decimal("0.01"), ROUND_HALF_UP))
                             estoque["eletricidade"] = dados_elet
 
-                        # 2.2. Abastecimento Líquido (Mix Químico)
+                        # 2.2. Abastecimento GNV (m³)
+                        elif is_gnv_event:
+                            if "gnv" not in estoque:
+                                estoque["gnv"] = {"m3": 0.0, "custo_total": 0.0, "km_m3": 14.0}
+                            dados_gnv = estoque["gnv"]
+                            m3_atual = Decimal(str(dados_gnv.get("m3", 0.0)))
+
+                            m3_match = re.search(r'(\d+[.,]?\d*)\s*(?:m3|metros? cubicos?|m³)', desc_limpa)
+                            if m3_match:
+                                m3_novos = Decimal(m3_match.group(1).replace(',', '.'))
+                            else:
+                                # Preço médio de referência GNV: ~3,50/m³
+                                m3_novos = (valor_decimal / Decimal("3.50")).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+                            dados_gnv["m3"] = float((m3_atual + m3_novos).quantize(Decimal("0.01"), ROUND_HALF_UP))
+                            dados_gnv["custo_total"] = float((Decimal(str(dados_gnv["custo_total"])) + valor_decimal).quantize(Decimal("0.01"), ROUND_HALF_UP))
+                            estoque["gnv"] = dados_gnv
+
+                        # 2.3. Abastecimento Líquido (Mix Químico Flex/Gasolina/Etanol)
                         else:
                             dados_liq = estoque["liquido"]
                             qtd_atual = Decimal(str(dados_liq.get("litros", 0.0)))

@@ -187,14 +187,34 @@ async def registrar_erro_e_verificar_escape(remote_jid: str, tenant_id: str, fsm
 # --- Orquestrador de Mensagens ---
 
 class OrchestratorService:
+    # Janela de debouncing em segundos. Mensagens enviadas em rajada dentro
+    # desta janela são bufferizadas e processadas como um único evento.
+    _DEBOUNCE_JANELA_SEGUNDOS: int = 4
+
     @staticmethod
     async def router(tenant_id: str, remote_jid: str, texto_bruto: str, wpp_msg_id: Optional[str] = None, **kwargs):
-        # Resiliência de Interface: Tolera chamadas legadas ou concorrentes com 'wpp_id' ou 'wpp_msg_id' como kwargs
-        wpp_msg_id = wpp_msg_id or kwargs.get("wpp_id") or kwargs.get("wpp_msg_id") or "unknown"
         """
         Orquestrador Central do Fluxo Contábil e de Onboarding.
         Remove 100% da sobrecarga do FastAPI Event Loop rodando de forma assíncrona.
+        Implementa debouncing de mensagens via Redis para aglutinação de rajadas.
         """
+        # Resiliência de Interface: Tolera chamadas legadas com nomes de parâmetro variáveis
+        wpp_msg_id = wpp_msg_id or kwargs.get("wpp_id") or kwargs.get("wpp_msg_id") or "unknown"
+
+        # --- DEBOUNCING: Acumula a mensagem no buffer e aguarda a janela fechar ---
+        mensagens_buffer = await RedisFSMService.acumular_mensagem(
+            tenant_id, texto_bruto, OrchestratorService._DEBOUNCE_JANELA_SEGUNDOS
+        )
+        # Se há mais de uma mensagem no buffer, esta não é a última da rajada:
+        # descarta silenciosamente e aguarda o processamento da mensagem final.
+        if len(mensagens_buffer) > 1:
+            return
+
+        # Reconstrói o texto consolidado caso múltiplas mensagens tenham chegado
+        # e esta seja a última (o buffer já terá expirado para as anteriores).
+        # Na prática com janela de 4s, chegamos aqui com exatamente 1 mensagem.
+        texto_bruto = " ".join(mensagens_buffer) if mensagens_buffer else texto_bruto
+
         texto_limpo = normalizar_texto(texto_bruto)
 
         # 1. Bypass de Cache de Perfil no Redis para Velocidade Absoluta

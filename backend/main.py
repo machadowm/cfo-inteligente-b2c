@@ -51,10 +51,10 @@ async def process_webhook_background(payload: WebhookPayload, background_tasks: 
         data = payload.data
         key = data.key
 
-        if key.fromMe:
+        if key.from_me:
             return
 
-        remote_jid = key.remoteJid
+        remote_jid = key.remote_jid
         tenant_id = remote_jid.split("@")[0] if remote_jid else "unknown"
         wpp_msg_id = key.id
 
@@ -62,8 +62,8 @@ async def process_webhook_background(payload: WebhookPayload, background_tasks: 
         message = data.message
         texto_bruto = (
             message.conversation or
-            (message.extendedTextMessage.get("text") if message.extendedTextMessage else None) or
-            (message.imageMessage.get("caption") if message.imageMessage else None) or
+            (message.extended_text_message.get("text") if message.extended_text_message else None) or
+            (message.image_message.get("caption") if message.image_message else None) or
             ""
         ).strip()
 

@@ -1,21 +1,19 @@
 import os
-import re
-import unicodedata
 import logging
 import orjson
 from fastapi import FastAPI, Request, BackgroundTasks, Response
-from contextlib import asynccontextmanager
 from typing import Any
+from contextlib import asynccontextmanager
 
+from schemas import WebhookPayload
 from services.database_service import DatabaseService
 from services.redis_fsm import RedisFSMService
 from services.orchestrator_service import OrchestratorService
 
-# Configuração de Logs
+# Logs de Observabilidade
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Serializador ORJSON para resposta em microsegundos
 class ORJSONResponse(Response):
     media_type = "application/json"
     def render(self, content: Any) -> bytes:
@@ -23,53 +21,68 @@ class ORJSONResponse(Response):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("CFO Inteligente B2C: High-Performance Engine Started")
+    logger.info("Initializing CFO Inteligente B2C Backend stack (Peak Performance Ingestion Gateway)...")
     await DatabaseService.initialize_pool()
     yield
+    logger.info("Draining connections graciosamente...")
     await DatabaseService.close_pool()
-    await RedisFSMService.close_client()
-
-app = FastAPI(title="CFO Peak API", default_response_class=ORJSONResponse, lifespan=lifespan)
-
-# Regex pré-compiladas (Performance de CPU)
-RE_CLEAN = re.compile(r'[^a-zA-Z0-9\s]')
-
-def normalizar_fast(texto: str) -> str:
-    if not texto: return ""
-    nfkd = unicodedata.normalize('NFKD', texto)
-    sem_acento = "".join([c for c in nfkd if not unicodedata.combining(c)])
-    return RE_CLEAN.sub('', sem_acento).lower().strip()
-
-@app.post("/webhook/evolution")
-async def webhook_v5(request: Request, background_tasks: BackgroundTasks):
     try:
-        body = await request.json()
-        data = body.get("data", {})
-        key = data.get("key", {})
-
-        if key.get("fromMe"): return {"status": "ignored"}
-
-        remote_jid = key.get("remoteJid", "")
-        tenant_id = remote_jid.split("@")
-        
-        msg = data.get("message", {})
-        texto = (msg.get("conversation") or 
-                 msg.get("extendedTextMessage", {}).get("text") or 
-                 msg.get("imageMessage", {}).get("caption") or "").strip()
-
-        if not texto: return {"status": "empty"}
-
-        # Delegar processamento para background (Resiliência de Rede)
-        background_tasks.add_task(
-            OrchestratorService.router, 
-            tenant_id, remote_jid, texto, key.get("id")
-        )
-
-        return {"status": "accepted"}
+        redis_client = await RedisFSMService.get_client()
+        await redis_client.aclose()
     except Exception as e:
-        logger.error(f"Erro na ingestão: {e}")
-        return {"status": "error"}
+        logger.error(f"Falha ao fechar conexão com Redis: {e}")
+
+app = FastAPI(
+    title="CFO Inteligente B2C API",
+    description="SaaS financeiro e ERP logístico conversacional de fricção zero via WhatsApp - Ingestão de Alta Performance",
+    version="5.0.0",
+    default_response_class=ORJSONResponse,
+    lifespan=lifespan
+)
 
 @app.get("/health")
-async def health():
-    return {"status": "online", "mode": "peak_performance"}
+@app.get("/health_check")
+async def health_check():
+    """Endpoint de verificação de saúde do microsserviço."""
+    return {"status": "healthy", "engine": "FastAPI & PostgreSQL 15 Bank-Grade", "performance": "peak"}
+
+async def process_webhook_background(payload: WebhookPayload, background_tasks: BackgroundTasks):
+    try:
+        data = payload.data
+        key = data.key
+
+        if key.fromMe:
+            return
+
+        remote_jid = key.remoteJid
+        tenant_id = remote_jid.split("@")[0] if remote_jid else "unknown"
+        wpp_msg_id = key.id
+
+        # Capturar mensagem de texto de forma resiliente
+        message = data.message
+        texto_bruto = (
+            message.conversation or
+            (message.extendedTextMessage.get("text") if message.extendedTextMessage else None) or
+            (message.imageMessage.get("caption") if message.imageMessage else None) or
+            ""
+        ).strip()
+
+        if not texto_bruto or tenant_id == "unknown":
+            return
+
+        # Ativar status digitando para reter atenção do motorista
+        background_tasks.add_task(OrchestratorService.router, tenant_id, remote_jid, texto_bruto, wpp_msg_id)
+    except Exception as e:
+        logger.error(f"Erro no processamento em background do webhook: {e}")
+
+@app.post("/webhooks/evolution")
+@app.post("/webhook/evolution")
+@app.post("/api/v1/webhook/whatsapp")
+@app.post("/webhook/whatsapp")
+async def evolution_webhook_routing(payload: WebhookPayload, background_tasks: BackgroundTasks):
+    """
+    Roteador de Webhook de Ingestão Unificada de Alta Performance.
+    Valida e recebe payloads via Pydantic v2 de forma não bloqueante e delega para background tasks.
+    """
+    background_tasks.add_task(process_webhook_background, payload, background_tasks)
+    return {"status": "accepted", "performance": "async_task_queued"}

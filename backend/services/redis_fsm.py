@@ -1,110 +1,151 @@
 import os
 import json
-import redis.asyncio as redis
+import logging
+import asyncio
 from decimal import Decimal
-from datetime import datetime, date
-from typing import Optional, Any
+import redis.asyncio as redis
 
+# Configurações de infraestrutura
 REDIS_URL = os.getenv("REDIS_URL", "redis://cfo_redis:6379/0")
+logger = logging.getLogger(__name__)
 
 class CustomJSONEncoder(json.JSONEncoder):
     """
-    Codificador JSON customizado para tratar tipos complexos retornados pelo PostgreSQL (asyncpg).
-    Converte Decimal para float e objetos de data/hora para strings ISO-8601.
+    Encoder customizado para serialização de objetos Decimal em strings.
+    Garante precisão em round-trips de dados financeiros para o cache.
     """
-    def default(self, obj: Any) -> Any:
+    def default(self, obj):
         if isinstance(obj, Decimal):
-            return float(obj)
-        if isinstance(obj, (datetime, date)):
-            return obj.isoformat()
-        return super(CustomJSONEncoder, self).default(obj)
+            return str(obj)
+        return super().default(obj)
 
 class RedisFSMService:
     """
-    Gerenciador de Estado Conversacional (Finite State Machine) e Aglutinação de Mensagens (Debouncing) via Redis 7.
-    Adiciona controle de erros consecutivos para prevenção de loops infinitos e cache de perfil de baixa latência.
+    Gerenciador de Estado Conversacional (FSM), Debouncing de mensagens 
+    e Cache de Perfil com suporte a serialização de alta precisão.
     """
     _client = None
+    _lock = asyncio.Lock()
 
     @classmethod
     async def get_client(cls) -> redis.Redis:
+        """
+        Retorna a instância do cliente Redis (Singleton) com proteção contra race conditions.
+        """
         if cls._client is None:
-            cls._client = redis.from_url(REDIS_URL, decode_responses=True)
+            async with cls._lock:
+                if cls._client is None:
+                    cls._client = redis.from_url(
+                        REDIS_URL, 
+                        decode_responses=True,
+                        socket_timeout=5.0,
+                        retry_on_timeout=True
+                    )
         return cls._client
+
+    @classmethod
+    async def close_client(cls):
+        """Encerrar a conexão do Singleton e reseta o atributo de classe."""
+        async with cls._lock:
+            if cls._client is not None:
+                await cls._client.aclose()
+                cls._client = None
+
+    # --- MÉTODOS DE GERENCIAMENTO DE ESTADO (FSM) ---
 
     @staticmethod
     async def obter_estado(key: str) -> str:
-        """Obtém o estado atual da FSM para o tenant."""
+        """Recupera o estado atual da FSM (prefixo state:) ou retorna IDLE."""
         client = await RedisFSMService.get_client()
         estado = await client.get(f"state:{key}")
         return estado if estado else "IDLE"
 
     @staticmethod
     async def definir_estado(key: str, estado: str, ex_seconds: int = 1800):
-        """Define o estado atual da FSM com TTL de segurança (padrão 30 minutos)."""
+        """Grava o estado da FSM com expiração padrão de 30 minutos."""
         client = await RedisFSMService.get_client()
         await client.set(f"state:{key}", estado, ex=ex_seconds)
 
     @staticmethod
     async def limpar_buffer(key: str):
-        """Limpa o estado e os buffers associados à FSM do tenant."""
+        """Remove de forma atômica o estado e o buffer de mensagens via pipeline."""
         client = await RedisFSMService.get_client()
-        await client.delete(f"state:{key}")
-        await client.delete(f"buffer_msg:{key}")
+        async with client.pipeline(transaction=True) as pipe:
+            pipe.delete(f"state:{key}")
+            pipe.delete(f"buffer_msg:{key}")
+            await pipe.execute()
 
-    @staticmethod
-    async def cache_perfil_motorista(tenant_id: str, dados: dict, ex: int = 300):
-        """Armazena metadados do motorista por 5 minutos no Redis para evitar I/O no Postgres, serializando Decimals."""
-        client = await RedisFSMService.get_client()
-        serialized_data = json.dumps(dados, cls=CustomJSONEncoder)
-        await client.set(f"profile:{tenant_id}", serialized_data, ex=ex)
-
-    @staticmethod
-    async def obter_perfil_cache(tenant_id: str) -> Optional[dict]:
-        """Recupera metadados do cache e reconverte de volta para dicionário."""
-        client = await RedisFSMService.get_client()
-        dados = await client.get(f"profile:{tenant_id}")
-        return json.loads(dados) if dados else None
+    # --- LÓGICA DE AGLUTINAÇÃO E DEBOUNCING ---
 
     @staticmethod
     async def acumular_mensagem(tenant_id: str, texto: str, janela_segundos: int = 4) -> list:
         """
-        Implementa o debouncing: acumula mensagens enviadas em rajada pelo motorista numa lista do Redis, renovando a janela temporal.
-        Retorna o acumulado.
+        Acumula mensagens em uma lista no Redis e retorna o conjunto completo.
+        Otimizado com pipeline para reduzir o RTT (Round Trip Time).
         """
         client = await RedisFSMService.get_client()
         list_key = f"buffer_msg:{tenant_id}"
+        
         async with client.pipeline(transaction=True) as pipe:
             pipe.rpush(list_key, texto)
             pipe.expire(list_key, janela_segundos)
-            await pipe.execute()
-        mensagens = await client.lrange(list_key, 0, -1)
-        return mensagens
+            pipe.lrange(list_key, 0, -1)
+            results = await pipe.execute()
+            
+        # Retorna o resultado do comando LRANGE (terceiro comando do pipeline)
+        return results[2] if len(results) > 2 else []
+
+    # --- CONTROLE DE RESILIÊNCIA ---
 
     @staticmethod
     async def obter_erros_consecutivos(key: str) -> int:
-        """Obtém o contador de erros consecutivos para o tenant."""
+        """Consulta o contador da chave errors: para o tenant."""
         client = await RedisFSMService.get_client()
         erros = await client.get(f"errors:{key}")
         return int(erros) if erros else 0
 
     @staticmethod
     async def incrementar_erros_consecutivos(key: str) -> int:
-        """Incrementa o contador de erros consecutivos para o tenant e renova o TTL de 15 minutos."""
+        """Incrementa o contador de erros com TTL de 15 minutos."""
         client = await RedisFSMService.get_client()
-        erros = await client.incr(f"errors:{key}")
-        await client.expire(f"errors:{key}", 900)
-        return erros
+        key_name = f"errors:{key}"
+        async with client.pipeline(transaction=True) as pipe:
+            pipe.incr(key_name)
+            pipe.expire(key_name, 900)
+            results = await pipe.execute()
+        return results[0]
 
     @staticmethod
     async def limpar_erros_consecutivos(key: str):
-        """Reseta o contador de erros consecutivos do tenant."""
+        """Deleta a chave de erros do tenant."""
         client = await RedisFSMService.get_client()
         await client.delete(f"errors:{key}")
 
-    @classmethod
-    async def close_client(cls):
-        """Encerra o cliente Redis e reseta o singleton para permitir reconexão limpa."""
-        if cls._client is not None:
-            await cls._client.aclose()
-            cls._client = None
+    # --- GERENCIAMENTO DE CACHE DE PERFIL ---
+
+    @staticmethod
+    async def cache_perfil_motorista(tenant_id: str, perfil_dict: dict, ex_seconds: int = 3600):
+        """
+        Serializa e armazena o perfil em cache (prefixo profile:).
+        Utiliza CustomJSONEncoder para tratar campos Decimal oriundos do PostgreSQL.
+        """
+        client = await RedisFSMService.get_client()
+        try:
+            perfil_json = json.dumps(perfil_dict, cls=CustomJSONEncoder)
+            await client.set(f"profile:{tenant_id}", perfil_json, ex=ex_seconds)
+        except Exception as e:
+            logger.error(f"Erro ao serializar perfil para cache (Tenant: {tenant_id}): {e}")
+
+    @staticmethod
+    async def obter_perfil_cache(tenant_id: str) -> dict:
+        """Recupera e desserializa o perfil do motorista do cache."""
+        client = await RedisFSMService.get_client()
+        perfil_json = await client.get(f"profile:{tenant_id}")
+        if not perfil_json:
+            return None
+            
+        try:
+            return json.loads(perfil_json)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"Dados corrompidos no cache de perfil para {tenant_id}: {e}")
+            return None

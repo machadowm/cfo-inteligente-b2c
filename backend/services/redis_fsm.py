@@ -1,9 +1,23 @@
 import os
 import json
 import redis.asyncio as redis
+from decimal import Decimal
+from datetime import datetime, date
 from typing import Optional, Any
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://cfo_redis:6379/0")
+
+class CustomJSONEncoder(json.JSONEncoder):
+    """
+    Codificador JSON customizado para tratar tipos complexos retornados pelo PostgreSQL (asyncpg).
+    Converte Decimal para float e objetos de data/hora para strings ISO-8601.
+    """
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, Decimal):
+            return float(obj)
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        return super(CustomJSONEncoder, self).default(obj)
 
 class RedisFSMService:
     """
@@ -40,13 +54,14 @@ class RedisFSMService:
 
     @staticmethod
     async def cache_perfil_motorista(tenant_id: str, dados: dict, ex: int = 300):
-        """Armazena metadados do motorista por 5 minutos para evitar I/O no Postgres."""
+        """Armazena metadados do motorista por 5 minutos no Redis para evitar I/O no Postgres, serializando Decimals."""
         client = await RedisFSMService.get_client()
-        await client.set(f"profile:{tenant_id}", json.dumps(dados), ex=ex)
+        serialized_data = json.dumps(dados, cls=CustomJSONEncoder)
+        await client.set(f"profile:{tenant_id}", serialized_data, ex=ex)
 
     @staticmethod
     async def obter_perfil_cache(tenant_id: str) -> Optional[dict]:
-        """Recupera metadados do cache."""
+        """Recupera metadados do cache e reconverte de volta para dicionário."""
         client = await RedisFSMService.get_client()
         dados = await client.get(f"profile:{tenant_id}")
         return json.loads(dados) if dados else None

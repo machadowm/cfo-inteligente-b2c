@@ -573,38 +573,134 @@ class OrchestratorService:
         # =========================================================================
         # 3. INTERCEPÇÃO DA FSM DE JORNADA (Precedência Absoluta)
         # =========================================================================
-        if estado_turno and estado_turno.startswith("AGUARDANDO_VALOR_ABASTECIMENTO"):
-            # Estado: motorista declarou intenção de abastecer mas não informou o valor.
-            # O contexto da intenção original (descrição + tipo de combustível) foi
-            # serializado no próprio estado: AGUARDANDO_VALOR_ABASTECIMENTO|desc:{texto}
-            valor_informado = converter_para_float(texto_bruto)
-            if valor_informado > 0:
-                desc_original = estado_turno.split("|desc:")[1] if "|desc:" in estado_turno else texto_bruto
+
+        # --- FSM DE ABASTECIMENTO GUIADO (4 passos) ----------------------------
+        # Estado serializado como: ABASTECIMENTO_<PASSO>|<chave>:<valor>|...
+        # TTL: 10 minutos (600s) — abandono de fluxo limpo automaticamente.
+        _ABT_TTL = 600
+
+        if estado_turno and estado_turno.startswith("ABASTECIMENTO_"):
+            passo = estado_turno.split("|")[0]  # ex: "ABASTECIMENTO_PRECO"
+
+            # Extrai params já acumulados do estado
+            params: Dict[str, str] = {}
+            for parte in estado_turno.split("|")[1:]:
+                if ":" in parte:
+                    k, v = parte.split(":", 1)
+                    params[k] = v
+
+            if passo == "ABASTECIMENTO_VALOR":
+                # Aguarda o valor total gasto no abastecimento
+                total = converter_para_float(texto_bruto)
+                if total <= 0:
+                    await registrar_erro_e_verificar_escape(
+                        remote_jid, tenant_id, fsm_turno_key,
+                        "⚠ Valor inválido. Digite o valor total gasto no abastecimento (ex:  *150,00* ):"
+                    )
+                    return
+                desc = params.get("desc", "Abastecimento")
+                novo_estado = f"ABASTECIMENTO_PRECO|total:{total}|desc:{desc}"
+                await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
+                await enviar_whatsapp(
+                    remote_jid,
+                    f"Ótimo!  *R$ {total:,.2f}*  registrado.\nQual foi o  *preço por litro*  cobrado? (Ex:  *5,85* )".replace(",", "X").replace(".", ",").replace("X", ".")
+                )
+                return
+
+            elif passo == "ABASTECIMENTO_PRECO":
+                # Aguarda preço unitário (ex: 5,859 ou 5.86)
+                preco = converter_para_float(texto_bruto)
+                if preco <= 0:
+                    await registrar_erro_e_verificar_escape(
+                        remote_jid, tenant_id, fsm_turno_key,
+                        "⚠ Preço por litro inválido. Digite o preço unitário (ex:  *5,85* ):"
+                    )
+                    return
+                total = float(params.get("total", "0"))
+                litros = round(total / preco, 3) if preco > 0 else 0.0
+                litros_fmt = f"{litros:.2f}".replace(".", ",")
+                novo_estado = f"ABASTECIMENTO_ODOMETRO|total:{total}|preco:{preco}|litros:{litros}|desc:{params.get('desc', '')}"
+                await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
+                await enviar_whatsapp(
+                    remote_jid,
+                    f"Calculado:  *{litros_fmt} litros* .\nQual é o  *odômetro atual*  do painel? (Ex:  *179500* )\n\n"
+                    f"_(Ou envie  *pular*  para registrar sem odômetro)_"
+                )
+                return
+
+            elif passo == "ABASTECIMENTO_ODOMETRO":
+                # Aguarda odômetro ou "pular"
+                odometro: Optional[float] = None
+                if any(w in texto_limpo for w in ["pular", "nao", "nao sei", "skip"]):
+                    odometro = None
+                else:
+                    odometro = converter_para_float(texto_bruto)
+                    if odometro <= 0:
+                        await registrar_erro_e_verificar_escape(
+                            remote_jid, tenant_id, fsm_turno_key,
+                            "⚠ Odômetro inválido. Informe o valor em km (ex:  *179500* ) ou envie  *pular* :"
+                        )
+                        return
+                total   = float(params.get("total",  "0"))
+                preco   = float(params.get("preco",  "0"))
+                litros  = float(params.get("litros", "0"))
+                desc    = params.get("desc", "Abastecimento guiado")
+                novo_estado = (
+                    f"ABASTECIMENTO_TANQUE_CHEIO"
+                    f"|total:{total}|preco:{preco}|litros:{litros}"
+                    f"|odo:{odometro if odometro else ''}|desc:{desc}"
+                )
+                await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
+                await enviar_whatsapp(
+                    remote_jid,
+                    "O tanque ficou  *cheio* ? (Responda  *sim*  ou  *não* )\n\n"
+                    "_(Isso permite calcular seu KM/L real no próximo abastecimento cheio)_"
+                )
+                return
+
+            elif passo == "ABASTECIMENTO_TANQUE_CHEIO":
+                tanque_cheio = any(w in texto_limpo for w in ["sim", "s", "cheio", "yes", "completo"])
+                total   = float(params.get("total",  "0"))
+                preco   = float(params.get("preco",  "0"))
+                litros  = float(params.get("litros", "0"))
+                odo_str = params.get("odo", "")
+                odometro = float(odo_str) if odo_str else None
+                desc    = params.get("desc", "Abastecimento guiado")
+
                 await RedisFSMService.limpar_buffer(fsm_turno_key)
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 res_tx = await TransacaoService.registrar_transacao(
                     motorista_id=motorista_id,
                     tipo_movimentacao='despesa',
                     categoria='combustivel',
-                    valor=valor_informado,
-                    descricao=desc_original,
-                    wpp_msg_id=wpp_msg_id
+                    valor=total,
+                    descricao=desc,
+                    wpp_msg_id=wpp_msg_id,
+                    litros_abastecidos=litros,
+                    preco_por_litro=preco,
+                    odometro_abastecimento=odometro,
+                    tanque_cheio=tanque_cheio,
                 )
                 if res_tx.get("status") == "success":
-                    valor_fmt = f"R$ {valor_informado:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                    resposta = f"⛽ Abastecimento de  *{valor_fmt}*  registrado e estoque atualizado no cofre! 🛡"
+                    valor_fmt = f"R$ {total:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    litros_fmt = f"{litros:.2f}".replace(".", ",")
+                    preco_fmt  = f"R$ {preco:.3f}".replace(".", ",")
+                    odo_fmt    = f"  |  Odômetro:  *{int(odometro):,} km*".replace(",", ".") if odometro else ""
+                    cheio_str  = "  |  🔋 Tanque cheio registrado!" if tanque_cheio else ""
+                    resposta = (
+                        f"⛽  *Abastecimento Registrado!*\n\n"
+                        f"• Valor:  *{valor_fmt}*\n"
+                        f"• Volume:  *{litros_fmt} L*\n"
+                        f"• Preço/L:  *{preco_fmt}*"
+                        f"{odo_fmt}{cheio_str}\n\n"
+                        f"🛡 Estoque e cofre atualizados!"
+                    )
                 elif res_tx.get("status") == "duplicate":
                     resposta = "⚠ Este lançamento já foi guardado anteriormente no cofre contábil."
                 else:
                     resposta = f"❌ Falha ao registrar: {res_tx.get('message')}"
-            else:
-                await registrar_erro_e_verificar_escape(
-                    remote_jid, tenant_id, fsm_turno_key,
-                    "⚠ Não consegui identificar o valor. Envie apenas o valor pago no abastecimento (ex:  *85,50* ):"
-                )
+                await enviar_whatsapp(remote_jid, resposta)
                 return
-            await enviar_whatsapp(remote_jid, resposta)
-            return
 
         if estado_turno in ["AGUARDANDO_KM_INICIAL", "AGUARDANDO_KM_FINAL"] or (estado_turno and estado_turno.startswith("AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO")):
             km_digitado = converter_para_float(texto_bruto)
@@ -765,25 +861,104 @@ class OrchestratorService:
         # =========================================================================
         # 5. LANÇAMENTOS FINANCEIROS LIVRES (Fricção Zero com Trava de Palavra-Chave)
         # =========================================================================
+        _PALAVRAS_ABASTECIMENTO = [
+            'abastec', 'reabastec', 'gasolin', 'etanol', 'alcool', 'diesel',
+            'gnv', 'recarga', 'kwh', 'tomada', 'posto', 'combustiv',
+        ]
         palavras_chave_financeiras = [
             'recebi', 'ganhei', 'faturei', 'corrida', 'uber', '99', 'indrive', 'faturamento', 'ganho',
-            'gastei', 'paguei', 'despesa', 'combustiv', 'gasolin', 'etanol', 'gnv', 'recarga', 'kwh',
-            'posto', 'almoco', 'bala', 'lava', 'marmita', 'mercado', 'oleo', 'pneu', 'abastec', 'reabastec', 'alcool'
-        ]
+            'gastei', 'paguei', 'despesa', 'bala', 'lava', 'marmita', 'mercado', 'oleo', 'pneu', 'almoco',
+        ] + _PALAVRAS_ABASTECIMENTO
+        is_intencao_abastecimento = any(w in texto_limpo for w in _PALAVRAS_ABASTECIMENTO)
         is_financeiro = any(w in texto_limpo for w in palavras_chave_financeiras)
         valor_transacao = converter_para_float(texto_bruto)
 
+        # ── ABASTECIMENTO: Fast-path (frase única com valor + preço) ──────────
+        # Ex: "abasteci 150 a 5,85" → registra direto sem FSM
+        if is_intencao_abastecimento and valor_transacao > 0:
+            # Tenta extrair preço por litro na mesma mensagem
+            # Padrão: "a X,XX", "por X,XX", "X,XX/l", "X,XX o litro"
+            preco_match = re.search(
+                r'(?:a|por|@)\s*([\d]+[.,][\d]{2,3})|'
+                r'([\d]+[.,][\d]{2,3})\s*(?:o litro|/l\b|por litro)',
+                texto_bruto, re.IGNORECASE
+            )
+            preco_unitario: Optional[float] = None
+            if preco_match:
+                raw_preco = preco_match.group(1) or preco_match.group(2)
+                preco_unitario = converter_para_float(raw_preco) if raw_preco else None
+
+            if preco_unitario and preco_unitario > 0:
+                # Fast-path completo: registra com telemetria (odômetro e tanque_cheio
+                # omitidos — usuário pode refinar em outro abastecimento guiado)
+                litros = round(valor_transacao / preco_unitario, 3)
+                res_tx = await TransacaoService.registrar_transacao(
+                    motorista_id=motorista_id,
+                    tipo_movimentacao='despesa',
+                    categoria='combustivel',
+                    valor=valor_transacao,
+                    descricao=texto_bruto,
+                    wpp_msg_id=wpp_msg_id,
+                    litros_abastecidos=litros,
+                    preco_por_litro=preco_unitario,
+                )
+                if res_tx.get("status") == "success":
+                    await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                    valor_fmt  = f"R$ {valor_transacao:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    litros_fmt = f"{litros:.2f}".replace(".", ",")
+                    preco_fmt  = f"R$ {preco_unitario:.3f}".replace(".", ",")
+                    resposta = (
+                        f"⛽  *Abastecimento Registrado!*\n\n"
+                        f"• Valor:  *{valor_fmt}*\n"
+                        f"• Volume:  *{litros_fmt} L*\n"
+                        f"• Preço/L:  *{preco_fmt}*\n\n"
+                        f"🛡 Estoque e cofre atualizados!"
+                    )
+                elif res_tx.get("status") == "duplicate":
+                    resposta = "⚠ Este lançamento já foi guardado anteriormente no cofre contábil."
+                else:
+                    resposta = f"❌ Falha ao registrar abastecimento:\n_{res_tx.get('message')}_"
+                await enviar_whatsapp(remote_jid, resposta)
+                return
+
+            # Tem valor mas falta preço → entra no passo PRECO da FSM
+            desc_abt = texto_bruto[:120]
+            novo_estado = f"ABASTECIMENTO_PRECO|total:{valor_transacao}|desc:{desc_abt}"
+            await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
+            valor_fmt = f"R$ {valor_transacao:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            await enviar_whatsapp(
+                remote_jid,
+                f"⛽  *{valor_fmt}*  anotado!\nQual foi o  *preço por litro*  cobrado? (Ex:  *5,85* )"
+            )
+            return
+
+        # ── ABASTECIMENTO: Intenção sem valor → FSM coleta valor primeiro ─────
+        if is_intencao_abastecimento and valor_transacao == 0:
+            desc_abt = texto_bruto[:120]
+            await RedisFSMService.definir_estado(
+                fsm_turno_key,
+                f"ABASTECIMENTO_VALOR|desc:{desc_abt}",
+                ex_seconds=_ABT_TTL
+            )
+            await enviar_whatsapp(
+                remote_jid,
+                "⛽ Vamos registrar o abastecimento!\nQual foi o  *valor total*  gasto? (Ex:  *150,00* )"
+            )
+            return
+
+        # ── LANÇAMENTOS FINANCEIROS GERAIS (não-combustível) ──────────────────
         if is_financeiro and valor_transacao > 0:
             is_despesa = any(
                 w in texto_limpo for w in [
-                    'gastei', 'paguei', 'despesa', 'combustiv', 'gasolin', 'etanol', 'gnv', 'reabastec', 'recarga',
-                    'posto', 'almoco', 'bala', 'lava', 'marmita', 'mercado', 'oleo', 'pneu'
+                    'gastei', 'paguei', 'despesa', 'abastec', 'reabastec', 'combustiv',
+                    'gasolin', 'etanol', 'gnv', 'diesel', 'alcool', 'recarga', 'kwh', 'tomada',
+                    'posto', 'almoco', 'bala', 'lava', 'marmita', 'mercado', 'oleo', 'pneu',
                 ]
             )
             tipo = 'despesa' if is_despesa else 'receita'
-            
+
             # Categoria
-            if any(c in texto_limpo for c in ['gasolin', 'etanol', 'gnv', 'reabastec', 'recarga', 'posto', 'solar', 'casa', 'kwh', 'tomada', 'combustiv']):
+            if any(c in texto_limpo for c in ['gasolin', 'etanol', 'gnv', 'diesel', 'alcool', 'reabastec', 'abastec', 'recarga', 'posto', 'solar', 'kwh', 'tomada', 'combustiv']):
                 cat = 'combustivel'
             elif any(c in texto_limpo for c in ['almoco', 'marmita', 'lanche', 'refeicao', 'comida', 'rango']):
                 cat = 'alimentacao'
@@ -793,7 +968,8 @@ class OrchestratorService:
                 cat = 'corrida' if tipo == 'receita' else 'geral'
 
             res_tx = await TransacaoService.registrar_transacao(
-                motorista_id=motorista_id, tipo_movimentacao=tipo, categoria=cat, valor=valor_transacao, descricao=texto_bruto, wpp_msg_id=wpp_msg_id
+                motorista_id=motorista_id, tipo_movimentacao=tipo, categoria=cat,
+                valor=valor_transacao, descricao=texto_bruto, wpp_msg_id=wpp_msg_id,
             )
             if res_tx.get("status") == "success":
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)

@@ -81,7 +81,12 @@ class TransacaoService:
         categoria: str,
         valor: float,
         descricao: Optional[str] = None,
-        wpp_msg_id: Optional[str] = None
+        wpp_msg_id: Optional[str] = None,
+        # Telemetria de abastecimento guiado (opcionais — populados pelo fluxo FSM)
+        litros_abastecidos: Optional[float] = None,
+        preco_por_litro: Optional[float] = None,
+        odometro_abastecimento: Optional[float] = None,
+        tanque_cheio: bool = False,
     ) -> Dict[str, Any]:
         """
         Registra movimentações financeiras com interceptação de telemetria.
@@ -281,15 +286,25 @@ class TransacaoService:
                         )
 
                 # 3. Inserção no Livro-Razão (Idempotência via wpp_msg_id)
+                # Campos de telemetria são NULLABLE — populados apenas pelo fluxo guiado.
+                litros_dec = Decimal(str(litros_abastecidos)).quantize(Decimal("0.01"), ROUND_HALF_UP) if litros_abastecidos is not None else None
+                preco_dec  = Decimal(str(preco_por_litro)).quantize(Decimal("0.0001"), ROUND_HALF_UP) if preco_por_litro is not None else None
+                odo_dec    = Decimal(str(odometro_abastecimento)).quantize(Decimal("0.01"), ROUND_HALF_UP) if odometro_abastecimento is not None else None
+
                 query_insert = """
                 INSERT INTO public.transacoes (
-                    motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria, valor, descricao, wpp_msg_id
-                ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8)
+                    motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria,
+                    valor, descricao, wpp_msg_id,
+                    litros_abastecidos, preco_por_litro, odometro_abastecimento, tanque_cheio
+                ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 ON CONFLICT (wpp_msg_id) DO NOTHING
                 RETURNING id, data_transacao;
                 """
                 row = await conn.fetchrow(
-                    query_insert, motorista_id, turno_id, veiculo_id, tipo_validado, categoria, valor_decimal, descricao, wpp_msg_id
+                    query_insert,
+                    motorista_id, turno_id, veiculo_id, tipo_validado, categoria,
+                    valor_decimal, descricao, wpp_msg_id,
+                    litros_dec, preco_dec, odo_dec, tanque_cheio,
                 )
 
                 if row is None:

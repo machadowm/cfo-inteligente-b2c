@@ -28,6 +28,23 @@ def normalizar_texto(texto: str) -> str:
     sem_acento = "".join([c for c in nfkd if not unicodedata.combining(c)])
     return re.sub(r'[^a-zA-Z0-9\s]', '', sem_acento).lower().strip()
 
+def _detectar_tipo_combustivel(texto_limpo: str) -> Optional[str]:
+    """
+    Detecta o tipo de combustível explicitamente mencionado na mensagem normalizada.
+    Retorna 'gasolina' | 'etanol' | 'gnv' | 'eletrico' | None.
+    None significa que o tipo não foi especificado — o TransacaoService usará o fallback
+    baseado no combustível principal do veículo.
+    """
+    if any(w in texto_limpo for w in ["gnv", "gas natural", "m3"]):
+        return "gnv"
+    if any(w in texto_limpo for w in ["kwh", "recarga", "eletric", "solar", "tomada"]):
+        return "eletrico"
+    if any(w in texto_limpo for w in ["etanol", "alcool", "alc"]):
+        return "etanol"
+    if any(w in texto_limpo for w in ["gasolin", "gasolina", "comum", "aditivada"]):
+        return "gasolina"
+    return None
+
 def converter_para_float(texto_valor: str) -> float:
     """Parser monetário robusto e resiliente a padrões regionais brasileiros (ex: R$ 1.500,50 -> 1500.50)."""
     try:
@@ -599,7 +616,9 @@ class OrchestratorService:
                     )
                     return
                 desc = params.get("desc", "Abastecimento")
-                novo_estado = f"ABASTECIMENTO_PRECO|total:{total}|desc:{desc}"
+                # Propaga o tipo de combustível detectado na mensagem inicial (se houver)
+                comb_detectado = params.get("comb", "") or _detectar_tipo_combustivel(texto_limpo) or ""
+                novo_estado = f"ABASTECIMENTO_PRECO|total:{total}|desc:{desc}|comb:{comb_detectado}"
                 await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
                 await enviar_whatsapp(
                     remote_jid,
@@ -619,7 +638,10 @@ class OrchestratorService:
                 total = float(params.get("total", "0"))
                 litros = round(total / preco, 3) if preco > 0 else 0.0
                 litros_fmt = f"{litros:.2f}".replace(".", ",")
-                novo_estado = f"ABASTECIMENTO_ODOMETRO|total:{total}|preco:{preco}|litros:{litros}|desc:{params.get('desc', '')}"
+                novo_estado = (
+                    f"ABASTECIMENTO_ODOMETRO|total:{total}|preco:{preco}|litros:{litros}"
+                    f"|desc:{params.get('desc', '')}|comb:{params.get('comb', '')}"
+                )
                 await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
                 await enviar_whatsapp(
                     remote_jid,
@@ -649,6 +671,7 @@ class OrchestratorService:
                     f"ABASTECIMENTO_TANQUE_CHEIO"
                     f"|total:{total}|preco:{preco}|litros:{litros}"
                     f"|odo:{odometro if odometro else ''}|desc:{desc}"
+                    f"|comb:{params.get('comb', '')}"
                 )
                 await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
                 await enviar_whatsapp(
@@ -666,6 +689,8 @@ class OrchestratorService:
                 odo_str = params.get("odo", "")
                 odometro = float(odo_str) if odo_str else None
                 desc    = params.get("desc", "Abastecimento guiado")
+                # Recupera o tipo de combustível propagado pela FSM (pode ser vazio se não detectado)
+                comb_fsm = params.get("comb", "") or None
 
                 await RedisFSMService.limpar_buffer(fsm_turno_key)
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
@@ -680,6 +705,7 @@ class OrchestratorService:
                     preco_por_litro=preco,
                     odometro_abastecimento=odometro,
                     tanque_cheio=tanque_cheio,
+                    tipo_combustivel_abastecido=comb_fsm,
                 )
                 if res_tx.get("status") == "success":
                     valor_fmt = f"R$ {total:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -876,6 +902,9 @@ class OrchestratorService:
         # ── ABASTECIMENTO: Fast-path (frase única com valor + preço) ──────────
         # Ex: "abasteci 150 a 5,85" → registra direto sem FSM
         if is_intencao_abastecimento and valor_transacao > 0:
+            # Detecta o tipo de combustível na mensagem (elimina fallback 50/50 para Flex)
+            tipo_comb_msg = _detectar_tipo_combustivel(texto_limpo)
+
             # Tenta extrair preço por litro na mesma mensagem
             # Padrão: "a X,XX", "por X,XX", "X,XX/l", "X,XX o litro"
             preco_match = re.search(
@@ -901,6 +930,7 @@ class OrchestratorService:
                     wpp_msg_id=wpp_msg_id,
                     litros_abastecidos=litros,
                     preco_por_litro=preco_unitario,
+                    tipo_combustivel_abastecido=tipo_comb_msg,
                 )
                 if res_tx.get("status") == "success":
                     await RedisFSMService.limpar_erros_consecutivos(tenant_id)
@@ -922,8 +952,10 @@ class OrchestratorService:
                 return
 
             # Tem valor mas falta preço → entra no passo PRECO da FSM
+            # Propaga o tipo de combustível detectado para evitar fallback 50/50 ao final
             desc_abt = texto_bruto[:120]
-            novo_estado = f"ABASTECIMENTO_PRECO|total:{valor_transacao}|desc:{desc_abt}"
+            comb_abt = tipo_comb_msg or ""
+            novo_estado = f"ABASTECIMENTO_PRECO|total:{valor_transacao}|desc:{desc_abt}|comb:{comb_abt}"
             await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
             valor_fmt = f"R$ {valor_transacao:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             await enviar_whatsapp(
@@ -935,9 +967,11 @@ class OrchestratorService:
         # ── ABASTECIMENTO: Intenção sem valor → FSM coleta valor primeiro ─────
         if is_intencao_abastecimento and valor_transacao == 0:
             desc_abt = texto_bruto[:120]
+            # Captura o tipo de combustível já na mensagem inicial (ex: "vou abastecer etanol")
+            comb_abt = _detectar_tipo_combustivel(texto_limpo) or ""
             await RedisFSMService.definir_estado(
                 fsm_turno_key,
-                f"ABASTECIMENTO_VALOR|desc:{desc_abt}",
+                f"ABASTECIMENTO_VALOR|desc:{desc_abt}|comb:{comb_abt}",
                 ex_seconds=_ABT_TTL
             )
             await enviar_whatsapp(

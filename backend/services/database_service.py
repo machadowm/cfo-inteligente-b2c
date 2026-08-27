@@ -104,14 +104,16 @@ class DatabaseService:
     @classmethod
     async def buscar_veiculo_ativo_do_motorista(cls, motorista_id: str) -> Optional[asyncpg.Record]:
         """Busca o veículo principal ativo associado ao tenant do motorista sob isolamento RLS.
-        As características físicas (capacidades, flags de motorização) residem no JSONB estoque_financeiro.meta.
+        Inclui flags escalares de motorização (is_hibrido, is_eletrico, is_flex, capacidade_bateria)
+        que têm precedência sobre os campos equivalentes em estoque_financeiro.meta.
         """
         async with cls.get_tenant_connection(motorista_id) as conn:
             return await conn.fetchrow(
                 """
                 SELECT id, placa, modelo, tipo_combustivel, estoque_financeiro,
                        locadora, custo_aluguel_semanal, franquia_km_semanal,
-                       valor_km_excedente, escala_trabalho, contrato_personalizado
+                       valor_km_excedente, escala_trabalho, contrato_personalizado,
+                       is_hibrido, is_eletrico, is_flex, capacidade_bateria
                 FROM public.veiculos
                 WHERE motorista_id = $1::uuid AND ativo = TRUE
                 ORDER BY created_at DESC LIMIT 1;

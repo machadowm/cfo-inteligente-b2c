@@ -87,10 +87,15 @@ class TransacaoService:
         preco_por_litro: Optional[float] = None,
         odometro_abastecimento: Optional[float] = None,
         tanque_cheio: bool = False,
+        # Tipo de combustível explícito — elimina dependência do fallback 50/50 para veículos Flex.
+        # Valores aceitos: 'gasolina' | 'etanol' | 'gnv' | 'eletrico' | None (detecta pela descrição)
+        tipo_combustivel_abastecido: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Registra movimentações financeiras com interceptação de telemetria.
         Realiza recalibração atômica de tanques/baterias em eventos de abastecimento.
+        Quando tipo_combustivel_abastecido é fornecido, a detecção do mix Flex usa o valor
+        explícito com precedência sobre a análise textual da descrição.
         """
         desc_limpa = (descricao or "").lower()
         
@@ -141,13 +146,18 @@ class TransacaoService:
                         
                         # Bloco de Retrocompatibilidade (Backward Compatibility) - GROUND TRUTH
                         if "meta" not in estoque:
+                            tipo_comb_raw = (veiculo["tipo_combustivel"] or "").lower()
+                            _is_eletrico_raw = "eletrico" in tipo_comb_raw or "hibrido" in tipo_comb_raw
                             estoque["meta"] = {
-                                "tipo_veiculo": veiculo["tipo_combustivel"] or "gasolina",
-                                "is_flex": "flex" in (veiculo["tipo_combustivel"] or "").lower(),
-                                "is_hibrido": "hibrido" in (veiculo["tipo_combustivel"] or "").lower(),
-                                "is_eletrico": "eletrico" in (veiculo["tipo_combustivel"] or "").lower(),
+                                "tipo_veiculo": tipo_comb_raw or "gasolina",
+                                "is_flex": "flex" in tipo_comb_raw,
+                                "is_hibrido": "hibrido" in tipo_comb_raw,
+                                "is_eletrico": "eletrico" in tipo_comb_raw,
                                 "capacidade_tanque_l": 50.0,
-                                "capacidade_bateria_kwh": 30.0,
+                                # 0.0 para veículos não-elétricos; evita aceitar recargas elétricas
+                                # em veículos a combustão. Elétricos/híbridos devem ter o campo
+                                # capacidade_bateria populado via cadastro.
+                                "capacidade_bateria_kwh": 0.0,
                                 "qtd_tanques": 1
                             }
                         if "liquido" not in estoque:
@@ -160,7 +170,7 @@ class TransacaoService:
                         
                         meta = estoque["meta"]
                         capacidade_tanque = Decimal(str(meta.get("capacidade_tanque_l", "50.0")))
-                        capacidade_bateria = Decimal(str(meta.get("capacidade_bateria_kwh", "30.0")))
+                        capacidade_bateria = Decimal(str(meta.get("capacidade_bateria_kwh", "0.0")))
                         tipo_veiculo = (veiculo["tipo_combustivel"] or meta.get("tipo_veiculo", "gasolina")).lower()
 
                         # Detecção de Energia (Regex Expandida conforme Ground Truth)
@@ -247,23 +257,34 @@ class TransacaoService:
                                 }
 
                             # Lógica de Mix Químico Refinada
-                            is_gasolina = "gasolina" in desc_limpa or "gas" in desc_limpa
-                            is_etanol = "etanol" in desc_limpa or "alcool" in desc_limpa or "alc" in desc_limpa
-                            
+                            # Prioridade 1: parâmetro explícito da FSM guiada
+                            _tipo_expl = (tipo_combustivel_abastecido or "").lower().strip()
+                            # Prioridade 2: detecção textual na descrição
+                            is_gasolina = _tipo_expl == "gasolina" or (
+                                not _tipo_expl and ("gasolina" in desc_limpa or ("gas" in desc_limpa and "gnv" not in desc_limpa))
+                            )
+                            is_etanol = _tipo_expl == "etanol" or (
+                                not _tipo_expl and ("etanol" in desc_limpa or "alcool" in desc_limpa or "alc" in desc_limpa)
+                            )
+
                             gas_litros = Decimal(str(dados_liq.get("gasolina_litros", 0.0)))
                             eta_litros = Decimal(str(dados_liq.get("etanol_litros", 0.0)))
 
-                            if is_gasolina: 
+                            if is_gasolina:
                                 gas_litros += litros_novos
-                            elif is_etanol: 
+                            elif is_etanol:
                                 eta_litros += litros_novos
-                            else: 
-                                # Fallback Flex/Híbrido (50/50) ou combustível principal do veículo
-                                if bool(meta.get("is_flex", False)) or bool(meta.get("is_hibrido", False)):
+                            else:
+                                # Fallback apenas quando o tipo é genuinamente desconhecido:
+                                # usa o combustível principal do veículo (ou 50/50 para Flex sem especificação)
+                                tipo_veiculo_norm = (veiculo["tipo_combustivel"] or "").lower()
+                                if tipo_veiculo_norm == "etanol":
+                                    eta_litros += litros_novos
+                                elif bool(meta.get("is_flex", False)) or bool(meta.get("is_hibrido", False)):
+                                    # 50/50 só chega aqui se o motorista não especificou o combustível
+                                    # nem via parâmetro explícito nem via descrição textual
                                     gas_litros += litros_novos / 2
                                     eta_litros += litros_novos / 2
-                                elif veiculo["tipo_combustivel"].lower() == "etanol":
-                                    eta_litros += litros_novos
                                 else:
                                     gas_litros += litros_novos
 

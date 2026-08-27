@@ -367,8 +367,29 @@ class TurnoService:
                         eletro["custo_total"] = float(max(Decimal("0.00"), custo_bateria - custo_queimado_bateria).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
                         detalhe_queima.append(f"Elétrico: {float(kwh_queimados):.1f} kWh (R$ {float(custo_queimado_bateria):.2f})")
 
-                # 2.2. CONSUMO DE LÍQUIDO (Se restou KM para queimar ou se é veículo combustão/Flex)
-                if km_restante > 0 and not is_eletrico:
+                # 2.2. CONSUMO DE GNV (fase dedicada — antes do líquido)
+                if tipo_comb == "gnv" and km_restante > 0:
+                    gnv = estoque["gnv"]
+                    m3_disponivel = Decimal(str(gnv.get("m3", 0.0)))
+                    custo_gnv = Decimal(str(gnv.get("custo_total", 0.0)))
+                    km_m3_rendimento = Decimal(str(gnv.get("km_m3", 14.0)))
+
+                    if m3_disponivel > 0 and km_m3_rendimento > 0:
+                        cmp_m3 = custo_gnv / m3_disponivel
+                        m3_necessarios = km_restante / km_m3_rendimento
+                        m3_queimados = min(m3_disponivel, m3_necessarios)
+
+                        custo_gnv_queimado = (m3_queimados * cmp_m3).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        custo_combustivel_queimado += custo_gnv_queimado
+                        total_unidades_queimadas_gnv += m3_queimados
+                        km_restante -= (m3_queimados * km_m3_rendimento)
+
+                        gnv["m3"] = float(max(Decimal("0.00"), m3_disponivel - m3_queimados).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                        gnv["custo_total"] = float(max(Decimal("0.00"), custo_gnv - custo_gnv_queimado).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                        detalhe_queima.append(f"GNV: {float(m3_queimados):.2f} m³ (R$ {float(custo_gnv_queimado):.2f})")
+
+                # 2.3. CONSUMO DE LÍQUIDO (Se restou KM para queimar e não é GNV puro nem elétrico puro)
+                if km_restante > 0 and not is_eletrico and tipo_comb != "gnv":
                     liq = estoque["liquido"]
                     total_litros = Decimal(str(liq.get("litros", 0.0)))
                     custo_total_liq = Decimal(str(liq.get("custo_total", 0.0)))

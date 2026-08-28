@@ -624,24 +624,34 @@ class TurnoService:
 
     @staticmethod
     async def verificar_transacoes_turno(motorista_id: str) -> int:
-        """Verifica se o motorista registrou lançamentos (faturamento ou despesa) durante a jornada atual (Read-Only)."""
+        """Verifica com rigor se há lançamentos vinculados EXCLUSIVAMENTE ao turno ativo (Read-Only).
+
+        Fail-Safe: em caso de erro retorna 0 para que o sistema prefira acionar a trava
+        de confirmação em vez de fechar silenciosamente um turno zerado.
+        Isso elimina a vulnerabilidade de "Fail-Open" da versão anterior.
+        """
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
-                    "SELECT id, data_inicio FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
+                    "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
                     motorista_id
                 )
                 if not turno:
-                    return 0
+                    return 0  # Sem turno ativo: nada a travar
 
                 turno_id = str(turno["id"])
-                dt_inicio = turno["data_inicio"]
 
+                # Query purificada: filtra EXCLUSIVAMENTE por turno_id.
+                # Removemos o fallback "OR turno_id IS NULL" que contabilizava transações
+                # órfãs (sem vínculo com o turno atual), causando contagens espúrias.
                 row = await conn.fetchrow(
                     "SELECT COUNT(*) as total FROM public.transacoes "
-                    "WHERE motorista_id = $1::uuid AND (turno_id = $2::uuid OR (turno_id IS NULL AND data_transacao >= $3)) AND estornado = FALSE;",
-                    motorista_id, turno_id, dt_inicio
+                    "WHERE motorista_id = $1::uuid AND turno_id = $2::uuid AND estornado = FALSE;",
+                    motorista_id, turno_id
                 )
                 return int(row["total"]) if row else 0
-        except Exception:
-            return 1 # Fallback conservador para evitar loop
+        except Exception as e:
+            # Fail-Safe: retorna 0 para que o sistema acione a confirmação de faturamento
+            # zerado em vez de fechar o turno sem validação humana.
+            logger.error(f"[TurnoService] Erro crítico na trava de fechamento (motorista={motorista_id}): {e}")
+            return 0

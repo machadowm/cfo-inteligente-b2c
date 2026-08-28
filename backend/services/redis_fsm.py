@@ -124,6 +124,24 @@ class RedisFSMService:
     # --- GERENCIAMENTO DE CACHE DE PERFIL ---
 
     @staticmethod
+    async def registrar_audit_trava_zero(tenant_id: str, km: float):
+        """Registra no Redis que a trava de faturamento zero foi acionada.
+
+        Chave: audit_trava_zero:<tenant_id>  |  TTL: 7 dias.
+        Cada chamada incrementa o contador e grava o timestamp e KM da última ocorrência.
+        Isso permite identificar padrões de fechamento zerado (má-fé ou falha técnica).
+        """
+        import time
+        client = await RedisFSMService.get_client()
+        key = f"audit_trava_zero:{tenant_id}"
+        async with client.pipeline(transaction=True) as pipe:
+            pipe.incr(key)
+            pipe.hset(f"{key}:meta", mapping={"ultimo_ts": str(int(time.time())), "ultimo_km": str(km)})
+            pipe.expire(key, 604800)          # 7 dias
+            pipe.expire(f"{key}:meta", 604800)
+            await pipe.execute()
+
+    @staticmethod
     async def cache_perfil_motorista(tenant_id: str, perfil_dict: dict, ex_seconds: int = 3600):
         """
         Serializa e armazena o perfil em cache (prefixo profile:).

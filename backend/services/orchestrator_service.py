@@ -735,6 +735,17 @@ class OrchestratorService:
             if estado_turno.startswith("AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO"):
                 if any(term in texto_limpo for term in ["confirmar", "confirm", "sim", "confir", "ok", "isso", "certeza"]):
                     km_final = float(estado_turno.split("|km:")[1])
+                    # Guarda de Idempotência: confirma que o turno ainda está ativo antes de fechar.
+                    # Evita duplos fechamentos caso o estado Redis fique obsoleto.
+                    async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                        turno_confirmacao = await conn.fetchrow(
+                            "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
+                            motorista_id
+                        )
+                    if not turno_confirmacao:
+                        await RedisFSMService.limpar_buffer(fsm_turno_key)
+                        await enviar_whatsapp(remote_jid, "⚠ Nenhum turno ativo localizado. O turno pode ter sido fechado anteriormente.")
+                        return
                     await enviar_whatsapp(remote_jid, "📊  *Confirmado faturamento zerado. Gerando DRE definitivo...*")
                     res = await TurnoService.fechar_turno_com_dre(motorista_id, km_final)
                     await RedisFSMService.limpar_buffer(fsm_turno_key)
@@ -786,6 +797,9 @@ class OrchestratorService:
                             total_tx = await TurnoService.verificar_transacoes_turno(motorista_id)
                             if total_tx == 0:
                                 await RedisFSMService.definir_estado(fsm_turno_key, f"AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO|km:{km_digitado}")
+                                # Auditoria: registra o acionamento da trava para rastreio de padrões
+                                await RedisFSMService.registrar_audit_trava_zero(tenant_id, km_digitado)
+                                logger.warning(f"[TRAVA_ZERO] Motorista {motorista_id} tentou fechar turno sem lançamentos (km={km_digitado})")
                                 resposta = (
                                     "⚠  *Atenção, motorista!*  Não encontrei nenhuma receita ou despesa registrada neste turno.\n\n"
                                     "Tem certeza absoluta que o faturamento de hoje foi R$ 0,00?\n\n"
@@ -848,6 +862,9 @@ class OrchestratorService:
                         total_tx = await TurnoService.verificar_transacoes_turno(motorista_id)
                         if total_tx == 0:
                             await RedisFSMService.definir_estado(fsm_turno_key, f"AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO|km:{km_encontrado}")
+                            # Auditoria: registra o acionamento da trava para rastreio de padrões
+                            await RedisFSMService.registrar_audit_trava_zero(tenant_id, km_encontrado)
+                            logger.warning(f"[TRAVA_ZERO] Motorista {motorista_id} tentou fechar turno sem lançamentos (km={km_encontrado})")
                             resposta = (
                                 "⚠  *Atenção, motorista!*  Não encontrei nenhuma receita ou despesa registrada neste turno.\n\n"
                                 "Tem certeza absoluta que o faturamento de hoje foi R$ 0,00?\n\n"

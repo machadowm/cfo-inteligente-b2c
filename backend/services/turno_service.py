@@ -647,9 +647,7 @@ class TurnoService:
                 row = await conn.fetchrow(
                     "SELECT COUNT(*) as total FROM public.transacoes "
                     "WHERE motorista_id = $1::uuid AND turno_id = $2::uuid AND estornado = FALSE;",
-                    "AND tipo_movimentacao = 'receita' "  # <--- ADICIONAR ESTA LINHA
-                    "AND estornado = FALSE;", 
-                    motorista_id, turno_id, dt_inicio
+                    motorista_id, turno_id
                 )
                 return int(row["total"]) if row else 0
         except Exception as e:

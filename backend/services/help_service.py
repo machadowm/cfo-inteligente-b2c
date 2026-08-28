@@ -25,7 +25,8 @@ class HelpService:
             "Deseja ajuda com um tema específico? Digite:\n"
             "👉 *'Ajuda metas'* - Para entender as metas de faturamento.\n"
             "👉 *'Ajuda contrato'* - Para saber como atualizar aluguel e franquia.\n"
-            "👉 *'Ajuda lancamentos'* - Exemplos de registros financeiros."
+            "👉 *'Ajuda lancamentos'* - Exemplos de registros financeiros.\n"
+            "👉 *'Ajuda parametros'* - Comandos rápidos com *!* para ajuste de parâmetros."
         ),
         "metas": (
             "🎯 *Ajuda com Metas e Indicadores de Eficiência*\n\n"
@@ -49,6 +50,22 @@ class HelpService:
             "Se o seu carro for *Próprio* ou *Financiado*, você pode parametrizar a amortização diária (ex: R$ 15,00/dia para custos de depreciação):\n"
             "👉 *Exemplo:* _atualizar contrato Proprietario 90 0_\n"
             "_(R$ 90,00 divididos pela escala de 6 dias úteis resultará em R$ 15,00/dia no DRE)_"
+        ),
+        "parametros": (
+            "⚙️ *Ajuda — Comandos Administrativos (prefixo !)*\n\n"
+            "Você pode ajustar parâmetros do seu perfil a qualquer momento sem percorrer menus.\n\n"
+            "📋 *Parâmetros disponíveis:*\n"
+            "• `!alterar meta mensal <valor>`  →  Meta de faturamento mensal (ex: R$ 12.000)\n"
+            "• `!alterar dias uteis <valor>`   →  Dias úteis trabalhados por mês (ex: 26)\n"
+            "• `!alterar aluguel <valor>`      →  Custo semanal do aluguel/contrato (ex: R$ 1.020,85)\n"
+            "• `!alterar franquia <valor>`     →  Franquia de KM semanal do contrato (ex: 1500)\n\n"
+            "💡 *Exemplos práticos:*\n"
+            "  `!alterar meta mensal 12000`\n"
+            "  `!alterar aluguel 1020,85`\n"
+            "  `!alterar dias uteis 26`\n\n"
+            "📂 Para listar todos os parâmetros com descrição, envie:\n"
+            "  `!parametros`\n\n"
+            "🛡️ *Segurança:* Cada ajuste é registrado com hora e valor anterior para auditoria."
         ),
         "lancamentos": (
             "💰 *Ajuda com Lançamentos Financeiros (Fricção Zero)*\n\n"

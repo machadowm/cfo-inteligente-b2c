@@ -12,6 +12,7 @@ from services.redis_fsm import RedisFSMService
 from services.transacao_service import TransacaoService
 from services.turno_service import TurnoService
 from services.help_service import HelpService
+from services.parametros_service import ParametrosService
 
 # Configuração de Logger
 logger = logging.getLogger(__name__)
@@ -485,6 +486,18 @@ class OrchestratorService:
         motorista_id = str(motorista["id"])
         fsm_turno_key = f"turno_flow:{tenant_id}"
 
+        # =========================================================================
+        # INTERCEPTOR DE COMANDOS ADMINISTRATIVOS (prefixo '!')
+        # Executa antes de qualquer lógica de turno para dar precedência absoluta
+        # aos ajustes de parâmetro.  Exemplos: !alterar meta mensal 12000
+        # =========================================================================
+        if texto_bruto.strip().startswith("!"):
+            resposta_param = await ParametrosService.processar(motorista_id, tenant_id, texto_bruto)
+            if resposta_param is not None:
+                await enviar_whatsapp(remote_jid, resposta_param)
+                return
+            # Prefixo '!' sem padrão reconhecido → cai no fluxo normal com ajuda contextual
+
         # AJUDA GLOBAL (Stateless)
         palavras_ajuda = ["ajuda", "help", "socorro", "como", "explicar"]
         if any(w in texto_limpo for w in palavras_ajuda):
@@ -493,7 +506,7 @@ class OrchestratorService:
             for i, palavra in enumerate(partes):
                 if palavra in palavras_ajuda and i + 1 < len(partes):
                     topico_potencial = partes[i+1]
-                    if topico_potencial in ["metas", "contrato", "lancamentos", "turno"]:
+                    if topico_potencial in ["metas", "contrato", "lancamentos", "turno", "parametros"]:
                         topico = topico_potencial
                         break
             resposta_ajuda = HelpService.obter_ajuda(topico)

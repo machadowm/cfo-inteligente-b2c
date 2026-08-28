@@ -26,7 +26,8 @@ class HelpService:
             "👉 *'Ajuda metas'* - Para entender as metas de faturamento.\n"
             "👉 *'Ajuda contrato'* - Para saber como atualizar aluguel e franquia.\n"
             "👉 *'Ajuda lancamentos'* - Exemplos de registros financeiros.\n"
-            "👉 *'Ajuda parametros'* - Comandos rápidos com *!* para ajuste de parâmetros."
+            "👉 *'Ajuda parametros'* - Comandos rápidos com *!* para ajuste de parâmetros.\n"
+            "👉 *'Ajuda perfil'* - Raio-X completo: metas, estoque, histórico do mês."
         ),
         "metas": (
             "🎯 *Ajuda com Metas e Indicadores de Eficiência*\n\n"
@@ -50,6 +51,22 @@ class HelpService:
             "Se o seu carro for *Próprio* ou *Financiado*, você pode parametrizar a amortização diária (ex: R$ 15,00/dia para custos de depreciação):\n"
             "👉 *Exemplo:* _atualizar contrato Proprietario 90 0_\n"
             "_(R$ 90,00 divididos pela escala de 6 dias úteis resultará em R$ 15,00/dia no DRE)_"
+        ),
+        "perfil": (
+            "👤 *Ajuda — Raio-X do Motorista (Perfil Completo)*\n\n"
+            "O comando  *Perfil*  (ou  *Meus Dados* ) exibe um relatório completo fora do turno:\n\n"
+            "📋 *O que você verá:*\n"
+            "• Dados do veículo ativo e contrato vigente\n"
+            "• Estoque virtual de combustível/energia no cofre\n"
+            "• Receitas, despesas e lucro acumulados no mês\n"
+            "• Progresso da meta mensal em %\n"
+            "• Histórico de KM médio e faturamento médio por dia\n\n"
+            "💬 *Como usar:*\n"
+            "Envie qualquer uma destas palavras:\n"
+            "  *Perfil*  |  *Meus dados*  |  *Minha conta*  |  *Raio X*\n\n"
+            "🛡️ *Diferença para o Status:*\n"
+            "• O  *Status*  foca no turno em andamento (km inicial, abastecimento do dia).\n"
+            "• O  *Perfil*  consolida o histórico do mês inteiro e as configurações do sistema."
         ),
         "parametros": (
             "⚙️ *Ajuda — Comandos Administrativos (prefixo !)*\n\n"

@@ -13,6 +13,7 @@ from services.transacao_service import TransacaoService
 from services.turno_service import TurnoService
 from services.help_service import HelpService
 from services.parametros_service import ParametrosService
+from services.profile_service import ProfileService
 
 # Configuração de Logger
 logger = logging.getLogger(__name__)
@@ -506,7 +507,7 @@ class OrchestratorService:
             for i, palavra in enumerate(partes):
                 if palavra in palavras_ajuda and i + 1 < len(partes):
                     topico_potencial = partes[i+1]
-                    if topico_potencial in ["metas", "contrato", "lancamentos", "turno", "parametros"]:
+                    if topico_potencial in ["metas", "contrato", "lancamentos", "turno", "parametros", "perfil"]:
                         topico = topico_potencial
                         break
             resposta_ajuda = HelpService.obter_ajuda(topico)
@@ -521,6 +522,7 @@ class OrchestratorService:
         tem_intencao_pausa = any(w in texto_limpo for w in ["pausa", "pausar", "pause", "pausei", "almocar"])
         tem_intencao_retomada = any(w in texto_limpo for w in ["retomar", "voltar", "voltei", "continuar", "retom"])
         is_status = any(t in texto_limpo for t in ['status', 'resumo', 'como estou', 'parcial', 'relatorio'])
+        is_perfil = any(t in texto_limpo for t in ['perfil', 'meus dados', 'minha conta', 'raio x', 'raiox', 'configuracoes', 'meu perfil'])
         is_contrato = "atualizar contrato" in texto_limpo
 
         # 1. ATUALIZAÇÃO CONTRATUAL EM TEMPO REAL
@@ -550,7 +552,15 @@ class OrchestratorService:
                 await enviar_whatsapp(remote_jid, "⚠ Formato inválido. Use ex: *'atualizar contrato Zarp 1020.85 1505' *")
             return
 
-        # 2. EMISSÃO DE REPORT PARCIAL/STATUS
+        # 2. RAIO-X COMPLETO DO PERFIL (off-shift)
+        if is_perfil:
+            await RedisFSMService.limpar_buffer(fsm_turno_key)
+            nome = motorista.get("nome_social") or motorista.get("nome", "Motorista")
+            resposta = await ProfileService.gerar_raiox_completo(motorista_id, nome)
+            await enviar_whatsapp(remote_jid, resposta)
+            return
+
+        # 3. EMISSÃO DE REPORT PARCIAL/STATUS (in-shift)
         if is_status:
             await RedisFSMService.limpar_buffer(fsm_turno_key)
             try:

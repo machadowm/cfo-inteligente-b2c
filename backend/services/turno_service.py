@@ -562,6 +562,7 @@ class TurnoService:
                 "meta_mensal": float(meta_mensal),
                 "dias_uteis": dias_uteis,
                 "locadora": turno["locadora"] or "Localiza Zarp",
+                "custo_aluguel_semanal": float(turno["custo_aluguel_semanal"] or 1020.85),
                 "escala_trabalho": turno["escala_trabalho"] or "De quarta a segunda (6 dias)",
                 "franquia_km_semanal": float(turno["franquia_km_semanal"] or 1505.0),
                 "valor_km_excedente": float(turno["valor_km_excedente"] or 0.75),
@@ -624,11 +625,16 @@ class TurnoService:
 
     @staticmethod
     async def verificar_transacoes_turno(motorista_id: str) -> int:
-        """Verifica com rigor se há lançamentos vinculados EXCLUSIVAMENTE ao turno ativo (Read-Only).
+        """Conta receitas vinculadas ao turno ativo (Read-Only).
 
-        Fail-Safe: em caso de erro retorna 0 para que o sistema prefira acionar a trava
-        de confirmação em vez de fechar silenciosamente um turno zerado.
-        Isso elimina a vulnerabilidade de "Fail-Open" da versão anterior.
+        A trava de faturamento zero deve disparar quando não há RECEITA registrada,
+        independentemente de existirem despesas (ex: abastecimento sem corrida).
+        Contar despesas como "evidência de faturamento" é semanticamente incorreto —
+        o motorista pode ter abastecido e não trabalhou; o DRE resultaria em lucro
+        negativo sem qualquer confirmação humana.
+
+        Fail-Safe: retorna 0 em caso de erro para acionar a confirmação,
+        nunca fechar silenciosamente (elimina a vulnerabilidade "Fail-Open").
         """
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
@@ -641,12 +647,12 @@ class TurnoService:
 
                 turno_id = str(turno["id"])
 
-                # Query purificada: filtra EXCLUSIVAMENTE por turno_id.
-                # Removemos o fallback "OR turno_id IS NULL" que contabilizava transações
-                # órfãs (sem vínculo com o turno atual), causando contagens espúrias.
+                # Conta apenas RECEITAS vinculadas ao turno.
+                # Despesas (abastecimento, alimentação, etc.) não são evidência de faturamento.
                 row = await conn.fetchrow(
                     "SELECT COUNT(*) as total FROM public.transacoes "
-                    "WHERE motorista_id = $1::uuid AND turno_id = $2::uuid AND estornado = FALSE;",
+                    "WHERE motorista_id = $1::uuid AND turno_id = $2::uuid "
+                    "AND tipo_movimentacao = 'receita' AND estornado = FALSE;",
                     motorista_id, turno_id
                 )
                 return int(row["total"]) if row else 0

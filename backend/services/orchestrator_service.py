@@ -104,22 +104,40 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     
     lista_despesas_str = ""
     despesas = res.get("despesas_detalhadas", [])
-    if despesas:
-        lista_despesas_str = "• Detalhes dos Gastos:\n"
-        for d in despesas:
+    custo_queima = res.get("custo_combustivel_queimado", 0.0)
+    detalhe_queima = res.get("detalhe_queima", "")
+
+    # Combustível é amortizado pelo Power Split (custo_combustivel_queimado) —
+    # exibir as transações de abastecimento *também* como linha de despesa causaria
+    # dupla-contagem visual (o abastecimento é entrada de estoque, a queima é o custo real).
+    # Por isso filtramos a categoria 'combustivel' da lista de detalhes e mostramos
+    # a linha de queima separadamente com o valor do CMP calculado.
+    despesas_operacionais = [d for d in despesas if d.get("categoria") != "combustivel"]
+
+    if custo_queima > 0:
+        detalhe_queima_fmt = f"  _{detalhe_queima}_" if detalhe_queima else ""
+        lista_despesas_str += f" -  *Queima de Combustível/Energia* :  *R$ {custo_queima:.2f}* {detalhe_queima_fmt}\n"
+
+    if despesas_operacionais:
+        for d in despesas_operacionais:
             desc = d.get('descricao_original') or d.get('categoria', 'geral')
             val = float(d.get('valor', 0.0))
             lista_despesas_str += f" -  *{desc}* :  *R$ {val:.2f}* \n"
+
+    if lista_despesas_str:
+        lista_despesas_str = "• Detalhes dos Gastos:\n" + lista_despesas_str
     else:
         lista_despesas_str = "• Nenhuma despesa registrada neste turno.\n"
-        
+
+    # Rodapé dinâmico: usa nome real e custo diário calculado a partir do contrato vigente.
+    # Só exibido quando o motorista ainda não personalizou o contrato.
     rodape_sugestao = ""
     if not res.get("contrato_personalizado", False):
+        aluguel_diario_real = res.get("custo_aluguel_semanal", 1020.85) / 6.0
         rodape_sugestao = (
-            "\n\n"
-            "Willian, este cálculo de hoje usou o custo padrão de  *Aluguel da Zarp (R$ 170,14/dia)* . "
-            "But we want your profit to be 100% real. Como você trabalha nas ruas hoje? "
-            "Escolha uma opção para ajustarmos o bot ao seu bolso:\n\n"
+            f"\n\n"
+            f"{nome_motorista}, este cálculo usou o custo padrão de  *Aluguel (R$ {aluguel_diario_real:.2f}/dia)* . "
+            f"Para que seu Lucro Real seja 100% preciso, configure o seu contrato atual:\n\n"
             "1⃣  *Carro Alugado*  (Zarp, Movida, Mottu, etc.):\n"
             "👉 Envie:  *'atualizar contrato [Locadora] [Aluguel Semanal] [Franquia KM]'*  (ex:  *atualizar contrato Zarp 1020 1500* )\n\n"
             "2⃣  *Carro Próprio Quitado*  (sem mensalidade, apenas provisão de manutenção):\n"

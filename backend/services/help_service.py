@@ -82,6 +82,11 @@ class HelpService:
             "  `!alterar dias uteis 26`\n\n"
             "📂 Para listar todos os parâmetros com descrição, envie:\n"
             "  `!parametros`\n\n"
+            "⛽ *Correção de Estoque Virtual:*\n"
+            "Se o cofre ficou com litros/kWh errados (ex: erro de odômetro), corrija com:\n"
+            "  `!ajustar estoque litros 35`\n"
+            "  `!ajustar estoque kwh 20`\n"
+            "  `!ajustar estoque m3 8`\n\n"
             "🛡️ *Segurança:* Cada ajuste é registrado com hora e valor anterior para auditoria."
         ),
         "lancamentos": (

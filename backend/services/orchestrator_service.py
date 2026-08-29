@@ -221,6 +221,30 @@ async def registrar_erro_e_verificar_escape(remote_jid: str, tenant_id: str, fsm
     await enviar_whatsapp(remote_jid, msg_erro)
     return False
 
+def _montar_resposta_abertura_turno(nome: str, km: float, res: dict) -> str:
+    """Monta a mensagem de confirmação de abertura de turno.
+
+    Quando há uso pessoal (odometer gap), informa o motorista de forma
+    transparente sobre a amortização que foi realizada no cofre virtual.
+    """
+    km_fmt = f"{km:,.1f}".replace(",", ".")
+    km_uso = res.get("km_uso_pessoal", 0.0)
+    custo_uso = res.get("custo_uso_pessoal", 0.0)
+
+    base = f"🚀 Turno aberto! Odômetro inicial registrado em  *{km_fmt} km* . Boa jornada, {nome}!"
+
+    if km_uso > 0:
+        km_uso_fmt = f"{km_uso:,.1f}".replace(",", ".")
+        custo_fmt = f"R$ {custo_uso:.2f}"
+        base += (
+            f"\n\n🛣️  *Uso Pessoal Auditado*\n"
+            f"• {km_uso_fmt} km registrados fora de serviço desde o último turno.\n"
+            f"• Custo amortizado do cofre:  *{custo_fmt}*  (CMP calculado pelo estoque atual).\n"
+            f"_O Lucro Real dos próximos turnos já está protegido._"
+        )
+
+    return base
+
 # --- Orquestrador de Mensagens ---
 
 class OrchestratorService:
@@ -818,13 +842,18 @@ class OrchestratorService:
                     if res["sucesso"]:
                         await RedisFSMService.limpar_buffer(fsm_turno_key)
                         await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                        resposta = f"🚀 Turno aberto! Odômetro inicial lido como  **{km_digitado:,.1f} km** . Boa jornada, {motorista['nome']}!".replace(",", ".")
+                        resposta = _montar_resposta_abertura_turno(motorista["nome"], km_digitado, res)
                     else:
                         tipo_erro = res.get("tipo_erro", "")
                         if tipo_erro == "TURNO_JA_ATIVO":
                             await RedisFSMService.limpar_buffer(fsm_turno_key)
                             await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                             resposta = res['erro']
+                        elif tipo_erro == "GAP_ODOMETRO_ELEVADO":
+                            # Gap suspeito: mantém estado para nova tentativa mas não conta como erro
+                            await RedisFSMService.definir_estado(fsm_turno_key, "AGUARDANDO_KM_INICIAL")
+                            await enviar_whatsapp(remote_jid, res['erro'])
+                            return
                         else:
                             await RedisFSMService.definir_estado(fsm_turno_key, "AGUARDANDO_KM_INICIAL")
                             await registrar_erro_e_verificar_escape(remote_jid, tenant_id, fsm_turno_key, res['erro'])
@@ -882,9 +911,13 @@ class OrchestratorService:
                 res = await TurnoService.abrir_turno(motorista_id, str(veiculo["id"]), km_encontrado)
                 if res["sucesso"]:
                     await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                    resposta = f"🚀 Turno aberto! Odômetro inicial registrado em  **{km_encontrado:,.1f} km** . Boa jornada, {motorista['nome']}!".replace(",", ".")
+                    resposta = _montar_resposta_abertura_turno(motorista["nome"], km_encontrado, res)
                 else:
                     tipo_erro = res.get("tipo_erro", "")
+                    if tipo_erro == "GAP_ODOMETRO_ELEVADO":
+                        await RedisFSMService.definir_estado(fsm_turno_key, "AGUARDANDO_KM_INICIAL")
+                        await enviar_whatsapp(remote_jid, res['erro'])
+                        return
                     if tipo_erro != "TURNO_JA_ATIVO":
                         await RedisFSMService.definir_estado(fsm_turno_key, "AGUARDANDO_KM_INICIAL")
                     resposta = res['erro']

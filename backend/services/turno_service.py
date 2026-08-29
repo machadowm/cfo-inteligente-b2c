@@ -104,23 +104,29 @@ class TurnoService:
                         "tipo_erro": "TURNO_JA_ATIVO",
                     }
 
-                # 2. Busca o último turno encerrado deste veículo para validar monotonicidade do odômetro
-                # E extrai as configurações contábeis/físicas de estoque para queima de uso pessoal
-                ultimo = await conn.fetchrow(
+                # 2. Busca o km_final do último turno concluído para validar monotonicidade,
+                #    e lê o estoque ATUAL do veículo (já incorpora quaisquer abastecimentos
+                #    inter-turnos — CMP correto, não o snapshot stale do turno anterior).
+                ultimo_km_row = await conn.fetchrow(
                     """
-                    SELECT t.km_final, v.estoque_financeiro, v.tipo_combustivel
-                    FROM public.turnos t
-                    JOIN public.veiculos v ON v.id = t.veiculo_id
-                    WHERE t.veiculo_id = $1::uuid AND t.status = 'concluido' AND t.km_final IS NOT NULL
-                    ORDER BY t.data_fim DESC LIMIT 1;
+                    SELECT km_final
+                    FROM public.turnos
+                    WHERE veiculo_id = $1::uuid AND status = 'concluido' AND km_final IS NOT NULL
+                    ORDER BY data_fim DESC LIMIT 1;
                     """,
+                    veiculo_id,
+                )
+                veiculo_atual = await conn.fetchrow(
+                    "SELECT estoque_financeiro, tipo_combustivel FROM public.veiculos WHERE id = $1::uuid;",
                     veiculo_id,
                 )
 
                 km_uso_pessoal = Decimal("0.00")
+                custo_uso_pessoal = Decimal("0.00")  # rastreado para a notificação ao motorista
+                gap_requer_confirmacao = False        # flag para trava de sanidade (erros de digitação)
 
-                if ultimo and ultimo["km_final"] is not None:
-                    km_anterior = Decimal(str(ultimo["km_final"]))
+                if ultimo_km_row and ultimo_km_row["km_final"] is not None:
+                    km_anterior = Decimal(str(ultimo_km_row["km_final"]))
                     if km_ini < km_anterior:
                         km_ini_fmt = f"{float(km_ini):,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
                         km_ant_fmt = f"{float(km_anterior):,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -135,18 +141,39 @@ class TurnoService:
                             "tipo_erro": "ODOMETRO_DIVERGENTE",
                         }
 
-                    # Auditoria e processamento de Uso Pessoal se houver odometer gap positivo
+                    # Trava de Sanidade: gap acima de 500 km exige confirmação explícita
+                    # para evitar que erros de digitação (ex: 1790000) zeram o cofre inteiro.
+                    _GAP_LIMITE_CONFIRMACAO = Decimal("500")
+                    if km_ini - km_anterior > _GAP_LIMITE_CONFIRMACAO:
+                        gap_fmt = f"{float(km_ini - km_anterior):,.0f}".replace(",", ".")
+                        return {
+                            "sucesso": False,
+                            "erro": (
+                                f"⚠️ *Gap de Odômetro Elevado!*\\n"
+                                f"Você informou *{gap_fmt} km* de uso pessoal desde o último turno.\\n\\n"
+                                f"Isso parece muito alto. Confirme o odômetro correto ou "
+                                f"use  *!ajustar estoque*  para corrigir o cofre manualmente."
+                            ),
+                            "tipo_erro": "GAP_ODOMETRO_ELEVADO",
+                        }
+
+                    # Processamento de Uso Pessoal se houver gap positivo
                     if km_ini > km_anterior:
                         km_uso_pessoal = km_ini - km_anterior
-                        
-                        raw_est = ultimo["estoque_financeiro"]
+
+                        # Lê o estoque ATUAL do veículo (pós-abastecimentos inter-turnos).
+                        # CMP já incorpora qualquer recarga feita entre os turnos.
+                        raw_est = veiculo_atual["estoque_financeiro"] if veiculo_atual else {}
                         estoque: dict = json.loads(raw_est) if isinstance(raw_est, str) else (raw_est or {})
                         estoque = TurnoService._garantir_estrutura_estoque(estoque)
                         meta = estoque["meta"]
 
                         is_hibrido = bool(meta.get("is_hibrido", False))
                         is_eletrico = bool(meta.get("is_eletrico", False))
-                        tipo_comb = (ultimo["tipo_combustivel"] or meta.get("tipo_veiculo", "")).lower()
+                        tipo_comb = (
+                            (veiculo_atual["tipo_combustivel"] if veiculo_atual else None)
+                            or meta.get("tipo_veiculo", "")
+                        ).lower()
 
                         km_restante = km_uso_pessoal
 
@@ -156,13 +183,14 @@ class TurnoService:
                             kwh_disp = Decimal(str(eletro.get("kwh", 0.0)))
                             custo_bat = Decimal(str(eletro.get("custo_total", 0.0)))
                             km_kwh = Decimal(str(eletro.get("km_kwh", 6.5)))
-                            
+
                             if kwh_disp > Decimal("0") and km_kwh > Decimal("0"):
                                 cmp_kwh = custo_bat / kwh_disp
                                 kwh_necessarios = km_restante / km_kwh
                                 kwh_queimados = min(kwh_disp, kwh_necessarios)
                                 custo_bat_queimado = (kwh_queimados * cmp_kwh).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                                
+                                custo_uso_pessoal += custo_bat_queimado
+
                                 eletro["kwh"] = float(max(Decimal("0"), kwh_disp - kwh_queimados).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
                                 eletro["custo_total"] = float(max(Decimal("0"), custo_bat - custo_bat_queimado).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
                                 km_restante -= (kwh_queimados * km_kwh)
@@ -179,6 +207,7 @@ class TurnoService:
                                 m3_necessarios = km_restante / km_m3
                                 m3_queimados = min(m3_disp, m3_necessarios)
                                 custo_gnv_queimado = (m3_queimados * cmp_m3).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                                custo_uso_pessoal += custo_gnv_queimado
 
                                 gnv["m3"] = float(max(Decimal("0"), m3_disp - m3_queimados).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
                                 gnv["custo_total"] = float(max(Decimal("0"), custo_gnv - custo_gnv_queimado).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
@@ -208,6 +237,7 @@ class TurnoService:
 
                                 cmp_liq = custo_liq / total_litros
                                 custo_liq_queimado = (litros_queimados * cmp_liq).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                                custo_uso_pessoal += custo_liq_queimado
 
                                 novo_gas = max(Decimal("0"), Decimal(str(liq.get("gasolina_litros", 0.0))) - gas_queimado)
                                 novo_eta = max(Decimal("0"), Decimal(str(liq.get("etanol_litros", 0.0))) - eta_queimado)
@@ -224,8 +254,20 @@ class TurnoService:
                                 else:
                                     liq["gasolina_proporcao"] = 1.0
                                     liq["etanol_proporcao"] = 0.0
+                                km_restante -= (litros_queimados * km_l_medio)
 
-                        # Salva estoque recalculado silenciosamente no banco
+                        # 2.4 Fallback de custo estimado para km sem cobertura de estoque
+                        # (mesmo modelo do fechar_turno_com_dre: R$ 0,48/km)
+                        if km_restante > Decimal("0"):
+                            custo_fallback = (km_restante * Decimal("0.48")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            custo_uso_pessoal += custo_fallback
+                            logger.info(
+                                f"[abrir_turno] Uso pessoal sem cobertura de estoque: "
+                                f"{float(km_restante):.1f} km, custo estimado R$ {float(custo_fallback):.2f} "
+                                f"(motorista={motorista_id})"
+                            )
+
+                        # Salva estoque recalculado no banco
                         await conn.execute(
                             "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
                             json.dumps(estoque), veiculo_id,
@@ -246,6 +288,7 @@ class TurnoService:
                     "turno_id": str(row["id"]),
                     "km_inicial": float(row["km_inicial"]),
                     "km_uso_pessoal": float(row["km_uso_pessoal"]),
+                    "custo_uso_pessoal": float(custo_uso_pessoal),
                     "data_inicio": row["data_inicio"],
                 }
         except Exception as exc:

@@ -133,10 +133,13 @@ class TransacaoService:
 
                 # 2. Telemetria e Recalibração de Combustível
                 if tipo_validado == "despesa" and categoria.lower() == "combustivel" and veiculo_id:
+                    # FOR UPDATE serializa escritas concorrentes no mesmo veículo.
+                    # Sem isso, dois abastecimentos chegando em paralelo no pool
+                    # leriam o mesmo snapshot de estoque e um sobrescreveria o outro.
                     veiculo = await conn.fetchrow(
                         """SELECT estoque_financeiro, tipo_combustivel,
                                   is_hibrido, is_eletrico, is_flex, capacidade_bateria
-                           FROM public.veiculos WHERE id = $1::uuid;""",
+                           FROM public.veiculos WHERE id = $1::uuid FOR UPDATE;""",
                         veiculo_id
                     )
                     

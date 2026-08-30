@@ -481,21 +481,57 @@ class TurnoService:
 
                         detalhe_queima.append(f"Combustão: {float(litros_queimados):.1f} L (R$ {float(custo_liquido_queimado):.2f})")
 
-                # Se o estoque virtual estava zerado e ainda restou KM para queimar, usa fallbacks
+                # Se o estoque virtual estava zerado e ainda restou KM para queimar:
+                # Amortiza PROPORCIONALMENTE usando o preço real médio do abastecimento do turno.
+                # NÃO soma o valor total da nota fiscal — isso seria contabilizar todo o estoque
+                # comprado como despesa do dia (violação do regime de competência).
                 if km_restante > 0:
-                    total_abastecido_turno_val = await conn.fetchval(
-                        "SELECT COALESCE(SUM(valor), 0.0000) FROM public.transacoes WHERE motorista_id = $1::uuid AND turno_id = $2::uuid AND categoria = 'combustivel' AND estornado = FALSE;",
-                        motorista_id, turno_id
+                    abt_row = await conn.fetchrow(
+                        """
+                        SELECT COALESCE(SUM(valor), 0.0000)              AS total_valor,
+                               COALESCE(SUM(litros_abastecidos), 0.0000) AS total_litros
+                        FROM public.transacoes
+                        WHERE motorista_id = $1::uuid AND turno_id = $2::uuid
+                          AND categoria = 'combustivel' AND estornado = FALSE;
+                        """,
+                        motorista_id, turno_id,
                     )
-                    total_abastecido_turno = Decimal(str(total_abastecido_turno_val or "0.00"))
-                    
-                    if total_abastecido_turno > 0:
-                        custo_estimado = total_abastecido_turno
+                    abt_valor  = Decimal(str(abt_row["total_valor"]  or "0.00"))
+                    abt_litros = Decimal(str(abt_row["total_litros"] or "0.00"))
+
+                    if abt_litros > Decimal("0"):
+                        # Preço real médio ponderado dos abastecimentos registrados no turno
+                        preco_litro_real = abt_valor / abt_litros
+
+                        # Rendimento da mistura: usa variáveis já calculadas na fase 2.3 se
+                        # disponíveis (veículo flex com estoque parcial); caso contrário deriva
+                        # do estoque atual — nunca usa `locals()` (frágil e não determinístico).
+                        liq_ref = estoque.get("liquido", {})
+                        _km_l_gas = Decimal(str(liq_ref.get("km_l_gasolina", 12.0)))
+                        _km_l_eta = Decimal(str(liq_ref.get("km_l_etanol",  8.5)))
+                        _p_gas    = Decimal(str(liq_ref.get("gasolina_proporcao", 1.0)))
+                        _p_eta    = Decimal(str(liq_ref.get("etanol_proporcao",  0.0)))
+                        km_l_fallback = (_p_gas * _km_l_gas) + (_p_eta * _km_l_eta)
+                        if km_l_fallback <= Decimal("0"):
+                            km_l_fallback = Decimal("10.0")
+
+                        litros_necessarios_restantes = km_restante / km_l_fallback
+                        custo_estimado = (litros_necessarios_restantes * preco_litro_real).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP
+                        )
                         custo_combustivel_queimado += custo_estimado
-                        detalhe_queima.append(f"Abastecimento Turno: R$ {float(custo_estimado):.2f}")
+                        # Contabiliza os litros estimados no denominador de km/L para que o
+                        # indicador de rendimento reflita a realidade física do turno.
+                        total_unidades_queimadas_liq += litros_necessarios_restantes
+                        detalhe_queima.append(
+                            f"Abastecimento (Proporcional): {float(litros_necessarios_restantes):.2f} L "
+                            f"× R$ {float(preco_litro_real):.3f} = R$ {float(custo_estimado):.2f}"
+                        )
                     else:
-                        # Média padrão estimada baseada em odômetro para o km excedente sem estoque
-                        custo_estimado = (km_restante * Decimal("0.48")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        # Fallback SRE: motorista rodou sem estoque e sem registrar abastecimento
+                        custo_estimado = (km_restante * Decimal("0.48")).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP
+                        )
                         custo_combustivel_queimado += custo_estimado
                         detalhe_queima.append(f"Falta Estoque: R$ {float(custo_estimado):.2f}")
 

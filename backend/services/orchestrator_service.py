@@ -811,7 +811,13 @@ class OrchestratorService:
                         await RedisFSMService.limpar_buffer(fsm_turno_key)
                         await enviar_whatsapp(remote_jid, "⚠ Nenhum turno ativo localizado. O turno pode ter sido fechado anteriormente.")
                         return
-                    await enviar_whatsapp(remote_jid, "📊  *Confirmado faturamento zerado. Gerando DRE definitivo...*")
+                    # Verifica se o motorista inseriu receitas pelo bypass antes de confirmar.
+                    # Evita a mensagem contraditória "faturamento zerado" quando há lançamentos.
+                    receitas_agora = await TurnoService.verificar_transacoes_turno(motorista_id)
+                    if receitas_agora == 0:
+                        await enviar_whatsapp(remote_jid, "📊  *Confirmado faturamento zerado. Gerando DRE definitivo...*")
+                    else:
+                        await enviar_whatsapp(remote_jid, "📊  *Processando lançamentos e gerando seu DRE definitivo...*")
                     res = await TurnoService.fechar_turno_com_dre(motorista_id, km_final)
                     await RedisFSMService.limpar_buffer(fsm_turno_key)
                     resposta = formatar_relatorio_fechamento_dre(motorista["nome"], res) if res["sucesso"] else res['erro']

@@ -255,11 +255,18 @@ class TransacaoService:
                                 eta_atual = (eta_atual * _fator).quantize(Decimal("0.01"), ROUND_HALF_UP)
                             # ─────────────────────────────────────────────────────────────────────
 
-                            litros_match = re.search(r'(\d+[.,]?\d*)\s*(?:litros|litro|l)', desc_limpa)
-                            if litros_match:
-                                litros_novos = Decimal(litros_match.group(1).replace(',', '.'))
+                            # Hierarquia de fonte de verdade para o volume abastecido:
+                            # 1. Parâmetro calculado pela FSM (preco informado pelo motorista)
+                            # 2. Extração textual da descrição ("abasteci 17,5 litros")
+                            # 3. Fallback estatístico pelo preço médio de referência
+                            if litros_abastecidos is not None and litros_abastecidos > 0:
+                                litros_novos = Decimal(str(litros_abastecidos))
                             else:
-                                litros_novos = (valor_decimal / TransacaoService._PRECO_MEDIO_LITRO_FALLBACK)
+                                litros_match = re.search(r'(\d+[.,]?\d*)\s*(?:litros|litro|l)', desc_limpa)
+                                if litros_match:
+                                    litros_novos = Decimal(litros_match.group(1).replace(',', '.'))
+                                else:
+                                    litros_novos = (valor_decimal / TransacaoService._PRECO_MEDIO_LITRO_FALLBACK)
 
                             # ── TANQUE-CHEIO SELF-HEAL ───────────────────────────────────────────
                             # Quando o motorista confirma tanque cheio, sabemos com certeza física

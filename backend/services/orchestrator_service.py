@@ -4,7 +4,7 @@ import json
 import httpx
 import logging
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
 from services.database_service import DatabaseService
@@ -563,6 +563,9 @@ class OrchestratorService:
         tem_intencao_fim = any(w in texto_limpo for w in ["encerrar", "fechar", "finalizar", "terminar", "fim"])
         tem_intencao_pausa = any(w in texto_limpo for w in ["pausa", "pausar", "pause", "pausei", "almocar"])
         tem_intencao_retomada = any(w in texto_limpo for w in ["retomar", "voltar", "voltei", "continuar", "retom"])
+        # Detecta lançamentos de RECEITA (aciona auto-resume se turno estiver em pausa)
+        _PALAVRAS_RECEITA = ['recebi', 'ganhei', 'faturei', 'corrida', 'uber', '99', 'indrive', 'faturamento', 'ganho']
+        is_intencao_receita = any(w in texto_limpo for w in _PALAVRAS_RECEITA)
         is_status = any(t in texto_limpo for t in ['status', 'resumo', 'como estou', 'parcial', 'relatorio'])
         is_perfil = any(t in texto_limpo for t in ['perfil', 'meus dados', 'minha conta', 'raio x', 'raiox', 'configuracoes', 'meu perfil'])
         is_contrato = "atualizar contrato" in texto_limpo
@@ -793,6 +796,97 @@ class OrchestratorService:
                 await enviar_whatsapp(remote_jid, resposta)
                 return
 
+        # 3.0. Declaração retroativa de pausa (motorista respondendo ao aviso de jornada longa)
+        if estado_turno and estado_turno.startswith("AGUARDANDO_DECLARACAO_PAUSA"):
+            km_final = float(estado_turno.split("|km:")[1])
+
+            # Interpreta "não" / "nao" / "nenhuma" como ausência de pausa
+            sem_pausa = any(w in texto_limpo for w in ["nao", "nenhuma", "nenhum", "sem pausa", "nao parei", "nunca"])
+
+            minutos_declarados: Optional[int] = None
+            if not sem_pausa:
+                # Parseia expressões de tempo: "1h30", "1h30min", "45min", "45m", "2h", "30"
+                m = re.search(r'(\d+)\s*h\s*(\d+)', texto_limpo)         # 1h30, 1h 30
+                if m:
+                    minutos_declarados = int(m.group(1)) * 60 + int(m.group(2))
+                else:
+                    m = re.search(r'(\d+)\s*(?:h\b|hora)', texto_limpo)  # 2h, 2 horas
+                    if m:
+                        minutos_declarados = int(m.group(1)) * 60
+                    else:
+                        m = re.search(r'(\d+)\s*(?:min\b|m\b)', texto_limpo)  # 45min, 45m
+                        if m:
+                            minutos_declarados = int(m.group(1))
+                        else:
+                            # Número puro ≤ 480 interpretado como minutos (≤ 8h de pausa)
+                            m = re.search(r'^\s*(\d+)\s*$', texto_bruto.strip())
+                            if m and int(m.group(1)) <= 480:
+                                minutos_declarados = int(m.group(1))
+
+            if not sem_pausa and minutos_declarados is None:
+                # Resposta não reconhecida: pede novamente sem consumir o estado
+                await enviar_whatsapp(
+                    remote_jid,
+                    "⚠ Não entendi. Responda com o tempo total de pausa (ex:  *1h30* ,  *45min* ,  *2h* ) "
+                    "ou  *não*  se não houve pausa."
+                )
+                return
+
+            await RedisFSMService.limpar_buffer(fsm_turno_key)
+
+            if minutos_declarados and minutos_declarados > 0:
+                # Insere pausa retroativa: cobre [dt_inicio_turno, dt_inicio_turno + duração]
+                try:
+                    from datetime import timezone as _tz
+                    async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                        turno_row = await conn.fetchrow(
+                            "SELECT id, data_inicio FROM public.turnos "
+                            "WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento', 'em_pausa') "
+                            "ORDER BY data_inicio DESC LIMIT 1;",
+                            motorista_id
+                        )
+                        if turno_row:
+                            dt_inicio = turno_row["data_inicio"]
+                            if dt_inicio.tzinfo is None:
+                                dt_inicio = dt_inicio.replace(tzinfo=_tz.utc)
+                            # Posiciona a pausa retroativa no meio da jornada
+                            duracao_turno = datetime.now(_tz.utc) - dt_inicio
+                            meio_jornada = dt_inicio + duracao_turno / 2
+                            fim_pausa = meio_jornada + timedelta(minutes=minutos_declarados)
+                            await conn.execute(
+                                "INSERT INTO public.pausas_turno "
+                                "(turno_id, motivo, inicio_pausa, fim_pausa) "
+                                "VALUES ($1::uuid, 'Pausa Declarada Retroativamente', $2, $3);",
+                                str(turno_row["id"]), meio_jornada, fim_pausa
+                            )
+                            logger.info(
+                                f"[DECLARACAO_PAUSA] Motorista {motorista_id}: {minutos_declarados}min "
+                                f"de pausa retroativa inserida no turno {turno_row['id']}"
+                            )
+                except Exception as e:
+                    logger.error(f"[DECLARACAO_PAUSA] Erro ao inserir pausa retroativa: {e}")
+                    # Falha ao gravar a pausa não deve bloquear o fechamento; apenas loga.
+
+                horas_fmt  = minutos_declarados // 60
+                minutos_fmt = minutos_declarados % 60
+                tempo_str  = f"{horas_fmt}h{minutos_fmt:02d}min" if horas_fmt else f"{minutos_fmt}min"
+                await enviar_whatsapp(
+                    remote_jid,
+                    f"⏱ Pausa de  *{tempo_str}*  registrada retroativamente.\n"
+                    f"📊  *A auditar movimentações e gerando DRE...*"
+                )
+            else:
+                await enviar_whatsapp(remote_jid, "📊  *Nenhuma pausa registrada. A gerar seu DRE...*")
+
+            res = await TurnoService.fechar_turno_com_dre(motorista_id, km_final)
+            if res["sucesso"]:
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                resposta = formatar_relatorio_fechamento_dre(motorista["nome"], res)
+            else:
+                resposta = res.get("erro", "❌ Erro ao gerar DRE.")
+            await enviar_whatsapp(remote_jid, resposta)
+            return
+
         if estado_turno in ["AGUARDANDO_KM_INICIAL", "AGUARDANDO_KM_FINAL"] or (estado_turno and estado_turno.startswith("AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO")):
             km_digitado = converter_para_float(texto_bruto)
 
@@ -935,22 +1029,44 @@ class OrchestratorService:
 
         if tem_intencao_fim:
             if km_encontrado:
-                # Verifica lançamentos antes do fechamento
                 async with DatabaseService.get_tenant_connection(motorista_id) as conn:
-                    active_turno_row = await conn.fetchrow("SELECT id FROM public.turnos WHERE motorista_id = $1::uuid AND status IN ('ABERTO', 'em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;", motorista_id)
-                    if active_turno_row:
+                    turno_row = await conn.fetchrow(
+                        "SELECT id, data_inicio FROM public.turnos WHERE motorista_id = $1::uuid "
+                        "AND status IN ('ABERTO', 'em_andamento', 'em_pausa') ORDER BY data_inicio DESC LIMIT 1;",
+                        motorista_id
+                    )
+                    if turno_row:
                         total_tx = await TurnoService.verificar_transacoes_turno(motorista_id)
                         if total_tx == 0:
                             await RedisFSMService.definir_estado(fsm_turno_key, f"AGUARDANDO_CONFIRMACAO_ZERO_TRANSACAO|km:{km_encontrado}")
-                            # Auditoria: registra o acionamento da trava para rastreio de padrões
                             await RedisFSMService.registrar_audit_trava_zero(tenant_id, km_encontrado)
                             logger.warning(f"[TRAVA_ZERO] Motorista {motorista_id} tentou fechar turno sem lançamentos (km={km_encontrado})")
-                            resposta = (
+                            await enviar_whatsapp(remote_jid, (
                                 "⚠  *Atenção, motorista!*  Não encontrei nenhuma receita ou despesa registrada neste turno.\n\n"
                                 "Tem certeza absoluta que o faturamento de hoje foi R$ 0,00?\n\n"
                                 "Responda  *'Confirmar'*  para fechar assim mesmo ou envie o valor de uma despesa/receita."
+                            ))
+                            return
+                        # Pausa declarativa: jornadas ≥ 6h sem pausas registradas
+                        from datetime import timezone
+                        dt_inicio_turno = turno_row["data_inicio"]
+                        agora_utc = datetime.now(timezone.utc)
+                        if dt_inicio_turno.tzinfo is None:
+                            dt_inicio_turno = dt_inicio_turno.replace(tzinfo=timezone.utc)
+                        duracao_h = (agora_utc - dt_inicio_turno).total_seconds() / 3600
+                        pausas_count = await conn.fetchval(
+                            "SELECT COUNT(*) FROM public.pausas_turno WHERE turno_id = $1::uuid;",
+                            str(turno_row["id"])
+                        )
+                        if duracao_h >= 6 and (pausas_count or 0) == 0:
+                            await RedisFSMService.definir_estado(
+                                fsm_turno_key, f"AGUARDANDO_DECLARACAO_PAUSA|km:{km_encontrado}"
                             )
-                            await enviar_whatsapp(remote_jid, resposta)
+                            await enviar_whatsapp(remote_jid, (
+                                f"⏱ Sua jornada durou  *{duracao_h:.1f}h* . Para calcular o  *faturamento por hora*  corretamente, "
+                                f"você fez alguma pausa para almoço ou descanso hoje?\n\n"
+                                f"Responda com o tempo total (ex:  *1h30* ,  *45min* ,  *2h* ) ou  *não*  se não parou."
+                            ))
                             return
                 await enviar_whatsapp(remote_jid, "📊  *A auditar movimentações e gerando DRE...* ")
                 res = await TurnoService.fechar_turno_com_dre(motorista_id, km_encontrado)
@@ -962,20 +1078,34 @@ class OrchestratorService:
             return
 
         if tem_intencao_pausa:
-            res = await TurnoService.pausar_turno(motorista_id)
+            km_pausa = km_encontrado if km_encontrado and km_encontrado > 100 else None
+            res = await TurnoService.pausar_turno(motorista_id, km_pausa=km_pausa)
             if res["sucesso"]:
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                resposta = "⏸ Turno pausado com sucesso. Quando voltar, envie  *'retomar'* !"
+                extra = "  _KM registrado para auditoria de uso pessoal._" if res.get("km_pausa_registrado") else ""
+                resposta = f"⏸ Turno pausado com sucesso. Quando voltar, envie  *'retomar'* !{extra}"
             else:
                 resposta = f"⚠ {res['erro']}"
             await enviar_whatsapp(remote_jid, resposta)
             return
 
         if tem_intencao_retomada:
-            res = await TurnoService.retomar_turno(motorista_id)
+            km_retomada = km_encontrado if km_encontrado and km_encontrado > 100 else None
+            res = await TurnoService.retomar_turno(motorista_id, km_retomada=km_retomada)
             if res["sucesso"]:
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                resposta = "▶ Turno retomado com sucesso! Bom trabalho."
+                custo_intra = res.get("custo_uso_pessoal_intra", 0.0)
+                if custo_intra > 0:
+                    detalhe = res.get("detalhe_uso_pessoal", "")
+                    resposta = (
+                        f"▶ Turno retomado! Bom trabalho.\n\n"
+                        f"🛣️  *Uso Pessoal na Pausa Auditado*\n"
+                        f"• Custo amortizado do cofre:  *R$ {custo_intra:.2f}*\n"
+                        f"  _{detalhe}_\n"
+                        f"_Seu Lucro Real está protegido._"
+                    )
+                else:
+                    resposta = "▶ Turno retomado com sucesso! Bom trabalho."
             else:
                 resposta = f"⚠ {res['erro']}"
             await enviar_whatsapp(remote_jid, resposta)

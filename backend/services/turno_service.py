@@ -572,20 +572,23 @@ class TurnoService:
                 )
 
                 # 3. APURAÇÃO CONTÁBIL E EXTRAÇÃO DE DESPESAS DETALHADAS DO TURNO
+                # Scope-clean: filtra SOMENTE por turno_id.  A cláusula "OR turno_id IS NULL"
+                # foi removida — ela contabilizava transações órfãs (sem turno) como receita
+                # do turno atual, impedindo a trava de faturamento-zero de disparar corretamente.
                 financeiro = await conn.fetchrow(
                     "SELECT "
                     "    COALESCE(SUM(CASE WHEN tipo_movimentacao = 'receita' THEN valor ELSE 0 END), 0.0000) as faturamento, "
                     "    COALESCE(SUM(CASE WHEN tipo_movimentacao = 'despesa' AND categoria != 'combustivel' THEN valor ELSE 0 END), 0.0000) as despesas_operacionais, "
                     "    COALESCE(SUM(CASE WHEN tipo_movimentacao = 'despesa' AND categoria = 'combustivel' THEN valor ELSE 0 END), 0.0000) as total_abastecido "
                     "FROM public.transacoes "
-                    "WHERE motorista_id = $1::uuid AND (turno_id = $2::uuid OR (turno_id IS NULL AND data_transacao >= $3)) AND estornado = FALSE;",
-                    motorista_id, turno_id, dt_inicio
+                    "WHERE motorista_id = $1::uuid AND turno_id = $2::uuid AND estornado = FALSE;",
+                    motorista_id, turno_id
                 )
 
                 faturamento_bruto = Decimal(str(financeiro["faturamento"]))
                 outras_despesas_variaveis = Decimal(str(financeiro["despesas_operacionais"]))
                 total_abastecido_turno = Decimal(str(financeiro["total_abastecido"]))
-                
+
                 # Custo variável total da jornada compreende despesas de pista + custo amortizado da queima multi-energia
                 custo_variavel_total = outras_despesas_variaveis + custo_combustivel_queimado
 
@@ -593,10 +596,10 @@ class TurnoService:
                 despesas_lista = await conn.fetch(
                     "SELECT categoria, valor, descricao "
                     "FROM public.transacoes "
-                    "WHERE motorista_id = $1::uuid AND (turno_id = $2::uuid OR (turno_id IS NULL AND data_transacao >= $3)) "
+                    "WHERE motorista_id = $1::uuid AND turno_id = $2::uuid "
                     "  AND tipo_movimentacao = 'despesa' AND estornado = FALSE "
                     "ORDER BY data_transacao ASC;",
-                    motorista_id, turno_id, dt_inicio
+                    motorista_id, turno_id
                 )
 
                 despesas_detalhadas = []

@@ -1,3 +1,41 @@
+CREATE TABLE public.fechamentos_consolidados (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    tipo_periodo character varying(10) NOT NULL,
+    referencia character varying(7) NOT NULL,
+    faturacao_bruta numeric(14,4) DEFAULT 0.00 NOT NULL,
+    custo_variavel_direto numeric(14,4) DEFAULT 0.00 NOT NULL,
+    custo_fixo_rateado numeric(14,4) DEFAULT 0.00 NOT NULL,
+    provisao_descontada numeric(14,4) DEFAULT 0.00 NOT NULL,
+    lucro_liquido_real numeric(14,4) DEFAULT 0.00 NOT NULL,
+    km_rodados numeric(10,2) DEFAULT 0.00 NOT NULL,
+    horas_trabalhadas numeric(10,2) DEFAULT 0.00 NOT NULL,
+    status character varying(20) DEFAULT 'FECHADO'::character varying NOT NULL,
+    data_consolidacao timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fechamentos_consolidados_tipo_periodo_check CHECK (((tipo_periodo)::text = ANY ((ARRAY['MENSAL'::character varying, 'ANUAL'::character varying])::text[])))
+);
+
+
+--
+-- Name: historico_manutencao; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.historico_manutencao (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    veiculo_id uuid NOT NULL,
+    regra_id uuid,
+    transacao_id uuid,
+    km_execucao numeric(10,2) NOT NULL,
+    data_execucao timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- Name: lgpd_logs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.lgpd_logs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
     motorista_id uuid NOT NULL,
     acao_realizada character varying(50) NOT NULL,
     ip_origem character varying(50),
@@ -145,8 +183,8 @@ COPY public.assinaturas (id, motorista_id, gateway_id, plano, data_vencimento, s
 --
 
 COPY public.caixas_provisao (id, motorista_id, nome_caixa, saldo_atual, ultima_atualizacao) FROM stdin;
-6843454f-5cd6-4c5e-ad79-c7a2efdc0136    8987fc54-b506-4e02-adca-5ce0773454e3    Manutenção Corretiva (Pneus/Freios) 0.0000  2026-08-23 11:46:25.361032-03
-728f8076-1ce3-49ef-9526-c67994660861    8987fc54-b506-4e02-adca-5ce0773454e3    Amortização de IPVA/Seguro  0.0000  2026-08-23 11:46:25.361032-03
+59539b40-b01d-4021-858a-3857593d175b    4ef8c731-7878-4091-923d-50f1c06c34d0    Manutenção Corretiva (Pneus/Freios) 0.0000  2026-08-29 09:33:13.797524-03
+1a5fb189-3c22-43ee-bf7c-82cc7fed79f2    4ef8c731-7878-4091-923d-50f1c06c34d0    Amortização de IPVA/Seguro  0.0000  2026-08-29 09:33:13.797524-03
 \.
 
 
@@ -171,13 +209,7 @@ COPY public.dlq_eventos (id, motorista_id, payload_original, motivo_falha, tenta
 --
 
 COPY public.fechamento_diario (id, motorista_id, turno_id, faturamento_bruto, custo_variavel_direto, custo_fixo_rateado, lucro_liquido_real, km_rodados, clima_predominante, data_fechamento, provisao_descontada) FROM stdin;
-a42ce6eb-ec7c-433e-b899-5ce2515d3d05    8987fc54-b506-4e02-adca-5ce0773454e3    1a513dda-3481-45dc-a908-a21a5936f494        0.0000  0.4800  250.0000        -250.4800       1.00    \N      2026-08-23 0.0000
-946a5972-676d-418a-962e-5ed87ab00577    8987fc54-b506-4e02-adca-5ce0773454e3    ecf1f9c2-905b-4f78-8e0d-5cee7f4ca15c        50.0000 0.0000  42.0000 8.0000  0.00    \N      2026-08-23      0.0000
-9b40df35-e264-409e-bd49-09f49e1450d2    8987fc54-b506-4e02-adca-5ce0773454e3    0cb2b579-29e5-4598-8d55-0b102cf6c814        0.0000  4.9020  42.0000 -46.9020        10.00   \N      2026-08-23      0.0000
-ddaaf03a-015e-4bb1-85a9-3ed9ac0aed74    8987fc54-b506-4e02-adca-5ce0773454e3    10cef97b-d345-499b-9c47-a00bd285aa2f        374.4500        99.1000 42.0000 233.3500        149.00  \N      2026-08-23 0.0000
-aa22b6be-9e66-4827-a36c-27320bc96613    8987fc54-b506-4e02-adca-5ce0773454e3    444180d0-e70b-47eb-b0cf-74217a3faaa7        100.0000        10.5200 42.0000 47.4800 20.00   \N      2026-08-24      0.0000
-e64f83e9-20ce-4e9d-93d1-473e18b0d3a9    8987fc54-b506-4e02-adca-5ce0773454e3    bcebe3f8-7795-4c2e-804a-cd20b305c32c        0.0000  0.5255  42.0000 -42.5255        1.00    \N      2026-08-24      0.0000
-0f4b9734-932d-4ed3-b9dd-426ce17e5cc3    8987fc54-b506-4e02-adca-5ce0773454e3    11ef327d-b291-41af-b95c-09a68085dda2        0.0000  0.5251  42.0000 -42.5251        1.00    \N      2026-08-26      0.0000
+92803e60-cf0f-4404-8fa6-1d52cc2985f3    4ef8c731-7878-4091-923d-50f1c06c34d0    92dc9647-4d84-462a-9303-5c17c0c3203a        347.8600        174.0000        42.0000 131.8600        138.00  \N      2026-08-29  0.0000
 \.
 
 
@@ -202,7 +234,6 @@ COPY public.historico_manutencao (id, veiculo_id, regra_id, transacao_id, km_exe
 --
 
 COPY public.lgpd_logs (id, motorista_id, acao_realizada, ip_origem, data_evento) FROM stdin;
-df215757-4c6c-446f-b4b8-63b2a55d8282    8987fc54-b506-4e02-adca-5ce0773454e3    UPGRADE_DATABASE_SCHEMA_V3  127.0.0.1       2026-08-26 13:26:42.705196-03
 \.
 
 
@@ -211,7 +242,7 @@ df215757-4c6c-446f-b4b8-63b2a55d8282    8987fc54-b506-4e02-adca-5ce0773454e3    
 --
 
 COPY public.motoristas (id, telefone, nome, status_assinatura, ativo, criado_em, atualizado_em, meta_mensal_faturamento, dias_uteis_mes, nome_social, meta_faturamento_diario, meta_faturamento_semanal, meta_horas_diarias, meta_km_diarios, possui_multiplos_veiculos) FROM stdin;
-8987fc54-b506-4e02-adca-5ce0773454e3    5513997971393   Willian Machado TRIAL   t       2026-08-23 11:46:25.361032-03       2026-08-23 11:46:25.361032-03   12000.0000      26      \N      0.0000  0.0000      8.00    0.00    f
+4ef8c731-7878-4091-923d-50f1c06c34d0    5513997971393   Willian Machado TRIAL   t       2026-08-29 09:33:13.797524-03       2026-08-29 09:35:05.48117-03    9100.0000       26      \N      0.0000  0.0000      8.00    0.00    f
 \.
 
 
@@ -220,6 +251,7 @@ COPY public.motoristas (id, telefone, nome, status_assinatura, ativo, criado_em,
 --
 
 COPY public.pausas_turno (id, turno_id, inicio_pausa, fim_pausa, motivo) FROM stdin;
+ebd8895f-050f-486e-aa6f-b6a51f66adc2    92dc9647-4d84-462a-9303-5c17c0c3203a    2026-08-29 13:52:07.491309-03       2026-08-29 16:45:14.636099-03   Pausa Operacional
 \.
 
 
@@ -236,15 +268,10 @@ COPY public.regras_manutencao (id, veiculo_id, tipo_servico, intervalo_km, aviso
 --
 
 COPY public.transacoes (id, motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria, valor, estabelecimento, metodo_pagamento, contexto_operacional, comprovante_url, idempotencia_hash, estornado, data_transacao, descricao, wpp_msg_id, created_at, litros_abastecidos, preco_por_litro, odometro_abastecimento, tanque_cheio) FROM stdin;
-14e2fa25-8efc-4bee-ae07-fbd737524758    8987fc54-b506-4e02-adca-5ce0773454e3    ecf1f9c2-905b-4f78-8e0d-5cee7f4ca15c        79e27786-6150-4166-a253-663b4be8a3b3    receita geral   50.0000 \N      \N \N       \N      \N      f       2026-08-23 11:54:49.945449-03   Ganhei 50 na Uber       ACD69691876D2FB89112EB9E2FE37D93    2026-08-23 11:54:49.945449-03   \N      \N      \N      f
-fffefc52-8180-4d3b-bd98-c7fe32d41260    8987fc54-b506-4e02-adca-5ce0773454e3    ecf1f9c2-905b-4f78-8e0d-5cee7f4ca15c        79e27786-6150-4166-a253-663b4be8a3b3    despesa combustivel     5.0000  \N \N       \N      \N      \N      f       2026-08-23 11:55:05.575872-03   Gastei 5 de etanol      AC5E099F7C5025F9CBB58B275E995AB9    2026-08-23 11:55:05.575872-03   \N      \N      \N      f
-6d5ef930-93c4-4479-b4c2-d332837feed7    8987fc54-b506-4e02-adca-5ce0773454e3    ecf1f9c2-905b-4f78-8e0d-5cee7f4ca15c        79e27786-6150-4166-a253-663b4be8a3b3    despesa combustivel     5.0000  \N \N       \N      \N      \N      f       2026-08-23 11:55:23.460228-03   Gastei 5 combustível    AC671226D86AACFB055A0B6AD55F16B2    2026-08-23 11:55:23.460228-03   \N      \N      \N      f
-73849971-e8aa-4979-8afb-1e827b32b6bb    8987fc54-b506-4e02-adca-5ce0773454e3    10cef97b-d345-499b-9c47-a00bd285aa2f        79e27786-6150-4166-a253-663b4be8a3b3    despesa combustivel     47.0000 \N \N       \N      \N      \N      f       2026-08-23 15:20:41.020954-03   Gastei 47 etanol        ACE09F488EB401AAA80AF5A64331FD76    2026-08-23 15:20:41.020954-03   \N      \N      \N      f
-5c0ba315-12a1-47d1-be55-6e74773fa7be    8987fc54-b506-4e02-adca-5ce0773454e3    10cef97b-d345-499b-9c47-a00bd285aa2f        79e27786-6150-4166-a253-663b4be8a3b3    receita corrida 374.4500        \N \N       \N      \N      \N      f       2026-08-23 20:39:11.90423-03    Ganhei  374,45 na Uber  AC3C147FAD1847E38A2778A8372AF201    2026-08-23 20:39:11.90423-03    \N      \N      \N      f
-bdb6aacf-4ffe-4a1a-b555-4b24972bbab1    8987fc54-b506-4e02-adca-5ce0773454e3    \N      79e27786-6150-4166-a253-663b4be8a3b3        despesa combustivel     50.0000 \N      \N      \N      \N      \N 2026-08-24 12:47:40.267219-03    gastei 50 de etanol     3EB0679FA83BD94DADF2D4  2026-08-24 12:47:40.267219-03       \N      \N      \N      f
-c9a516f0-f1fa-4726-ab48-d9e28ac3610c    8987fc54-b506-4e02-adca-5ce0773454e3    \N      79e27786-6150-4166-a253-663b4be8a3b3        despesa combustivel     32.9000 \N      \N      \N      \N      \N 2026-08-24 15:26:37.9812-03      abasteci        3EB00B47A4F4F8408550DA  2026-08-24 15:26:37.9812-0310.00    3.2900  178996.00       f
-aaca7382-f43f-4dcb-a9fd-b4afa0b4f0b7    8987fc54-b506-4e02-adca-5ce0773454e3    444180d0-e70b-47eb-b0cf-74217a3faaa7        79e27786-6150-4166-a253-663b4be8a3b3    receita geral   100.0000        \N \N       \N      \N      \N      f       2026-08-24 15:28:15.222293-03   ganhei 100 na uber      3EB02CA09DC4BC0C8729B1      2026-08-24 15:28:15.222293-03   \N      \N      \N      f
-bb11d99c-49f4-4978-8012-0ac17ea409ff    8987fc54-b506-4e02-adca-5ce0773454e3    \N      79e27786-6150-4166-a253-663b4be8a3b3        despesa combustivel     100.0000        \N      \N      \N      \N \N       f       2026-08-26 09:06:22.018561-03   abasteci 100 de etanol  3EB0A3444DEC249F047E0C  2026-08-26 09:06:22.018561-03       \N      \N      \N      f
+05dc5ca1-686d-401c-a7b5-e773b533d262    4ef8c731-7878-4091-923d-50f1c06c34d0    92dc9647-4d84-462a-9303-5c17c0c3203a        7debe768-155b-4d25-b8a1-22a7b8bd13f5    despesa combustivel     57.0000 \N \N       \N      \N      \N      f       2026-08-29 10:30:49.576782-03   Abastecer       ACC6DC5DD266EBD2584F30ABE750F65F    2026-08-29 10:30:49.576782-03   17.87   3.1900  179734.00       f
+98ecaa23-6e4a-402c-a6d9-94b8d8f6c86b    4ef8c731-7878-4091-923d-50f1c06c34d0    92dc9647-4d84-462a-9303-5c17c0c3203a        7debe768-155b-4d25-b8a1-22a7b8bd13f5    despesa geral   25.0000 \N      \N \N       \N      \N      f       2026-08-29 15:47:02.872728-03   Gastei 25 na cacau center       ACF1413F1443C917B1FA45A0BA11E598    2026-08-29 15:47:02.872728-03   \N      \N      \N      f
+680abca7-c9ef-4759-a903-2630ef1ad7f7    4ef8c731-7878-4091-923d-50f1c06c34d0    92dc9647-4d84-462a-9303-5c17c0c3203a        7debe768-155b-4d25-b8a1-22a7b8bd13f5    despesa geral   35.0000 \N      \N \N       \N      \N      f       2026-08-29 15:47:08.307229-03   Gastei 35 na farmácia   ACA336765594877D29CE138D9B7DE91C    2026-08-29 15:47:08.307229-03   \N      \N      \N      f
+b965e2f5-6339-4ff8-be4a-f815003f0319    4ef8c731-7878-4091-923d-50f1c06c34d0    92dc9647-4d84-462a-9303-5c17c0c3203a        7debe768-155b-4d25-b8a1-22a7b8bd13f5    receita geral   347.8600        \N \N       \N      \N      \N      f       2026-08-29 22:00:12.810435-03   Ganhei 347,86 na Uber   AC483C3F829DEC1E97119EC050E86A28    2026-08-29 22:00:12.810435-03   \N      \N      \N      f
 \.
 
 
@@ -253,13 +280,7 @@ bb11d99c-49f4-4978-8012-0ac17ea409ff    8987fc54-b506-4e02-adca-5ce0773454e3    
 --
 
 COPY public.turnos (id, motorista_id, veiculo_id, km_inicial, km_final, data_inicio, data_fim, status, km_uso_pessoal) FROM stdin;
-1a513dda-3481-45dc-a908-a21a5936f494    8987fc54-b506-4e02-adca-5ce0773454e3    79e27786-6150-4166-a253-663b4be8a3b3        1000.00 1001.00 2026-08-23 11:50:04.476172-03   2026-08-23 11:50:42.232332-03       concluido       0.00
-ecf1f9c2-905b-4f78-8e0d-5cee7f4ca15c    8987fc54-b506-4e02-adca-5ce0773454e3    79e27786-6150-4166-a253-663b4be8a3b3        1001.00 1001.00 2026-08-23 11:53:55.401128-03   2026-08-23 11:55:34.259536-03       concluido       0.00
-0cb2b579-29e5-4598-8d55-0b102cf6c814    8987fc54-b506-4e02-adca-5ce0773454e3    79e27786-6150-4166-a253-663b4be8a3b3        1001.00 1011.00 2026-08-23 12:00:23.721358-03   2026-08-23 12:00:47.792314-03       concluido       0.00
-10cef97b-d345-499b-9c47-a00bd285aa2f    8987fc54-b506-4e02-adca-5ce0773454e3    79e27786-6150-4166-a253-663b4be8a3b3        178990.00       179139.00       2026-08-23 12:54:24.726368-03   2026-08-23 20:39:27.446382-03       concluido       0.00
-444180d0-e70b-47eb-b0cf-74217a3faaa7    8987fc54-b506-4e02-adca-5ce0773454e3    79e27786-6150-4166-a253-663b4be8a3b3        179139.00       179159.00       2026-08-24 15:27:37.140747-03   2026-08-24 15:28:29.382752-03       concluido       0.00
-bcebe3f8-7795-4c2e-804a-cd20b305c32c    8987fc54-b506-4e02-adca-5ce0773454e3    79e27786-6150-4166-a253-663b4be8a3b3        179200.00       179201.00       2026-08-24 17:34:52.084711-03   2026-08-24 17:54:31.863883-03       concluido       41.00
-11ef327d-b291-41af-b95c-09a68085dda2    8987fc54-b506-4e02-adca-5ce0773454e3    79e27786-6150-4166-a253-663b4be8a3b3        179250.00       179251.00       2026-08-26 09:05:34.624327-03   2026-08-26 09:05:55.804798-03       concluido       49.00
+92dc9647-4d84-462a-9303-5c17c0c3203a    4ef8c731-7878-4091-923d-50f1c06c34d0    7debe768-155b-4d25-b8a1-22a7b8bd13f5        179729.00       179867.00       2026-08-29 10:05:30.638362-03   2026-08-29 22:00:23.86756-03        concluido       0.00
 \.
 
 
@@ -268,7 +289,7 @@ bcebe3f8-7795-4c2e-804a-cd20b305c32c    8987fc54-b506-4e02-adca-5ce0773454e3    
 --
 
 COPY public.veiculos (id, motorista_id, placa, modelo, tipo_combustivel, estoque_financeiro, ativo, criado_em, created_at, locadora, custo_aluguel_semanal, franquia_km_semanal, valor_km_excedente, escala_trabalho, contrato_personalizado, capacidade_bateria, is_flex, qtd_tanques, is_hibrido, is_eletrico) FROM stdin;
-79e27786-6150-4166-a253-663b4be8a3b3    8987fc54-b506-4e02-adca-5ce0773454e3    EPT8C00 Uno Fiat   etanol   {"gnv": {"cmp": 0.0, "unidades": 0.0, "km_unidade": 14.0, "custo_total": 0.0, "capacidade_nominal": 15.0}, "meta": {"is_flex": false, "is_hibrido": false, "is_eletrico": false, "qtd_tanques": 1, "tipo_veiculo": "gasolina", "capacidade_tanque_l": 50.0, "capacidade_bateria_kwh": 0.0}, "liquido": {"cmp": 0.0, "litros": 22.47, "unidades": 0.0, "km_unidade": 10.0, "custo_total": 124.02, "etanol_litros": 22.47, "gasolina_litros": 0.0, "etanol_proporcao": 1.0, "capacidade_nominal": 40.0, "gasolina_proporcao": 0.0}, "eletricidade": {"cmp": 0.0, "unidades": 0.0, "km_unidade": 6.0, "custo_total": 0.0, "capacidade_nominal": 40.0}}     t       2026-08-23 11:46:25.361032-03   2026-08-23 11:46:25.361032-03       financiado      252.00  10.00   0.7500  De quarta a segunda (6 dias)    t       0.0f
+7debe768-155b-4d25-b8a1-22a7b8bd13f5    4ef8c731-7878-4091-923d-50f1c06c34d0    EPT8C00 Uno Fiat   etanol   {"gnv": {"m3": 0.0, "km_m3": 14.0, "custo_total": 0.0}, "meta": {"is_flex": false, "is_hibrido": false, "is_eletrico": false, "qtd_tanques": 1, "tipo_veiculo": "etanol", "capacidade_tanque_l": 40.0, "capacidade_bateria_kwh": 0.0}, "liquido": {"litros": 0.0, "custo_total": 0.0, "km_l_etanol": 8.5, "etanol_litros": 0.0, "km_l_gasolina": 12.0, "gasolina_litros": 0.0, "etanol_proporcao": 0.0, "gasolina_proporcao": 1.0}, "eletricidade": {"kwh": 0.0, "km_kwh": 6.5, "custo_total": 0.0}}    t  2026-08-29 09:33:13.797524-03    2026-08-29 09:33:13.797524-03   Financiado      252.00  0.00    0.7500      De quarta a segunda (6 dias)    t       30.00   f       1       f       f
 \.
 
 
@@ -278,6 +299,14 @@ COPY public.veiculos (id, motorista_id, placa, modelo, tipo_combustivel, estoque
 
 ALTER TABLE ONLY public.assinaturas
     ADD CONSTRAINT assinaturas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: caixas_provisao caixas_provisao_motorista_id_nome_caixa_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.caixas_provisao
+    ADD CONSTRAINT caixas_provisao_motorista_id_nome_caixa_key UNIQUE (motorista_id, nome_caixa);
 
 
 --
@@ -406,6 +435,14 @@ ALTER TABLE ONLY public.turnos
 
 ALTER TABLE ONLY public.veiculos
     ADD CONSTRAINT veiculos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: veiculos veiculos_placa_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.veiculos
+    ADD CONSTRAINT veiculos_placa_key UNIQUE (placa);
 
 
 --
@@ -888,4 +925,4 @@ ALTER TABLE public.veiculos ENABLE ROW LEVEL SECURITY;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict pv2APONF2UCditgJkddtfyNdLoyjDXpGcJDoOzKepfXR8fCG4UiyaNqx9K9rhEb
+\unrestrict m6SHsaC9awsGAU96TaEqK6NH2anoVhoK01tHpgQjOIcWIO0bi5pwWkaXDvHrGph

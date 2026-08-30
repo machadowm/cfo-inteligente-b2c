@@ -780,15 +780,26 @@ class OrchestratorService:
                     litros_fmt = f"{litros:.2f}".replace(".", ",")
                     preco_fmt  = f"R$ {preco:.3f}".replace(".", ",")
                     odo_fmt    = f"  |  Odômetro:  *{int(odometro):,} km*".replace(",", ".") if odometro else ""
-                    cheio_str  = "  |  🔋 Tanque cheio registrado!" if tanque_cheio else ""
-                    resposta = (
-                        f"⛽  *Abastecimento Registrado!*\n\n"
-                        f"• Valor:  *{valor_fmt}*\n"
-                        f"• Volume:  *{litros_fmt} L*\n"
-                        f"• Preço/L:  *{preco_fmt}*"
-                        f"{odo_fmt}{cheio_str}\n\n"
-                        f"🛡 Estoque e cofre atualizados!"
-                    )
+                    if res_tx.get("self_healed"):
+                        resposta = (
+                            f"⛽  *Abastecimento + Self-Heal Registrado!*\n\n"
+                            f"• Valor:  *{valor_fmt}*\n"
+                            f"• Volume real:  *{litros_fmt} L*\n"
+                            f"• Preço/L:  *{preco_fmt}*"
+                            f"{odo_fmt}\n\n"
+                            f"🔧  *Cofre auto-recalibrado:* tanque virtual ancorado à capacidade nominal.\n"
+                            f"🛡 CMP corrigido. Estoque saneado!"
+                        )
+                    else:
+                        cheio_str  = "  |  🔋 Tanque cheio registrado!" if tanque_cheio else ""
+                        resposta = (
+                            f"⛽  *Abastecimento Registrado!*\n\n"
+                            f"• Valor:  *{valor_fmt}*\n"
+                            f"• Volume:  *{litros_fmt} L*\n"
+                            f"• Preço/L:  *{preco_fmt}*"
+                            f"{odo_fmt}{cheio_str}\n\n"
+                            f"🛡 Estoque e cofre atualizados!"
+                        )
                 elif res_tx.get("status") == "duplicate":
                     resposta = "⚠ Este lançamento já foi guardado anteriormente no cofre contábil."
                 else:
@@ -849,8 +860,23 @@ class OrchestratorService:
                             dt_inicio = turno_row["data_inicio"]
                             if dt_inicio.tzinfo is None:
                                 dt_inicio = dt_inicio.replace(tzinfo=_tz.utc)
-                            # Posiciona a pausa retroativa no meio da jornada
                             duracao_turno = datetime.now(_tz.utc) - dt_inicio
+                            duracao_turno_min = int(duracao_turno.total_seconds() / 60)
+
+                            # ── SRE CLAMP ────────────────────────────────────────────────────────
+                            # Uma pausa não pode ser maior ou igual à duração total da jornada.
+                            # Limitamos a (duração - 5 min) para garantir que horas_trabalhadas > 0
+                            # e que fim_pausa nunca ultrapasse o timestamp de fechamento.
+                            _min_teto = max(1, duracao_turno_min - 5)
+                            if minutos_declarados > _min_teto:
+                                logger.warning(
+                                    f"[DECLARACAO_PAUSA] Clamp aplicado: declarado={minutos_declarados}min "
+                                    f"teto={_min_teto}min (jornada={duracao_turno_min}min) motorista={motorista_id}"
+                                )
+                                minutos_declarados = _min_teto
+                            # ────────────────────────────────────────────────────────────────────
+
+                            # Posiciona a pausa retroativa no meio da jornada
                             meio_jornada = dt_inicio + duracao_turno / 2
                             fim_pausa = meio_jornada + timedelta(minutes=minutos_declarados)
                             await conn.execute(
@@ -1234,7 +1260,31 @@ class OrchestratorService:
             )
             if res_tx.get("status") == "success":
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                resposta = f"✅ Lançamento de  *R$ {valor_transacao:,.2f}*  guardado com sucesso no cofre! 🛡".replace(",", "X").replace(".", ",").replace("X", ".")
+                valor_fmt_geral = f"R$ {valor_transacao:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                resposta = f"✅ Lançamento de  *{valor_fmt_geral}*  guardado com sucesso no cofre! 🛡"
+
+                # ── AUTO-RESUME ──────────────────────────────────────────────────────────
+                # Se o turno está em pausa e o motorista acabou de registrar uma RECEITA,
+                # retomamos automaticamente — o motorista voltou a trabalhar sem avisar.
+                # Isso evita que horas produtivas sejam contadas como pausa no DRE.
+                if is_intencao_receita and tipo == "receita":
+                    try:
+                        async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                            turno_pausado = await conn.fetchval(
+                                "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid "
+                                "AND status = 'em_pausa' ORDER BY data_inicio DESC LIMIT 1;",
+                                motorista_id
+                            )
+                        if turno_pausado:
+                            res_retomada = await TurnoService.retomar_turno(motorista_id)
+                            if res_retomada.get("sucesso"):
+                                resposta += "\n\n▶  *Auto-Retomada:*  Seu turno foi reativado automaticamente! 🚀"
+                                logger.info(f"[AUTO_RESUME] Turno retomado automaticamente na receita (motorista={motorista_id})")
+                            else:
+                                logger.warning(f"[AUTO_RESUME] Falha ao retomar turno: {res_retomada.get('erro')} (motorista={motorista_id})")
+                    except Exception as _e:
+                        logger.error(f"[AUTO_RESUME] Erro ao verificar pausa: {_e}")
+                # ─────────────────────────────────────────────────────────────────────────
             else:
                 if res_tx.get("status") == "duplicate":
                     resposta = "⚠ Este lançamento já foi guardado anteriormente no cofre contábil."

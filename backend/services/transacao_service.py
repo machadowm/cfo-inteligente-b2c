@@ -235,13 +235,109 @@ class TransacaoService:
                         # 2.3. Abastecimento Líquido (Mix Químico Flex/Gasolina/Etanol)
                         else:
                             dados_liq = estoque["liquido"]
-                            qtd_atual = Decimal(str(dados_liq.get("litros", 0.0)))
-                            
+
+                            # ── UNDERFLOW GUARD ──────────────────────────────────────────────────
+                            # Estoque negativo acumula-se quando a queima declarada excede o cofre.
+                            # Clampar para 0 antes de qualquer operação impede que o abastecimento
+                            # subsequente receba um volume base negativo, o que causaria:
+                            #   (a) capacidade aparente menor → falsa trava "EXCEDE_CAPACIDADE"
+                            #   (b) custo_total / (litros negativos) → pico artificial de CMP
+                            qtd_atual = max(Decimal("0.00"), Decimal(str(dados_liq.get("litros", 0.0))))
+                            gas_atual = max(Decimal("0.00"), Decimal(str(dados_liq.get("gasolina_litros", 0.0))))
+                            eta_atual = max(Decimal("0.00"), Decimal(str(dados_liq.get("etanol_litros", 0.0))))
+                            custo_atual = max(Decimal("0.00"), Decimal(str(dados_liq.get("custo_total", 0.0))))
+                            # Normaliza sub-litros para que somem ao total clamped
+                            _sub_total = gas_atual + eta_atual
+                            if _sub_total > qtd_atual and _sub_total > Decimal("0"):
+                                # Sub-totais maiores que o total clamped: reescala proporcionalmente
+                                _fator = qtd_atual / _sub_total
+                                gas_atual = (gas_atual * _fator).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                                eta_atual = (eta_atual * _fator).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                            # ─────────────────────────────────────────────────────────────────────
+
                             litros_match = re.search(r'(\d+[.,]?\d*)\s*(?:litros|litro|l)', desc_limpa)
                             if litros_match:
                                 litros_novos = Decimal(litros_match.group(1).replace(',', '.'))
                             else:
                                 litros_novos = (valor_decimal / TransacaoService._PRECO_MEDIO_LITRO_FALLBACK)
+
+                            # ── TANQUE-CHEIO SELF-HEAL ───────────────────────────────────────────
+                            # Quando o motorista confirma tanque cheio, sabemos com certeza física
+                            # que o volume real = capacidade nominal.  Descartamos o saldo arrastado,
+                            # ancorámos ao máximo e recalculámos o CMP pelo preço desta nota fiscal.
+                            # Isso corrige desvios acumulados por digitação imprecisa de odômetros,
+                            # abastecimentos sem litros declarados e underflows históricos.
+                            if tanque_cheio and capacidade_tanque > Decimal("0"):
+                                litros_base = capacidade_tanque
+                                custo_base  = (capacidade_tanque * (valor_decimal / litros_novos)).quantize(
+                                    Decimal("0.01"), ROUND_HALF_UP
+                                ) if litros_novos > Decimal("0") else valor_decimal
+                                # Redefine proporção química ao combustível puro abastecido
+                                _tipo_expl_heal = (tipo_combustivel_abastecido or "").lower().strip()
+                                _is_gas_heal = _tipo_expl_heal == "gasolina" or (
+                                    not _tipo_expl_heal and ("gasolina" in desc_limpa or (
+                                        "gas" in desc_limpa and "gnv" not in desc_limpa))
+                                )
+                                _is_eta_heal = _tipo_expl_heal == "etanol" or (
+                                    not _tipo_expl_heal and ("etanol" in desc_limpa or "alcool" in desc_limpa)
+                                )
+                                if _is_gas_heal:
+                                    dados_liq["gasolina_litros"]  = float(litros_base)
+                                    dados_liq["etanol_litros"]    = 0.0
+                                    dados_liq["gasolina_proporcao"] = 1.0
+                                    dados_liq["etanol_proporcao"]   = 0.0
+                                elif _is_eta_heal:
+                                    dados_liq["gasolina_litros"]  = 0.0
+                                    dados_liq["etanol_litros"]    = float(litros_base)
+                                    dados_liq["gasolina_proporcao"] = 0.0
+                                    dados_liq["etanol_proporcao"]   = 1.0
+                                else:
+                                    # Flex sem especificação: preserva proporção existente sobre novo total
+                                    _p_gas = Decimal(str(dados_liq.get("gasolina_proporcao", 1.0)))
+                                    _p_eta = Decimal(str(dados_liq.get("etanol_proporcao", 0.0)))
+                                    dados_liq["gasolina_litros"] = float((litros_base * _p_gas).quantize(Decimal("0.01"), ROUND_HALF_UP))
+                                    dados_liq["etanol_litros"]   = float((litros_base * _p_eta).quantize(Decimal("0.01"), ROUND_HALF_UP))
+                                dados_liq["litros"]      = float(litros_base)
+                                dados_liq["custo_total"] = float(custo_base)
+                                estoque["liquido"] = dados_liq
+                                logger.info(
+                                    f"[TransacaoService] Tanque-cheio self-heal: motorista={motorista_id} "
+                                    f"capacidade={litros_base} L | novo_cmp=R$ {float(valor_decimal/litros_novos):.4f}/L"
+                                    if litros_novos > 0 else
+                                    f"[TransacaoService] Tanque-cheio self-heal: motorista={motorista_id} capacidade={litros_base} L"
+                                )
+                                await conn.execute(
+                                    "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
+                                    json.dumps(estoque), veiculo_id
+                                )
+                                # Persiste a transação no ledger e retorna — sem re-entrar no mix math
+                                litros_dec = litros_novos.quantize(Decimal("0.01"), ROUND_HALF_UP)
+                                preco_dec  = (valor_decimal / litros_novos).quantize(Decimal("0.0001"), ROUND_HALF_UP) if litros_novos > 0 else None
+                                odo_dec    = Decimal(str(odometro_abastecimento)).quantize(Decimal("0.01"), ROUND_HALF_UP) if odometro_abastecimento is not None else None
+                                row = await conn.fetchrow(
+                                    """
+                                    INSERT INTO public.transacoes (
+                                        motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria,
+                                        valor, descricao, wpp_msg_id,
+                                        litros_abastecidos, preco_por_litro, odometro_abastecimento, tanque_cheio
+                                    ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                    ON CONFLICT (wpp_msg_id) DO NOTHING
+                                    RETURNING id, data_transacao;
+                                    """,
+                                    motorista_id, turno_id, veiculo_id, tipo_validado, categoria,
+                                    valor_decimal, descricao, wpp_msg_id,
+                                    litros_dec, preco_dec, odo_dec, True,
+                                )
+                                if row is None:
+                                    return {"status": "duplicate", "message": "⚠ Esse lançamento já foi guardado anteriormente no cofre contábil.", "error_code": "DUPLICADA"}
+                                return {
+                                    "status": "success",
+                                    "message": f"✅ Tanque self-healed! Cofre ancorado a  *{float(litros_base):.1f} L*  (capacidade nominal). 🛡",
+                                    "transacao_id": str(row["id"]),
+                                    "data_transacao": row["data_transacao"],
+                                    "self_healed": True,
+                                }
+                            # ─────────────────────────────────────────────────────────────────────
 
                             novo_vol_liq = (qtd_atual + litros_novos).quantize(Decimal("0.01"), ROUND_HALF_UP)
                             if novo_vol_liq > capacidade_tanque:
@@ -267,8 +363,9 @@ class TransacaoService:
                                 not _tipo_expl and ("etanol" in desc_limpa or "alcool" in desc_limpa or "alc" in desc_limpa)
                             )
 
-                            gas_litros = Decimal(str(dados_liq.get("gasolina_litros", 0.0)))
-                            eta_litros = Decimal(str(dados_liq.get("etanol_litros", 0.0)))
+                            # Use the clamped sub-values from the Underflow Guard above
+                            gas_litros = gas_atual
+                            eta_litros = eta_atual
 
                             if is_gasolina:
                                 gas_litros += litros_novos
@@ -297,7 +394,8 @@ class TransacaoService:
                             dados_liq["gasolina_litros"] = float(gas_litros.quantize(Decimal("0.01"), ROUND_HALF_UP))
                             dados_liq["etanol_litros"] = float(eta_litros.quantize(Decimal("0.01"), ROUND_HALF_UP))
                             dados_liq["litros"] = float(total_tanque.quantize(Decimal("0.01"), ROUND_HALF_UP))
-                            dados_liq["custo_total"] = float((Decimal(str(dados_liq["custo_total"])) + valor_decimal).quantize(Decimal("0.01"), ROUND_HALF_UP))
+                            # Usa custo_atual (clamped) como base — nunca soma sobre valor negativo
+                            dados_liq["custo_total"] = float((custo_atual + valor_decimal).quantize(Decimal("0.01"), ROUND_HALF_UP))
                             estoque["liquido"] = dados_liq
 
                         # Persistência Atômica da recalibração no JSONB

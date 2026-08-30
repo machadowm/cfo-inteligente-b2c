@@ -12,7 +12,6 @@ redis_data/
 minio_data/
 
 # Backups locais e logs
-*.sql
 *.tar
 *.gz
 logs/

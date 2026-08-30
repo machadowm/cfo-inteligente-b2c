@@ -702,17 +702,34 @@ class TurnoService:
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
-                    """SELECT id, status FROM public.turnos
+                    """SELECT id, status, km_inicial FROM public.turnos
                        WHERE motorista_id = $1::uuid AND status IN ('em_andamento', 'ABERTO')
-                       ORDER BY data_inicio DESC LIMIT 1;""",
+                       ORDER BY data_inicio DESC LIMIT 1
+                       FOR UPDATE;""",
                     motorista_id
                 )
                 if not turno:
                     return {"sucesso": False, "erro": "❌ Não encontramos nenhuma jornada em andamento para pausar."}
 
                 turno_id = str(turno["id"])
+
+                # Validação de envelope: km de pausa deve estar dentro do intervalo do turno
+                km_dec = None
+                if km_pausa is not None:
+                    km_dec = Decimal(str(km_pausa)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    km_inicial_turno = Decimal(str(turno["km_inicial"]))
+                    if km_dec < km_inicial_turno:
+                        return {
+                            "sucesso": False,
+                            "erro": (
+                                f"⚠ Odômetro de pausa ({float(km_dec):,.0f} km) é menor que o "
+                                f"km inicial do turno ({float(km_inicial_turno):,.0f} km). "
+                                f"Verifique o valor e tente novamente."
+                            ),
+                            "tipo_erro": "KM_PAUSA_INVALIDO",
+                        }
+
                 await conn.execute("UPDATE public.turnos SET status = 'em_pausa' WHERE id = $1::uuid;", turno_id)
-                km_dec = Decimal(str(km_pausa)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if km_pausa else None
                 await conn.execute(
                     "INSERT INTO public.pausas_turno (turno_id, motivo, inicio_pausa, km_inicio) "
                     "VALUES ($1::uuid, 'Pausa Operacional', $2, $3);",
@@ -732,16 +749,33 @@ class TurnoService:
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 turno = await conn.fetchrow(
-                    """SELECT id, status FROM public.turnos
+                    """SELECT id, status, km_inicial FROM public.turnos
                        WHERE motorista_id = $1::uuid AND status = 'em_pausa'
-                       ORDER BY data_inicio DESC LIMIT 1;""",
+                       ORDER BY data_inicio DESC LIMIT 1
+                       FOR UPDATE;""",
                     motorista_id
                 )
                 if not turno:
                     return {"sucesso": False, "erro": "❌ Não encontramos nenhuma jornada em pausa registrada no momento."}
 
                 turno_id = str(turno["id"])
-                km_dec = Decimal(str(km_retomada)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if km_retomada else None
+
+                # Validação de envelope: km de retomada deve estar dentro do intervalo do turno
+                km_dec = None
+                if km_retomada is not None:
+                    km_dec = Decimal(str(km_retomada)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    km_inicial_turno = Decimal(str(turno["km_inicial"]))
+                    if km_dec < km_inicial_turno:
+                        return {
+                            "sucesso": False,
+                            "erro": (
+                                f"⚠ Odômetro de retomada ({float(km_dec):,.0f} km) é menor que o "
+                                f"km inicial do turno ({float(km_inicial_turno):,.0f} km). "
+                                f"Verifique o valor e tente novamente."
+                            ),
+                            "tipo_erro": "KM_RETOMADA_INVALIDO",
+                        }
+
                 await conn.execute("UPDATE public.turnos SET status = 'em_andamento' WHERE id = $1::uuid;", turno_id)
                 await conn.execute(
                     "UPDATE public.pausas_turno SET fim_pausa = $1, km_fim = $2 "

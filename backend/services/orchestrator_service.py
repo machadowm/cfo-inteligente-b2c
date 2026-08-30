@@ -652,8 +652,23 @@ class OrchestratorService:
             return
 
         # Extração de Odômetro (KM)
-        numeros = re.findall(r'\d+', texto_limpo.replace('.', '').replace(',', ''))
-        km_encontrado = next((float(num) for num in numeros if float(num) > 100), None)
+        # Opera sobre texto_bruto (antes da normalização) para preservar ':' e 'h'
+        # que marcam expressões de horário/tempo — ex: "12:30", "8h45", "1h30min".
+        # Remove do candidato qualquer sequência numérica que faça parte dessas expressões
+        # para evitar que "fechar 12:30" vire km=1230 após o normalizar_texto remover ':'.
+        _texto_sem_horas = re.sub(
+            r'\d{1,2}:\d{2}'           # HH:MM  (ex: "12:30", "8:05")
+            r'|\d{1,3}\s*h\s*\d{0,3}'  # XhYY   (ex: "1h30", "8h", "1h30min")
+            r'|\d{1,3}\s*(?:min|hora)', # Xmin / Xhora
+            '', texto_bruto, flags=re.IGNORECASE
+        )
+        numeros = re.findall(r'\d+', _texto_sem_horas.replace('.', '').replace(',', ''))
+        _candidatos_km = [float(n) for n in numeros if float(n) > 100]
+        km_encontrado = _candidatos_km[0] if _candidatos_km else None
+        # Marca se o km veio de mensagem com intenção inequívoca (único candidato numérico).
+        # Usado para suprimir o aviso de descarte em falsos positivos de texto genérico,
+        # evitando poluição visual quando o número foi capturado de frase longa.
+        _km_intencao_explicita = len(_candidatos_km) == 1
 
         # =========================================================================
         # 3. INTERCEPÇÃO DA FSM DE JORNADA (Precedência Absoluta)
@@ -1106,10 +1121,25 @@ class OrchestratorService:
         if tem_intencao_pausa:
             km_pausa = km_encontrado if km_encontrado and km_encontrado > 100 else None
             res = await TurnoService.pausar_turno(motorista_id, km_pausa=km_pausa)
+            # Se o km extraído estava fora do envelope do turno, descarta-o e pausa sem km.
+            # Avisa o motorista explicitamente — silenciar seria pior (ele perderia telemetria
+            # sem saber, acreditando que o odômetro foi gravado).
+            aviso_km_descartado = ""
+            if not res["sucesso"] and res.get("tipo_erro") == "KM_PAUSA_INVALIDO":
+                logger.warning(f"[pausar_turno] km={km_pausa} fora do envelope — descartado (motorista={motorista_id})")
+                # Só avisa se o número veio de mensagem com intenção clara (único candidato).
+                # Mensagens com vários números (ex: "na BR 101 e SP 270 pausando")
+                # geram falsos positivos silenciosos — o aviso confundiria mais do que ajudaria.
+                if _km_intencao_explicita:
+                    aviso_km_descartado = (
+                        f"\n\n⚠ _O odômetro  *{int(km_pausa):,}*  informado é menor que o km de abertura do turno "
+                        f"e foi ignorado. Se quiser registrar o km de pausa, envie  *'pausar NNNNN'*  com o valor correto._"
+                    ).replace(",", ".")
+                res = await TurnoService.pausar_turno(motorista_id, km_pausa=None)
             if res["sucesso"]:
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 extra = "  _KM registrado para auditoria de uso pessoal._" if res.get("km_pausa_registrado") else ""
-                resposta = f"⏸ Turno pausado com sucesso. Quando voltar, envie  *'retomar'* !{extra}"
+                resposta = f"⏸ Turno pausado com sucesso. Quando voltar, envie  *'retomar'* !{extra}{aviso_km_descartado}"
             else:
                 resposta = f"⚠ {res['erro']}"
             await enviar_whatsapp(remote_jid, resposta)
@@ -1118,6 +1148,18 @@ class OrchestratorService:
         if tem_intencao_retomada:
             km_retomada = km_encontrado if km_encontrado and km_encontrado > 100 else None
             res = await TurnoService.retomar_turno(motorista_id, km_retomada=km_retomada)
+            # Se o km extraído estava fora do envelope do turno, descarta-o e retoma sem km.
+            # Avisa o motorista explicitamente — telemetria de uso pessoal intra-turno depende
+            # desse valor; silenciar faria o gap aparecer apenas no fechamento sem aviso prévio.
+            aviso_km_descartado = ""
+            if not res["sucesso"] and res.get("tipo_erro") == "KM_RETOMADA_INVALIDO":
+                logger.warning(f"[retomar_turno] km={km_retomada} fora do envelope — descartado (motorista={motorista_id})")
+                if _km_intencao_explicita:
+                    aviso_km_descartado = (
+                        f"\n\n⚠ _O odômetro  *{int(km_retomada):,}*  informado é menor que o km de abertura do turno "
+                        f"e foi ignorado. Se quiser registrar o km de retomada, envie  *'retomar NNNNN'*  com o valor correto._"
+                    ).replace(",", ".")
+                res = await TurnoService.retomar_turno(motorista_id, km_retomada=None)
             if res["sucesso"]:
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 custo_intra = res.get("custo_uso_pessoal_intra", 0.0)
@@ -1128,10 +1170,10 @@ class OrchestratorService:
                         f"🛣️  *Uso Pessoal na Pausa Auditado*\n"
                         f"• Custo amortizado do cofre:  *R$ {custo_intra:.2f}*\n"
                         f"  _{detalhe}_\n"
-                        f"_Seu Lucro Real está protegido._"
+                        f"_Seu Lucro Real está protegido._{aviso_km_descartado}"
                     )
                 else:
-                    resposta = "▶ Turno retomado com sucesso! Bom trabalho."
+                    resposta = f"▶ Turno retomado com sucesso! Bom trabalho.{aviso_km_descartado}"
             else:
                 resposta = f"⚠ {res['erro']}"
             await enviar_whatsapp(remote_jid, resposta)

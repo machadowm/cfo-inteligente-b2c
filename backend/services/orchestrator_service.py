@@ -110,6 +110,49 @@ def _formatar_sugestao_recalibracao(s: dict) -> str:
     )
 
 
+def _nota_qualidade_dados(km_por_unidade: float, detalhe_queima: str) -> str:
+    """Retorna uma nota educativa quando os dados de entrada sugerem baixa qualidade.
+
+    Só emite aviso quando o rendimento calculado está fora dos limites físicos plausíveis,
+    indicando que o motorista pode ter informado preço, litros ou odômetro incorretamente.
+    Não emite nada quando os dados parecem normais — zero poluição visual nos turnos corretos.
+
+    Limites calibrados por tipo de veículo detectado no detalhe_queima:
+      Elétrico puro  → kWh: valores < 3.0 ou > 15.0 são suspeitos
+      Combustão/híb. → km/L: valores < 5.0 ou > 25.0 são suspeitos
+    """
+    if km_por_unidade <= 0:
+        return ""
+
+    # Elétrico puro: unidade é km/kWh
+    if "kWh" in detalhe_queima and "Combustão" not in detalhe_queima:
+        if km_por_unidade < 3.0 or km_por_unidade > 15.0:
+            return (
+                f"⚠  _Rendimento de  *{km_por_unidade:.2f} km/kWh*  fora do esperado "
+                f"(normal: 3–15 km/kWh). Isso pode indicar km do painel digitado errado "
+                f"ou quantidade de kWh imprecisa no registro de recarga. "
+                f"Se quiser corrigir, envie  *!ajustar estoque kwh [valor]* ._\n\n"
+            )
+        return ""
+
+    # Combustão / híbrido: unidade é km/L
+    if km_por_unidade < 5.0:
+        return (
+            f"⚠  _Rendimento de  *{km_por_unidade:.2f} km/L*  abaixo do esperado "
+            f"(normal: 5–20 km/L). Possíveis causas: preço por litro informado abaixo do real, "
+            f"litros abastecidos a menos do registrado ou km inicial do turno muito alto. "
+            f"Abasteça com tanque cheio no próximo turno para o cofre se recalibrar automaticamente._\n\n"
+        )
+    if km_por_unidade > 25.0:
+        return (
+            f"⚠  _Rendimento de  *{km_por_unidade:.2f} km/L*  acima do esperado "
+            f"(normal: 5–20 km/L). Possível causa: preço por litro informado acima do real "
+            f"ou estoque do cofre com saldo residual baixo de turnos anteriores. "
+            f"Abasteça com tanque cheio para recalibrar._\n\n"
+        )
+    return ""
+
+
 def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     """Formata o DRE Executivo Diário consolidando tempo operacional e indicadores.
 
@@ -290,6 +333,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
         + f"• Rendimento ({label_rendimento}):  *{km_por_unidade:.2f}* \n"
         + f"• Atingimento Meta Diária (R$ {meta_diaria:.2f}):  *{perc_meta:.1f}%* \n\n"
         + secao_projecao
+        + _nota_qualidade_dados(km_por_unidade, res.get("detalhe_queima", ""))
         + f"🛡  *Cofre Contábil Atualizado! Bom descanso, {nome_motorista}!*"
         + rodape_sugestao
     )
@@ -921,9 +965,10 @@ class OrchestratorService:
                 await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
                 await enviar_whatsapp(
                     remote_jid,
-                    f"Calculei  *{litros_fmt} litros*  abastecidos. 👍\n\n"
+                    f"Calculei  *{litros_fmt} litros*  abastecidos ao preço de  *R$ {preco:.3f}/L* . 👍\n"
+                    f"_Esse preço define o custo real do combustível no cofre — se errar aqui, o lucro do turno vai sair torto._\n\n"
                     f"Qual o  *km do painel*  agora? (Ex:  *179500* )\n"
-                    f"_(Ou manda  *pular*  se não quiser registrar o odômetro)_"
+                    f"_(Ou manda  *pular*  — mas sem o km não consigo calibrar seu consumo real)_"
                 )
                 return
 
@@ -954,9 +999,10 @@ class OrchestratorService:
                 await enviar_whatsapp(
                     remote_jid,
                     "O tanque ficou  *cheio* ? 🔋\n\n"
-                    "👉  *Sim*\n"
-                    "👉  *Não*\n\n"
-                    "_(Tanque cheio nos dá uma medição precisa do seu consumo real)_"
+                    "👉  *Sim*  — eu reseto e ancora o cofre na capacidade real do tanque. "
+                    "É a forma mais precisa de calcular seu consumo. Recomendo sempre que puder!\n"
+                    "👉  *Não*  — adiciono só os litros abastecidos ao saldo atual.\n\n"
+                    "_Essa resposta afeta diretamente o km/L que aparece no seu DRE._"
                 )
                 return
 
@@ -1437,7 +1483,9 @@ class OrchestratorService:
                         f"• Valor:  *{valor_fmt}*\n"
                         f"• Volume:  *{litros_fmt} L*\n"
                         f"• Preço/L:  *{preco_fmt}*\n\n"
-                        f"🛡 Estoque e cofre atualizados!"
+                        f"🛡 Estoque e cofre atualizados!\n"
+                        f"_💡 Dica: manda  *abastecer*  antes de registrar para informar também o km do painel. "
+                        f"Com o odômetro, eu calibo seu consumo real automaticamente._"
                     )
                 elif res_tx.get("status") == "duplicate":
                     resposta = "⚠ Este lançamento já foi guardado anteriormente no cofre contábil."

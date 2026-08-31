@@ -196,18 +196,46 @@ class ProfileService:
                     )
 
             # ── Seção de estoque (custo médio ponderado quando disponível) ─────
+            # Limiar mínimo para exibir CMP: abaixo disso o arredondamento acumulado
+            # de múltiplas queimas distorce o custo residual e o CMP fica enganoso.
+            # Exemplo: 1.4 L restante com custo_total = R$ 2.19 → CMP = R$ 1.56/L
+            # (matematicamente correto, mas parece errado para o usuário).
+            # Abaixo do limiar mostramos só o total em R$ sem o CMP por unidade.
+            _LIMIAR_CMP_L   = Decimal("5.0")   # litros mínimos para CMP confiável
+            _LIMIAR_CMP_KWH = Decimal("3.0")   # kWh mínimos para CMP confiável
+            _LIMIAR_CMP_M3  = Decimal("2.0")   # m³ mínimos para CMP confiável
+
             linhas_estoque = []
             if litros > 0:
                 custo_liq = Decimal(str(liq.get("custo_total", 0.0)))
-                cmp_str   = f" (≈ R$ {float(custo_liq / litros):.3f}/L)" if litros > 0 and custo_liq > 0 else ""
+                if custo_liq > 0:
+                    if litros >= _LIMIAR_CMP_L:
+                        cmp_str = f" (R$ {float(custo_liq):.2f} total · ≈ R$ {float(custo_liq / litros):.3f}/L)"
+                    else:
+                        # Saldo residual: mostra só o total, CMP não é confiável
+                        cmp_str = f" (R$ {float(custo_liq):.2f} total — _reabasteça em breve_)"
+                else:
+                    cmp_str = ""
                 linhas_estoque.append(f"⛽  *{litros:.1f} L*  de combustível{cmp_str}")
             if kwh > 0:
                 custo_ele = Decimal(str(ele.get("custo_total", 0.0)))
-                cmp_str   = f" (≈ R$ {float(custo_ele / kwh):.3f}/kWh)" if kwh > 0 and custo_ele > 0 else " (solar/gratuito)"
+                if custo_ele > 0:
+                    if kwh >= _LIMIAR_CMP_KWH:
+                        cmp_str = f" (R$ {float(custo_ele):.2f} total · ≈ R$ {float(custo_ele / kwh):.3f}/kWh)"
+                    else:
+                        cmp_str = f" (R$ {float(custo_ele):.2f} total — _recarregue em breve_)"
+                else:
+                    cmp_str = " (solar/gratuito)"
                 linhas_estoque.append(f"🔋  *{kwh:.1f} kWh*  carregados{cmp_str}")
             if m3 > 0:
                 custo_gnv = Decimal(str(gnv_e.get("custo_total", 0.0)))
-                cmp_str   = f" (≈ R$ {float(custo_gnv / m3):.3f}/m³)" if m3 > 0 and custo_gnv > 0 else ""
+                if custo_gnv > 0:
+                    if m3 >= _LIMIAR_CMP_M3:
+                        cmp_str = f" (R$ {float(custo_gnv):.2f} total · ≈ R$ {float(custo_gnv / m3):.3f}/m³)"
+                    else:
+                        cmp_str = f" (R$ {float(custo_gnv):.2f} total — _reabasteça em breve_)"
+                else:
+                    cmp_str = ""
                 linhas_estoque.append(f"🟦  *{m3:.1f} m³*  de GNV{cmp_str}")
 
             estoque_str = (

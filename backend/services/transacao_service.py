@@ -563,29 +563,36 @@ class TransacaoService:
 
             km_l_real = (km_intervalo / litros_intervalo).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-            # Lê o sub-dict do estoque líquido — necessário tanto para o sanity check
-            # quanto para resolver o parâmetro configurado de rendimento.
-            liq = estoque.get("liquido", {})
+            # Lê o sub-dict do estoque líquido e os metadados do veículo.
+            liq  = estoque.get("liquido", {})
+            meta = estoque.get("meta", {})
 
-            # ── SANITY CHECK FÍSICO (DINÂMICO) ───────────────────────────────────
+            # ── SANITY CHECK FÍSICO (DINÂMICO POR CATEGORIA) ─────────────────────
             # O limite INFERIOR é fixo: 4.5 km/L é o piso absoluto para qualquer
             # veículo a combustão no Brasil (SUV grande em cidade congestionada).
             #
-            # O limite SUPERIOR é DINÂMICO: calculado como 1.5× o melhor rendimento
-            # cadastrado pelo próprio motorista. Isso torna o check correto tanto
-            # para carros (km_l_gas ≈ 12 → teto ≈ 18 km/L) quanto para motos
-            # (km_l_gas ≈ 35 → teto ≈ 52 km/L), sem precisar de um campo
-            # 'categoria_veiculo' no banco — a própria calibração do motorista
-            # é a fonte de verdade sobre o rendimento esperado do seu veículo.
+            # O limite SUPERIOR usa duas fontes em ordem de prioridade:
             #
-            # O `max(..., Decimal("12.0"))` garante que veículos com parâmetros
-            # ainda no valor padrão (não calibrados) não rejeitem motos logo no
-            # primeiro ciclo Full-to-Full (teto mínimo efetivo = 18 km/L).
-            _KM_L_MIN     = Decimal("4.5")
-            _km_l_gas_cfg = Decimal(str(liq.get("km_l_gasolina", "12.0")))
-            _km_l_eta_cfg = Decimal(str(liq.get("km_l_etanol",   "8.5")))
-            _km_l_melhor  = max(_km_l_gas_cfg, _km_l_eta_cfg, Decimal("12.0"))
-            _KM_L_MAX     = (_km_l_melhor * Decimal("1.5")).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            #   1. Parâmetro calibrado (km_l_gasolina / km_l_etanol) → ×1.5 de folga
+            #      Este é o caso normal pós-primeiro-ciclo. O motorista já calibrou
+            #      e o teto reflete seu veículo real (carro ou moto).
+            #
+            #   2. Cold-start: parâmetro ainda no valor padrão de fábrica.
+            #      Neste caso usamos `meta.categoria_veiculo` (gravado no onboarding)
+            #      para aplicar o teto correto sem ambiguidade:
+            #        carro  → km_l_gas_default = 12.0  → teto = 18.0 km/L
+            #        moto   → km_l_gas_default = 35.0  → teto = 52.5 km/L
+            #      Fallback final = "carro" para veículos cadastrados antes desta
+            #      versão (sem campo categoria_veiculo no JSONB).
+            _KM_L_MIN      = Decimal("4.5")
+            _km_l_gas_cfg  = Decimal(str(liq.get("km_l_gasolina", "12.0")))
+            _km_l_eta_cfg  = Decimal(str(liq.get("km_l_etanol",   "8.5")))
+            _categoria     = meta.get("categoria_veiculo", "carro")
+            # Default de fábrica por categoria — usado apenas quando o parâmetro
+            # ainda não foi calibrado pelo motorista (cold-start).
+            _km_l_default  = Decimal("35.0") if _categoria == "moto" else Decimal("12.0")
+            _km_l_melhor   = max(_km_l_gas_cfg, _km_l_eta_cfg, _km_l_default)
+            _KM_L_MAX      = (_km_l_melhor * Decimal("1.5")).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
             if km_l_real < _KM_L_MIN or km_l_real > _KM_L_MAX:
                 logger.warning(
                     f"[Full-to-Full] Sanity check reprovado: km/L_real={float(km_l_real):.2f} "

@@ -361,10 +361,40 @@ class OrchestratorService:
             elif estado_atual.startswith("AGUARDANDO_VEICULO"):
                 nome = estado_atual.split("|name:")[1] if "|name:" in estado_atual else "Motorista"
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_COMBUSTIVEL|name:{nome}|veiculo:{texto_bruto}")
+                # Pergunta a categoria antes do combustível — define os defaults de rendimento
+                # corretos para carros (~12 km/L) vs. motos (~35 km/L), evitando o cold-start
+                # do sanity check Full-to-Full rejeitar motos no primeiro ciclo.
+                await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CATEGORIA_VEICULO|name:{nome}|veiculo:{texto_bruto}")
                 await enviar_whatsapp(
                     remote_jid,
-                    f"Show! E qual é o tipo de combustível ou motorização do seu {texto_bruto}? ⛽\n\n"
+                    f"Show!  *{texto_bruto}*  anotado! 🚗🏍\n\n"
+                    "É um  *Carro*  ou uma  *Moto* ?\n\n"
+                    "👉  *Carro*\n"
+                    "👉  *Moto*"
+                )
+                return
+
+            elif estado_atual.startswith("AGUARDANDO_CATEGORIA_VEICULO"):
+                partes = estado_atual.split("|")
+                nome = partes[1].split("name:")[1]
+                veiculo = partes[2].split("veiculo:")[1]
+                cat_input = texto_bruto.lower().strip()
+                # Aceita variações naturais (carro, moto, automóvel, motocicleta, etc.)
+                if any(w in cat_input for w in ["carro", "automovel", "auto", "carro", "sedan", "hatch", "suv", "van", "pickup", "caminhonete"]):
+                    categoria_veiculo = "carro"
+                elif any(w in cat_input for w in ["moto", "motocicleta", "bike", "scooter", "motoneta"]):
+                    categoria_veiculo = "moto"
+                else:
+                    await registrar_erro_e_verificar_escape(
+                        remote_jid, tenant_id, fsm_key,
+                        "⚠ Por favor, responda  *Carro*  ou  *Moto* :"
+                    )
+                    return
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_COMBUSTIVEL|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}")
+                await enviar_whatsapp(
+                    remote_jid,
+                    f"Perfeito! E qual é o combustível da sua {veiculo}? ⛽\n\n"
                     "Responda exatamente com uma das opções:\n"
                     "👉  *Gasolina* \n"
                     "👉  *Etanol* \n"
@@ -379,6 +409,8 @@ class OrchestratorService:
                 partes = estado_atual.split("|")
                 nome = partes[1].split("name:")[1]
                 veiculo = partes[2].split("veiculo:")[1]
+                # categoria_veiculo pode não existir em estados Redis gravados antes desta versão
+                categoria_veiculo = next((p.split("categoria:")[1] for p in partes if p.startswith("categoria:")), "carro")
                 comb_input = texto_bruto.lower().replace("é", "e").replace("í", "i").strip()
                 combustiveis_suportados = ["gasolina", "etanol", "flex", "hibrido", "eletrico", "gnv"]
                 if comb_input not in combustiveis_suportados:
@@ -388,7 +420,7 @@ class OrchestratorService:
                     )
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_PLACA|name:{nome}|veiculo:{veiculo}|combustivel:{comb_input}")
+                await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_PLACA|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}|combustivel:{comb_input}")
                 await enviar_whatsapp(
                     remote_jid, f"Perfeito! E qual é a  **placa do seu veículo** ? (Ex: ABC-1234 ou ABC1D23)"
                 )
@@ -398,7 +430,8 @@ class OrchestratorService:
                 partes = estado_atual.split("|")
                 nome = partes[1].split("name:")[1]
                 veiculo = partes[2].split("veiculo:")[1]
-                combustivel = partes[3].split("combustivel:")[1]
+                categoria_veiculo = next((p.split("categoria:")[1] for p in partes if p.startswith("categoria:")), "carro")
+                combustivel = next((p.split("combustivel:")[1] for p in partes if p.startswith("combustivel:")), "gasolina")
                 placa_limpa = re.sub(r'[^A-Za-z0-9]', '', texto_bruto).upper()
                 if len(placa_limpa) != 7:
                     await registrar_erro_e_verificar_escape(
@@ -406,7 +439,7 @@ class OrchestratorService:
                     )
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CAPACIDADE_TANQUE|name:{nome}|veiculo:{veiculo}|combustivel:{combustivel}|placa:{placa_limpa}")
+                await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CAPACIDADE_TANQUE|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}|combustivel:{combustivel}|placa:{placa_limpa}")
                 await enviar_whatsapp(
                     remote_jid, "Legal! Agora me diz qual a  **capacidade máxima do tanque**  em litros do seu veículo? (Se for elétrico puro, responda  *0* ):"
                 )
@@ -416,8 +449,9 @@ class OrchestratorService:
                 partes = estado_atual.split("|")
                 nome = partes[1].split("name:")[1]
                 veiculo = partes[2].split("veiculo:")[1]
-                combustivel = partes[3].split("combustivel:")[1]
-                placa = partes[4].split("placa:")[1]
+                categoria_veiculo = next((p.split("categoria:")[1] for p in partes if p.startswith("categoria:")), "carro")
+                combustivel = next((p.split("combustivel:")[1] for p in partes if p.startswith("combustivel:")), "gasolina")
+                placa = next((p.split("placa:")[1] for p in partes if p.startswith("placa:")), "")
                 tanque_val = converter_para_float(texto_bruto)
                 if tanque_val < 0:
                     await registrar_erro_e_verificar_escape(
@@ -426,7 +460,7 @@ class OrchestratorService:
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 if combustivel in ["hibrido", "eletrico"]:
-                    await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CAPACIDADE_BATERIA|name:{nome}|veiculo:{veiculo}|combustivel:{combustivel}|placa:{placa}|tanque:{tanque_val}")
+                    await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CAPACIDADE_BATERIA|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}|combustivel:{combustivel}|placa:{placa}|tanque:{tanque_val}")
                     await enviar_whatsapp(remote_jid, "E qual a  **capacidade da bateria**  em kWh do seu veículo? (Ex: 30):")
                     return
                 else:
@@ -435,25 +469,16 @@ class OrchestratorService:
                         motorista_uuid = await DatabaseService.registrar_novo_motorista(
                             telefone=tenant_id, nome=nome, veiculo_modelo=veiculo, combustivel=combustivel, placa=placa
                         )
+                        # Defaults de rendimento calibrados por categoria de veículo.
+                        # Motos têm rendimento ~3× superior a carros — usar o default de
+                        # carro causaria rejeição silenciosa no sanity check Full-to-Full.
+                        _km_l_gas = 35.0 if categoria_veiculo == "moto" else 12.0
+                        _km_l_eta = 24.5 if categoria_veiculo == "moto" else 8.5
                         async with DatabaseService.get_tenant_connection(motorista_uuid) as conn:
-                            if combustivel == "gnv":
-                                estoque_dict = {"gnv": {"m3": 0.0, "custo_total": 0.0, "km_unidade": 14.0}}
-                            else:
-                                estoque_dict = {
-                                    "liquido": {
-                                        "litros": 0.0,
-                                        "custo_total": 0.0,
-                                        "gasolina_litros": 0.0,
-                                        "etanol_litros": 0.0,
-                                        "gasolina_proporcao": 1.0,
-                                        "etanol_proporcao": 0.0,
-                                        "km_l_gasolina": 12.0,
-                                        "km_l_etanol": 8.5
-                                    }
-                                }
                             estoque_dict = {
                                 "meta": {
                                     "tipo_veiculo": combustivel,
+                                    "categoria_veiculo": categoria_veiculo,
                                     "is_flex": bool(combustivel == "flex"),
                                     "is_hibrido": False,
                                     "is_eletrico": False,
@@ -468,8 +493,8 @@ class OrchestratorService:
                                     "etanol_litros": 0.0,
                                     "gasolina_proporcao": 1.0,
                                     "etanol_proporcao": 0.0,
-                                    "km_l_gasolina": 12.0,
-                                    "km_l_etanol": 8.5
+                                    "km_l_gasolina": _km_l_gas,
+                                    "km_l_etanol": _km_l_eta
                                 },
                                 "eletricidade": {
                                     "kwh": 0.0,
@@ -502,9 +527,10 @@ class OrchestratorService:
                 partes = estado_atual.split("|")
                 nome = partes[1].split("name:")[1]
                 veiculo = partes[2].split("veiculo:")[1]
-                combustivel = partes[3].split("combustivel:")[1]
-                placa = partes[4].split("placa:")[1]
-                tanque_val = float(partes[5].split("tanque:")[1])
+                categoria_veiculo = next((p.split("categoria:")[1] for p in partes if p.startswith("categoria:")), "carro")
+                combustivel = next((p.split("combustivel:")[1] for p in partes if p.startswith("combustivel:")), "hibrido")
+                placa = next((p.split("placa:")[1] for p in partes if p.startswith("placa:")), "")
+                tanque_val = float(next((p.split("tanque:")[1] for p in partes if p.startswith("tanque:")), "0"))
                 bateria_val = converter_para_float(texto_bruto)
                 if bateria_val < 0:
                     await registrar_erro_e_verificar_escape(
@@ -517,10 +543,14 @@ class OrchestratorService:
                     motorista_uuid = await DatabaseService.registrar_novo_motorista(
                         telefone=tenant_id, nome=nome, veiculo_modelo=veiculo, combustivel=combustivel, placa=placa
                     )
+                    # Híbridos/elétricos são sempre carros no contexto de apps de frete
+                    _km_l_gas = 35.0 if categoria_veiculo == "moto" else 12.0
+                    _km_l_eta = 24.5 if categoria_veiculo == "moto" else 8.5
                     async with DatabaseService.get_tenant_connection(motorista_uuid) as conn:
                         estoque_dict = {
                             "meta": {
                                 "tipo_veiculo": combustivel,
+                                "categoria_veiculo": categoria_veiculo,
                                 "is_flex": bool(combustivel == "flex"),
                                 "is_hibrido": bool(combustivel == "hibrido"),
                                 "is_eletrico": bool(combustivel == "eletrico"),
@@ -535,8 +565,8 @@ class OrchestratorService:
                                 "etanol_litros": 0.0,
                                 "gasolina_proporcao": 1.0,
                                 "etanol_proporcao": 0.0,
-                                "km_l_gasolina": 12.0,
-                                "km_l_etanol": 8.5
+                                "km_l_gasolina": _km_l_gas,
+                                "km_l_etanol": _km_l_eta
                             },
                             "eletricidade": {
                                 "kwh": 0.0,

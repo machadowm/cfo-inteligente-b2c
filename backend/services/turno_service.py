@@ -620,7 +620,7 @@ class TurnoService:
                 # Busca também caixa_id para aporte automático na caixinha vinculada
                 despesas_fixas_rows = await conn.fetch(
                     """
-                    SELECT nome, valor_pro_rata_diario, caixa_id
+                    SELECT nome, valor_pro_rata_diario, caixa_id, dia_vencimento
                     FROM public.despesas_fixas_mensais
                     WHERE motorista_id = $1::uuid AND ativo = TRUE;
                     """,
@@ -691,6 +691,7 @@ class TurnoService:
                                     "saldo_novo": float(saldo_cx + aporte_real),
                                     "meta_atingida": meta_atingida,
                                     "origem": df_row["nome"],
+                                    "dia_vencimento": int(df_row["dia_vencimento"]) if df_row["dia_vencimento"] else None,
                                 })
                             else:
                                 # Caixa cheia — registra no DRE mas sem novo depósito
@@ -701,6 +702,7 @@ class TurnoService:
                                     "saldo_novo": float(saldo_cx),
                                     "meta_atingida": True,
                                     "origem": df_row["nome"],
+                                    "dia_vencimento": int(df_row["dia_vencimento"]) if df_row["dia_vencimento"] else None,
                                 })
                     else:
                         # Despesa sem caixa vinculada: tenta match pelo nome da despesa
@@ -734,6 +736,7 @@ class TurnoService:
                                 "saldo_novo": float(saldo_cx + aporte_real),
                                 "meta_atingida": meta_atingida,
                                 "origem": df_row["nome"],
+                                "dia_vencimento": int(df_row["dia_vencimento"]) if df_row["dia_vencimento"] else None,
                             })
 
                 # Persiste o snapshot contábil na tabela fechamento_diario

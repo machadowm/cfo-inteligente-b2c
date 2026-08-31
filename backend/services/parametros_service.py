@@ -315,6 +315,7 @@ class ParametrosService:
                 "  •  *!remover meta caixa <nome>*           → Remove o teto",
                 "  •  *!retirar caixa <nome> <valor>*        → Sacar quando a despesa chegar",
                 "     _Ex: !retirar caixa pneu 480_",
+                "  •  *!excluir caixa <nome>*                → Apagar a caixa permanentemente",
                 "",
                 "_Exemplos:_",
                 "  *!alterar meta mensal 12000*",
@@ -399,6 +400,11 @@ class ParametrosService:
             except Exception:
                 return "⚠ Valor inválido. Ex:  *!retirar caixa seguro 180*"
             return await ParametrosService._retirar_caixa(motorista_id, tenant_id, nome_cx, valor_cx)
+
+        match_excluir = re.match(r"^!excluir\s+caixa\s+(\S.*)$", texto, re.IGNORECASE)
+        if match_excluir:
+            nome_cx = match_excluir.group(1).strip()[:60]
+            return await ParametrosService._excluir_caixa(motorista_id, tenant_id, nome_cx)
 
         # Retirada sem valor — informa o formato correto com nome da caixa pré-preenchido
         match_retirar_sem_valor = re.match(r"^!retirar\s+caixa\s+(\S.*)$", texto, re.IGNORECASE)
@@ -804,7 +810,7 @@ class ParametrosService:
             linhas.append(f"\n*Total reservado: R$ {total_saldo:.2f}*")
             linhas.append(
                 "\n_!retirar caixa <nome> <valor>_   _!definir meta caixa <nome> <valor>_\n"
-                "_!criar caixa <nome> <meta>_"
+                "_!criar caixa <nome> <meta>_   _!excluir caixa <nome>_"
             )
             return "\n".join(linhas)
         except Exception as exc:
@@ -941,6 +947,55 @@ class ParametrosService:
         except Exception as exc:
             logger.error(f"[ParametrosService] Erro ao retirar da caixa (motorista={motorista_id}): {exc}")
             return "❌ Erro ao processar a retirada. Tente novamente."
+
+    @staticmethod
+    async def _excluir_caixa(motorista_id: str, tenant_id: str, nome: str) -> str:
+        """Exclui permanentemente uma caixa de provisão.
+
+        Bloqueia a exclusão se houver saldo positivo — o motorista deve zerar antes.
+        Desvincula despesas_fixas_mensais (caixa_id → NULL) antes do DELETE para evitar
+        violação de integridade referencial.
+        """
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                row = await conn.fetchrow(
+                    "SELECT id, saldo_atual FROM public.caixas_provisao "
+                    "WHERE motorista_id = $1::uuid AND lower(nome_caixa) = lower($2);",
+                    motorista_id, nome,
+                )
+                if not row:
+                    return (
+                        f"⚠ Nenhuma caixa chamada  *{nome}*  encontrada.\n"
+                        f"Envie  *!caixas*  para ver a lista."
+                    )
+                saldo = Decimal(str(row["saldo_atual"]))
+                if saldo > Decimal("0"):
+                    return (
+                        f"⚠  *Não é possível excluir — a caixa tem saldo!*\n"
+                        f"• Caixa  *{nome}* :  *R$ {float(saldo):.2f}*\n\n"
+                        f"Retire o saldo antes de excluir:\n"
+                        f"  👉  `!retirar caixa {nome} {float(saldo):.2f}`"
+                    )
+                # Desvincula despesas_fixas_mensais que apontam para esta caixa
+                await conn.execute(
+                    "UPDATE public.despesas_fixas_mensais SET caixa_id = NULL "
+                    "WHERE motorista_id = $1::uuid AND caixa_id = $2::uuid;",
+                    motorista_id, str(row["id"]),
+                )
+                await conn.execute(
+                    "DELETE FROM public.caixas_provisao WHERE id = $1::uuid;",
+                    str(row["id"]),
+                )
+            await ParametrosService._registrar_auditoria(
+                tenant_id, motorista_id, f"excluir_caixa_{nome}", "deleted", True
+            )
+            return (
+                f"🗑  *Caixa  *{nome}*  excluída com sucesso.*\n"
+                f"_Despesas fixas vinculadas foram desvinculadas mas não removidas._"
+            )
+        except Exception as exc:
+            logger.error(f"[ParametrosService] Erro ao excluir caixa (motorista={motorista_id}): {exc}")
+            return "❌ Erro ao excluir a caixa. Tente novamente."
 
     @staticmethod
     async def _remover_despesa_fixa(motorista_id: str, tenant_id: str, nome: str) -> str:

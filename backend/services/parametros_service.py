@@ -400,6 +400,17 @@ class ParametrosService:
                 return "⚠ Valor inválido. Ex:  *!retirar caixa seguro 180*"
             return await ParametrosService._retirar_caixa(motorista_id, tenant_id, nome_cx, valor_cx)
 
+        # Retirada sem valor — informa o formato correto com nome da caixa pré-preenchido
+        match_retirar_sem_valor = re.match(r"^!retirar\s+caixa\s+(\S.*)$", texto, re.IGNORECASE)
+        if match_retirar_sem_valor:
+            nome_cx = match_retirar_sem_valor.group(1).strip()[:60]
+            return (
+                f"⚠  *Informe também o valor da retirada.*\n\n"
+                f"Exemplo:\n"
+                f"  👉  `!retirar caixa {nome_cx} <valor>`\n\n"
+                f"_Ex: `!retirar caixa {nome_cx} 180`_"
+            )
+
         # ── Comando !alterar ─────────────────────────────────────────────
         match = ParametrosService._RE_ALTERAR.match(texto)
         if not match:

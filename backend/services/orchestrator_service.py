@@ -111,105 +111,187 @@ def _formatar_sugestao_recalibracao(s: dict) -> str:
 
 
 def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
-    """Formata o DRE Executivo Diário consolidando o tempo operacional e indicadores."""
+    """Formata o DRE Executivo Diário consolidando tempo operacional e indicadores.
+
+    Melhorias v9:
+    - Seção 1: exibe tempo efetivo (sem pausas) separado do total
+    - Seção 2: linha de lucro negativo com alerta explícito
+    - Seção 3: custo por km, lucro por km, rendimento com label energético
+    - Seção 4 (nova): Projeção Mensal — dias úteis restantes e faturamento projetado
+    - Rodapé inteligente: sugestão de contrato só quando não personalizado
+    """
+    # ── Tempo operacional ──────────────────────────────────────────────────────
     horas = int(res["tempo_total_min"] // 60)
     minutos = int(res["tempo_total_min"] % 60)
     duracao_str = f"{horas}h {minutos}min" if horas > 0 else f"{minutos} min"
-    km_rodados = res["km_rodados"] if res["km_rodados"] > 0 else 1.0
+
+    tempo_efetivo_min = res.get("tempo_efetivo_min", res["tempo_total_min"])
+    tempo_pausas_min  = res.get("tempo_pausas_min", 0)
+    horas_ef  = int(tempo_efetivo_min // 60)
+    minutos_ef = int(tempo_efetivo_min % 60)
+    duracao_efetiva_str = f"{horas_ef}h {minutos_ef}min" if horas_ef > 0 else f"{minutos_ef} min"
+
+    linha_tempo_pausas = ""
+    if tempo_pausas_min > 0:
+        horas_p   = int(tempo_pausas_min // 60)
+        minutos_p = int(tempo_pausas_min % 60)
+        pausa_str = f"{horas_p}h {minutos_p}min" if horas_p > 0 else f"{minutos_p} min"
+        linha_tempo_pausas = (
+            f"• Tempo Total da Jornada:  *{duracao_str}*  _(pausa: {pausa_str})_\n"
+            f"• Tempo Efetivo ao Volante:  *{duracao_efetiva_str}* \n"
+        )
+    else:
+        linha_tempo_pausas = f"• Tempo ao Volante:  *{duracao_str}* \n"
+
+    # ── KM ────────────────────────────────────────────────────────────────────
+    km_rodados      = res["km_rodados"] if res["km_rodados"] > 0 else 1.0
     km_profissional = res.get("km_profissional", km_rodados)
     km_pessoal_intra = res.get("km_pessoal_intra", 0.0)
+
+    linha_km_pessoal = ""
+    if km_pessoal_intra > 0:
+        linha_km_pessoal = (
+            f"• KM Profissional (serviço):  *{km_profissional:,.1f} km* \n".replace(",", ".") +
+            f"• KM Uso Pessoal (pausa auditada):  *{km_pessoal_intra:,.1f} km*  _(amortizado)_\n".replace(",", ".")
+        )
+
+    # ── Financeiro ────────────────────────────────────────────────────────────
     horas_trab = res["horas_trabalhadas"] if res["horas_trabalhadas"] > 0 else 1.0
-    fat = res["faturamento_bruto"]
-    c_var = res["custo_variavel"]
+    fat    = res["faturamento_bruto"]
+    c_var  = res["custo_variavel"]
     c_fixo = res["custo_fixo_rateado"]
-    lucro = res["lucro_liquido_real"]
-    faturamento_por_km = fat / km_rodados
-    faturamento_por_hora = fat / horas_trab
-    lucro_por_hora = lucro / horas_trab
+    lucro  = res["lucro_liquido_real"]
+
+    margem_contribuicao = fat - c_var
     margem_lucro = (lucro / fat * 100.0) if fat > 0 else 0.0
-    meta_diaria = res["meta_mensal"] / res["dias_uteis"]
-    perc_meta = (fat / meta_diaria * 100.0) if meta_diaria > 0 else 0.0
-    
-    lista_despesas_str = ""
+
+    # ── Indicadores de eficiência ─────────────────────────────────────────────
+    faturamento_por_km   = fat   / km_rodados
+    custo_por_km         = (c_var + c_fixo) / km_rodados
+    lucro_por_km         = lucro / km_rodados
+    faturamento_por_hora = fat   / horas_trab
+    lucro_por_hora       = lucro / horas_trab
+
+    # Rendimento energético: label dinâmico por tipo de fonte (kWh ou L)
+    km_por_unidade = res.get("km_por_litro", 0.0)
+    detalhe_queima_raw = res.get("detalhe_queima", "")
+    if "kWh" in detalhe_queima_raw and "Combustão" not in detalhe_queima_raw:
+        label_rendimento = "km/kWh ⚡"
+    elif "kWh" in detalhe_queima_raw:
+        label_rendimento = "km/L (híb.) ⚡🔥"
+    else:
+        label_rendimento = "km/L ⛽"
+
+    # ── Detalhamento de despesas ──────────────────────────────────────────────
     despesas = res.get("despesas_detalhadas", [])
     custo_queima = res.get("custo_combustivel_queimado", 0.0)
-    detalhe_queima = res.get("detalhe_queima", "")
 
-    # Combustível é amortizado pelo Power Split (custo_combustivel_queimado) —
-    # exibir as transações de abastecimento *também* como linha de despesa causaria
-    # dupla-contagem visual (o abastecimento é entrada de estoque, a queima é o custo real).
-    # Por isso filtramos a categoria 'combustivel' da lista de detalhes e mostramos
-    # a linha de queima separadamente com o valor do CMP calculado.
+    # Abastecimento é entrada de estoque (CMP); a queima proporcional é o custo real.
+    # Filtramos 'combustivel' da lista para evitar dupla-contagem visual.
     despesas_operacionais = [d for d in despesas if d.get("categoria") != "combustivel"]
 
+    lista_despesas_str = ""
     if custo_queima > 0:
-        detalhe_queima_fmt = f"  _{detalhe_queima}_" if detalhe_queima else ""
-        lista_despesas_str += f" -  *Queima de Combustível/Energia* :  *R$ {custo_queima:.2f}* {detalhe_queima_fmt}\n"
-
-    if despesas_operacionais:
-        for d in despesas_operacionais:
-            desc = d.get('descricao_original') or d.get('categoria', 'geral')
-            val = float(d.get('valor', 0.0))
-            lista_despesas_str += f" -  *{desc}* :  *R$ {val:.2f}* \n"
+        detalhe_fmt = f"  _{detalhe_queima_raw}_" if detalhe_queima_raw else ""
+        lista_despesas_str += f" -  *Queima de Combustível/Energia* :  *R$ {custo_queima:.2f}* {detalhe_fmt}\n"
+    for d in despesas_operacionais:
+        desc = d.get("descricao_original") or d.get("categoria", "geral")
+        val  = float(d.get("valor", 0.0))
+        lista_despesas_str += f" -  *{desc}* :  *R$ {val:.2f}* \n"
 
     if lista_despesas_str:
         lista_despesas_str = "• Detalhes dos Gastos:\n" + lista_despesas_str
     else:
         lista_despesas_str = "• Nenhuma despesa registrada neste turno.\n"
 
-    # Rodapé dinâmico: usa nome real e custo diário calculado a partir do contrato vigente.
-    # Só exibido quando o motorista ainda não personalizou o contrato.
+    # Alerta visual quando o resultado é negativo (prejuízo real)
+    if lucro < 0:
+        linha_resultado = (
+            f"🔴  *RESULTADO DO DIA: R$ {lucro:.2f}*  _(Prejuízo — custo superou o faturamento)_\n"
+        )
+    else:
+        linha_resultado = f"💰  *LUCRO LÍQUIDO REAL DO DIA: R$ {lucro:.2f}* \n"
+
+    # ── Meta diária e projeção mensal ─────────────────────────────────────────
+    meta_mensal  = res["meta_mensal"]
+    dias_uteis   = res["dias_uteis"]
+    meta_diaria  = meta_mensal / dias_uteis if dias_uteis > 0 else meta_mensal
+    perc_meta    = (fat / meta_diaria * 100.0) if meta_diaria > 0 else 0.0
+
+    # Estimativa de dias úteis restantes no mês (approx.)
+    from datetime import date as _date
+    hoje = _date.today()
+    dias_corridos   = hoje.day
+    # Proporção de dias úteis já passados no mês (simplificado: dias corridos / 30)
+    dias_uteis_restantes = max(0, round(dias_uteis * (1 - dias_corridos / 30)))
+    projecao_mensal = fat + (fat * dias_uteis_restantes) if dias_uteis_restantes > 0 else fat
+    deficit_meta    = max(0.0, meta_mensal - fat)
+    fat_diario_necessario = (deficit_meta / dias_uteis_restantes) if dias_uteis_restantes > 0 else 0.0
+
+    if fat > 0 and dias_uteis_restantes > 0:
+        secao_projecao = (
+            f"📅  *4. PROJEÇÃO MENSAL* \n"
+            f"• Meta Mensal:  *R$ {meta_mensal:,.2f}* \n".replace(",", ".") +
+            f"• Dias Úteis Restantes (est.):  *{dias_uteis_restantes} dias* \n"
+            f"• Projeção se mantiver ritmo:  *R$ {projecao_mensal:,.2f}* \n".replace(",", ".") +
+            (
+                f"• Precisa faturar/dia para bater a meta:  *R$ {fat_diario_necessario:.2f}* \n"
+                if fat_diario_necessario > 0 else
+                f"• 🎯 Você já ultrapassou a meta mensal! Parabéns!\n"
+            ) +
+            "\n"
+        )
+    else:
+        secao_projecao = ""
+
+    # ── Rodapé de configuração de contrato ────────────────────────────────────
     rodape_sugestao = ""
     if not res.get("contrato_personalizado", False):
         aluguel_diario_real = res.get("custo_aluguel_semanal", 1020.85) / 6.0
         rodape_sugestao = (
             f"\n\n"
-            f"{nome_motorista}, este cálculo usou o custo padrão de  *Aluguel (R$ {aluguel_diario_real:.2f}/dia)* . "
-            f"Para que seu Lucro Real seja 100% preciso, configure o seu contrato atual:\n\n"
+            f"_{nome_motorista}, este cálculo usou o custo padrão de Aluguel (R$ {aluguel_diario_real:.2f}/dia). "
+            f"Para que seu Lucro Real seja 100% preciso, configure seu contrato atual:_\n\n"
             "1⃣  *Carro Alugado*  (Zarp, Movida, Mottu, etc.):\n"
-            "👉 Envie:  *'atualizar contrato [Locadora] [Aluguel Semanal] [Franquia KM]'*  (ex:  *atualizar contrato Zarp 1020 1500* )\n\n"
-            "2⃣  *Carro Próprio Quitado*  (sem mensalidade, apenas provisão de manutenção):\n"
-            "👉 Envie:  *'atualizar contrato Proprietario [Manutenção Diária] 0'*  (ex:  *atualizar contrato Proprietario 15 0* )\n\n"
-            "3⃣  *Carro Financiado*  (mensalidade + manutenção):\n"
-            "👉 Envie:  *'atualizar contrato Financiado [Pro-Rata Mensalidade + Manutenção] 0'*  (ex:  *atualizar contrato Financiado 45 0* )"
-        )
-    # Linha de uso pessoal intra-turno — só exibida quando há km pessoal auditado.
-    # Evita poluição visual para motoristas que não fazem uso pessoal durante o turno.
-    linha_km_pessoal = ""
-    if km_pessoal_intra > 0:
-        linha_km_pessoal = (
-            f"• KM Profissional (serviço):  *{km_profissional:,.1f} km* \n".replace(",", ".") +
-            f"• KM Uso Pessoal (pausa auditada):  *{km_pessoal_intra:,.1f} km*  _(custo amortizado no cofre)_\n".replace(",", ".")
+            "👉  *atualizar contrato [Locadora] [Aluguel Semanal] [Franquia KM]*  (ex:  *atualizar contrato Zarp 1020 1500* )\n\n"
+            "2⃣  *Carro Próprio Quitado* :\n"
+            "👉  *atualizar contrato Proprietario [Manutenção Diária] 0*  (ex:  *atualizar contrato Proprietario 15 0* )\n\n"
+            "3⃣  *Carro Financiado* :\n"
+            "👉  *atualizar contrato Financiado [Pro-Rata Diário] 0*  (ex:  *atualizar contrato Financiado 45 0* )"
         )
 
     return (
-        f"🏁  *FECHAMENTO DE TURNO - DRE EXECUTIVO DIÁRIO* \n"
+        f"🏁  *FECHAMENTO DE TURNO — DRE EXECUTIVO DIÁRIO* \n"
         f"👤 Motorista:  *{nome_motorista}* \n"
         f"──────────────────────────────\n\n"
         f"⏱  *1. RESUMO OPERACIONAL* \n"
-        f"• Horário:  *{res['data_inicio']}*  às  *{res['data_fim']}*  ({duracao_str})\n"
-        f"• Odômetro:  *{res['km_inicial']:,.1f} km*  ➔  *{res['km_final']:,.1f} km* \n".replace(",", ".") +
-        f"• Distância Total Rodada:  *{km_rodados:,.1f} km* \n".replace(",", ".") +
-        linha_km_pessoal +
-        "\n" +
-        f"📊  *2. DEMONSTRATIVO DE RESULTADO (DRE)* \n"
-        f"• (+) Faturamento Bruto:  *R$ {fat:.2f}* \n"
-        f"• (-) Custos Variáveis:\n"
-        f"{lista_despesas_str}"
-        f"  *Total Custos Variáveis: R$ {c_var:.2f}* \n"
-        f"• (=) Margem Contribuição:  *R$ {(fat - c_var):.2f}* \n"
-        f"• (-) Rateio Custo Fixo (Aluguel/Pro-Rata):  *R$ {c_fixo:.2f}* \n"
-        f"──────────────────────────────\n"
-        f"💰  *LUCRO LÍQUIDO REAL DO DIA: R$ {lucro:.2f}* \n"
-        f"📈 Margem Líquida Real:  *{margem_lucro:.1f}%* \n\n"
-        f"🎯  *3. INDICADORES DE PERFORMANCE* \n"
-        f"• Faturamento por KM:  *R$ {faturamento_por_km:.2f}/km* \n"
-        f"• Faturamento por Hora:  *R$ {faturamento_por_hora:.2f}/h* \n"
-        f"• Lucro Real por Hora:  *R$ {lucro_por_hora:.2f}/h* \n"
-        f"• Rendimento Médio do Turno:  *{res.get('km_por_litro', 0.0):.2f} km/L* \n"
-        f"• Atingimento Meta Diária (R$ {meta_diaria:.2f}):  *{perc_meta:.1f}%* \n\n"
-        f"🛡  *Cofre Contábil Atualizado! Fechamento registrado com sucesso. Bom descanso!*"
-        f"{rodape_sugestao}"
+        f"• Horário:  *{res['data_inicio']}*  às  *{res['data_fim']}* \n"
+        + linha_tempo_pausas
+        + f"• Odômetro:  *{res['km_inicial']:,.1f} km*  ➔  *{res['km_final']:,.1f} km* \n".replace(",", ".")
+        + f"• Distância Total Rodada:  *{km_rodados:,.1f} km* \n".replace(",", ".")
+        + linha_km_pessoal
+        + "\n"
+        + f"📊  *2. DEMONSTRATIVO DE RESULTADO (DRE)* \n"
+        + f"• (+) Faturamento Bruto:  *R$ {fat:.2f}* \n"
+        + f"• (-) Custos Variáveis:\n"
+        + lista_despesas_str
+        + f"  *Total Custos Variáveis: R$ {c_var:.2f}* \n"
+        + f"• (=) Margem de Contribuição:  *R$ {margem_contribuicao:.2f}* \n"
+        + f"• (-) Rateio Custo Fixo (Aluguel/Pro-Rata):  *R$ {c_fixo:.2f}* \n"
+        + f"──────────────────────────────\n"
+        + linha_resultado
+        + f"📈 Margem Líquida:  *{margem_lucro:.1f}%* \n\n"
+        + f"🎯  *3. INDICADORES DE PERFORMANCE* \n"
+        + f"• Faturamento por KM:  *R$ {faturamento_por_km:.2f}/km* \n"
+        + f"• Custo Total por KM:  *R$ {custo_por_km:.2f}/km* \n"
+        + f"• Lucro Real por KM:  *R$ {lucro_por_km:.2f}/km* \n"
+        + f"• Faturamento por Hora:  *R$ {faturamento_por_hora:.2f}/h* \n"
+        + f"• Lucro Real por Hora:  *R$ {lucro_por_hora:.2f}/h* \n"
+        + f"• Rendimento ({label_rendimento}):  *{km_por_unidade:.2f}* \n"
+        + f"• Atingimento Meta Diária (R$ {meta_diaria:.2f}):  *{perc_meta:.1f}%* \n\n"
+        + secao_projecao
+        + f"🛡  *Cofre Contábil Atualizado! Bom descanso, {nome_motorista}!*"
+        + rodape_sugestao
     )
 
 async def enviar_whatsapp(remote_jid: str, texto: str):

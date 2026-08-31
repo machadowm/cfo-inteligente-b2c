@@ -563,8 +563,40 @@ class TransacaoService:
 
             km_l_real = (km_intervalo / litros_intervalo).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-            # Lê o parâmetro configurado no JSONB
+            # Lê o sub-dict do estoque líquido — necessário tanto para o sanity check
+            # quanto para resolver o parâmetro configurado de rendimento.
             liq = estoque.get("liquido", {})
+
+            # ── SANITY CHECK FÍSICO (DINÂMICO) ───────────────────────────────────
+            # O limite INFERIOR é fixo: 4.5 km/L é o piso absoluto para qualquer
+            # veículo a combustão no Brasil (SUV grande em cidade congestionada).
+            #
+            # O limite SUPERIOR é DINÂMICO: calculado como 1.5× o melhor rendimento
+            # cadastrado pelo próprio motorista. Isso torna o check correto tanto
+            # para carros (km_l_gas ≈ 12 → teto ≈ 18 km/L) quanto para motos
+            # (km_l_gas ≈ 35 → teto ≈ 52 km/L), sem precisar de um campo
+            # 'categoria_veiculo' no banco — a própria calibração do motorista
+            # é a fonte de verdade sobre o rendimento esperado do seu veículo.
+            #
+            # O `max(..., Decimal("12.0"))` garante que veículos com parâmetros
+            # ainda no valor padrão (não calibrados) não rejeitem motos logo no
+            # primeiro ciclo Full-to-Full (teto mínimo efetivo = 18 km/L).
+            _KM_L_MIN     = Decimal("4.5")
+            _km_l_gas_cfg = Decimal(str(liq.get("km_l_gasolina", "12.0")))
+            _km_l_eta_cfg = Decimal(str(liq.get("km_l_etanol",   "8.5")))
+            _km_l_melhor  = max(_km_l_gas_cfg, _km_l_eta_cfg, Decimal("12.0"))
+            _KM_L_MAX     = (_km_l_melhor * Decimal("1.5")).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            if km_l_real < _KM_L_MIN or km_l_real > _KM_L_MAX:
+                logger.warning(
+                    f"[Full-to-Full] Sanity check reprovado: km/L_real={float(km_l_real):.2f} "
+                    f"fora de [{_KM_L_MIN}, {_KM_L_MAX}] — possível abastecimento parcial omitido. "
+                    f"veiculo={veiculo_id} | intervalo={float(km_intervalo):.0f} km | "
+                    f"litros={float(litros_intervalo):.2f} L"
+                )
+                return None
+            # ─────────────────────────────────────────────────────────────────────
+
+            # Resolve o parâmetro de rendimento configurado para o combustível abastecido
             tipo_norm = (tipo_combustivel or "").lower().strip()
             if tipo_norm == "etanol":
                 km_l_configurado = Decimal(str(liq.get("km_l_etanol", "8.5")))

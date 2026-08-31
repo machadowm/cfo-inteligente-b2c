@@ -102,18 +102,57 @@ class ParametrosService:
 
     # ------------------------------------------------------------------
     # Regex principal
-    # Aceita:  !alterar <parâmetro com espaços> <número>
-    # O valor aceita ponto ou vírgula como separador decimal.
+    # Captura o nome do parâmetro e o valor bruto como uma única string.
+    # O valor bruto é limpo por _limpar_valor_bruto() antes de ser convertido.
+    # Aceita qualquer sufixo após o número (km, /km, /h, kWh, L, m³, etc.)
+    # para que o motorista possa escrever naturalmente.
     # ------------------------------------------------------------------
     _RE_ALTERAR = re.compile(
-        r"^!alterar\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)$",
+        r"^!alterar\s+(.+?)\s+(R\$\s*[\d.,\s]+[\d].*|[\d][\d.,\s]*.*)$",
         re.IGNORECASE,
     )
 
     @staticmethod
+    def _limpar_valor_bruto(raw: str) -> str:
+        """Extrai e normaliza o número de uma string de valor digitada pelo usuário.
+
+        Trata os padrões brasileiros mais comuns:
+          "R$2,2"       → "2.2"
+          "R$ 1.500,50" → "1500.50"   (milhar BR com vírgula decimal)
+          "1500"        → "1500"
+          "1.500"       → "1500"       (milhar BR sem decimal)
+          "1,5"         → "1.5"
+          "12.5"        → "12.5"       (decimal US)
+          "1500 km"     → "1500"
+          "2,50/km"     → "2.50"
+        """
+        # 1. Remove prefixo monetário e espaços
+        s = re.sub(r"(?i)R\$\s*", "", raw).strip()
+        # 2. Remove sufixo de unidade (qualquer coisa após o último dígito)
+        s = re.sub(r"[^\d.,]+$", "", s).strip()
+        # 3. Resolve ambiguidade milhar vs decimal (lógica idêntica ao converter_para_float)
+        if "," in s and "." in s:
+            if s.find(".") < s.find(","):   # padrão BR: 1.000,50
+                s = s.replace(".", "").replace(",", ".")
+            else:                            # padrão US: 1,000.50
+                s = s.replace(",", "")
+        elif "," in s:
+            s = s.replace(",", ".")
+        # 4. Remove pontos que ainda sobraram sem parte decimal (separador de milhar puro)
+        # ex: "1.500" → depois do passo 3 ainda é "1.500" se não havia vírgula
+        # Detecta: string tem ponto mas não é decimal (parte após ponto tem 3 dígitos)
+        if "." in s:
+            partes = s.split(".")
+            if len(partes) == 2 and len(partes[1]) == 3 and partes[1].isdigit():
+                s = s.replace(".", "")  # era separador de milhar
+        return s
+
+    @staticmethod
     def _converter_valor(raw: str, tipo: type):
-        """Converte a string capturada pelo regex para o tipo esperado pela coluna."""
-        normalizado = raw.replace(",", ".")
+        """Converte a string bruta do usuário para o tipo esperado pela coluna do banco."""
+        normalizado = ParametrosService._limpar_valor_bruto(raw)
+        if not normalizado:
+            raise ValueError(f"Valor '{raw}' não contém um número reconhecível.")
         if tipo is Decimal:
             return Decimal(normalizado)
         if tipo is int:
@@ -333,7 +372,7 @@ class ParametrosService:
             return None
 
         param_nome = match.group(1).strip().lower()
-        valor_raw  = match.group(2)
+        valor_raw  = match.group(2).strip()
 
         # ── Resolução de alias genérico "km/l" / "km l" ─────────────────
         # Sem especificação de combustível, consulta o tipo do veículo ativo

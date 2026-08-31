@@ -85,6 +85,31 @@ def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
         f"🔮 Para encerrar a sua jornada e emitir o DRE, envie:  *'fechar [KM final]'"
     )
 
+def _formatar_sugestao_recalibracao(s: dict) -> str:
+    """Monta a mensagem de sugestão de recalibração Full-to-Full para envio ao motorista.
+
+    Formato separado da resposta de abastecimento para não misturar confirmação
+    financeira (ok, guardado) com alerta de engenharia (ajuste de parâmetro).
+    """
+    km_real_fmt = f"{s['km_l_real']:.2f}".replace(".", ",")
+    km_cfg_fmt  = f"{s['km_l_configurado']:.2f}".replace(".", ",")
+    div_fmt     = f"{s['divergencia_pct']:.1f}".replace(".", ",")
+    km_int_fmt  = f"{s['km_intervalo']:.0f}".replace(".", ".")
+    lit_fmt     = f"{s['litros_intervalo']:.1f}".replace(".", ",")
+    sinal       = s["sinal"]
+    label       = s["param_label"]
+    param       = s["param_nome"]
+    return (
+        f"📐  *Recalibração Full-to-Full Detectada!*\n\n"
+        f"Nos últimos  *{km_int_fmt} km*  ({lit_fmt} L consumidos), seu carro fez:\n"
+        f"  {sinal}  *{km_real_fmt} km/L*  (rendimento real medido)\n"
+        f"  📋  *{km_cfg_fmt} km/L*  (parâmetro cadastrado para {label})\n\n"
+        f"Divergência:  *{div_fmt}%*\n\n"
+        f"Quer atualizar para o valor real? Envie:\n"
+        f"  👉  `!alterar {param} {km_real_fmt}`"
+    )
+
+
 def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     """Formata o DRE Executivo Diário consolidando o tempo operacional e indicadores."""
     horas = int(res["tempo_total_min"] // 60)
@@ -837,6 +862,11 @@ class OrchestratorService:
                 else:
                     resposta = f"❌ Falha ao registrar: {res_tx.get('message')}"
                 await enviar_whatsapp(remote_jid, resposta)
+                # Envia sugestão de recalibração em mensagem separada para não poluir
+                # a confirmação de abastecimento com dados de engenharia.
+                sugestao = res_tx.get("sugestao_recalibracao") if res_tx.get("status") == "success" else None
+                if sugestao:
+                    await enviar_whatsapp(remote_jid, _formatar_sugestao_recalibracao(sugestao))
                 return
 
         # 3.0. Declaração retroativa de pausa (motorista respondendo ao aviso de jornada longa)
@@ -1261,6 +1291,11 @@ class OrchestratorService:
                 else:
                     resposta = f"❌ Falha ao registrar abastecimento:\n_{res_tx.get('message')}_"
                 await enviar_whatsapp(remote_jid, resposta)
+                # Sugestão de recalibração em mensagem separada (fast-path não tem odômetro,
+                # então sugestao_recalibracao será sempre None aqui — guarda por coerência)
+                sugestao = res_tx.get("sugestao_recalibracao") if res_tx.get("status") == "success" else None
+                if sugestao:
+                    await enviar_whatsapp(remote_jid, _formatar_sugestao_recalibracao(sugestao))
                 return
 
             # Tem valor mas falta preço → entra no passo PRECO da FSM

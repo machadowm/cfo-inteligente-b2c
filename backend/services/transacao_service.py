@@ -340,12 +340,28 @@ class TransacaoService:
                                 )
                                 if row is None:
                                     return {"status": "duplicate", "message": "⚠ Esse lançamento já foi guardado anteriormente no cofre contábil.", "error_code": "DUPLICADA"}
+
+                                # ── RECALIBRAÇÃO FULL-TO-FULL ─────────────────────────────────
+                                # Executada APÓS o INSERT para que o odômetro atual já esteja
+                                # disponível como ponto de referência nas próximas verificações.
+                                # A conexão está dentro da mesma transação atômica — se a
+                                # recalibração falhar, o INSERT já está garantido pelo RETURNING.
+                                sugestao_recalibracao = await TransacaoService._recalibrar_rendimento_full_to_full(
+                                    conn=conn,
+                                    veiculo_id=veiculo_id,
+                                    odometro_atual=odometro_abastecimento,
+                                    litros_abastecidos_atual=float(litros_novos) if litros_novos > 0 else None,
+                                    tipo_combustivel=tipo_combustivel_abastecido,
+                                    estoque=estoque,
+                                )
+                                # ─────────────────────────────────────────────────────────────
                                 return {
                                     "status": "success",
                                     "message": f"✅ Tanque self-healed! Cofre ancorado a  *{float(litros_base):.1f} L*  (capacidade nominal). 🛡",
                                     "transacao_id": str(row["id"]),
                                     "data_transacao": row["data_transacao"],
                                     "self_healed": True,
+                                    "sugestao_recalibracao": sugestao_recalibracao,
                                 }
                             # ─────────────────────────────────────────────────────────────────────
 
@@ -455,6 +471,141 @@ class TransacaoService:
         except asyncpg.PostgresError as exc:
             logger.exception("Erro crítico de banco de dados.")
             return TransacaoService._mapear_erro_postgres(exc)
+
+    @staticmethod
+    async def _recalibrar_rendimento_full_to_full(
+        conn,
+        veiculo_id: str,
+        odometro_atual: float,
+        litros_abastecidos_atual: float,
+        tipo_combustivel: Optional[str],
+        estoque: dict,
+    ) -> Optional[Dict[str, Any]]:
+        """Recalibração automática de rendimento pelo método Full-to-Full.
+
+        Quando dois abastecimentos com tanque_cheio=TRUE seguidos têm odômetro registrado,
+        podemos calcular o rendimento real:
+
+            km/L_real = (odometro_atual - odometro_anterior) / Σ litros_no_intervalo
+
+        O resultado é comparado com o parâmetro configurado no JSONB. Se a divergência
+        for > 5%, retorna um dict de sugestão; caso contrário retorna None (sem ação).
+
+        Casos de aborto silencioso (sem sugestão):
+        - Sem abastecimento anterior com tanque_cheio + odômetro
+        - km rodados < 50 (muito curto para ser estatisticamente relevante)
+        - km rodados > 2.000 (provavelmente odômetro errado — evita sugestões absurdas)
+        - Litros no intervalo < 5 (dados insuficientes)
+        - Divergência ≤ 5% (dentro da margem de ruído aceitável)
+
+        Não lança exceção — falhas são logadas e retornam None (nunca bloqueiam o fluxo).
+        """
+        try:
+            if odometro_atual is None or odometro_atual <= 0:
+                return None
+
+            # Busca o abastecimento tanque_cheio imediatamente anterior com odômetro registrado.
+            # O índice idx_transacoes_recalibracao_telemetria cobre esta query.
+            anterior = await conn.fetchrow(
+                """
+                SELECT odometro_abastecimento, data_transacao
+                FROM public.transacoes
+                WHERE veiculo_id = $1::uuid
+                  AND tanque_cheio = TRUE
+                  AND odometro_abastecimento IS NOT NULL
+                  AND estornado = FALSE
+                  AND categoria = 'combustivel'
+                  AND odometro_abastecimento < $2
+                ORDER BY odometro_abastecimento DESC
+                LIMIT 1;
+                """,
+                veiculo_id, odometro_atual,
+            )
+            if not anterior:
+                return None  # Primeiro tanque cheio registrado — sem base de comparação
+
+            odo_anterior = Decimal(str(anterior["odometro_abastecimento"]))
+            odo_atual = Decimal(str(odometro_atual))
+            km_intervalo = odo_atual - odo_anterior
+
+            # Filtra intervalos improváveis: muito curtos ou muito longos
+            if km_intervalo < Decimal("50") or km_intervalo > Decimal("2000"):
+                logger.info(
+                    f"[Full-to-Full] Intervalo descartado: {float(km_intervalo):.0f} km "
+                    f"(fora de [50, 2000]) — veiculo={veiculo_id}"
+                )
+                return None
+
+            # Soma todos os litros abastecidos (tanque cheio ou não) entre os dois checkpoints
+            litros_intervalo_row = await conn.fetchval(
+                """
+                SELECT COALESCE(SUM(litros_abastecidos), 0)
+                FROM public.transacoes
+                WHERE veiculo_id = $1::uuid
+                  AND categoria = 'combustivel'
+                  AND estornado = FALSE
+                  AND litros_abastecidos IS NOT NULL
+                  AND data_transacao > $2
+                  AND odometro_abastecimento <= $3;
+                """,
+                veiculo_id,
+                anterior["data_transacao"],
+                odometro_atual,
+            )
+            litros_intervalo = Decimal(str(litros_intervalo_row or "0"))
+
+            # Inclui os litros do abastecimento atual se não foram contados acima
+            if litros_abastecidos_atual and litros_abastecidos_atual > 0:
+                litros_intervalo += Decimal(str(litros_abastecidos_atual))
+
+            if litros_intervalo < Decimal("5"):
+                return None  # Dados insuficientes para cálculo confiável
+
+            km_l_real = (km_intervalo / litros_intervalo).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+            # Lê o parâmetro configurado no JSONB
+            liq = estoque.get("liquido", {})
+            tipo_norm = (tipo_combustivel or "").lower().strip()
+            if tipo_norm == "etanol":
+                km_l_configurado = Decimal(str(liq.get("km_l_etanol", "8.5")))
+                param_nome = "km etanol"
+                param_label = "Etanol"
+            else:
+                # Gasolina é o fallback padrão (inclui GNV não-especificado e veículos mono-fuel)
+                km_l_configurado = Decimal(str(liq.get("km_l_gasolina", "12.0")))
+                param_nome = "km gasolina"
+                param_label = "Gasolina"
+
+            if km_l_configurado <= Decimal("0"):
+                return None
+
+            divergencia = abs(km_l_real - km_l_configurado) / km_l_configurado
+
+            logger.info(
+                f"[Full-to-Full] veiculo={veiculo_id} | intervalo={float(km_intervalo):.0f} km | "
+                f"litros={float(litros_intervalo):.2f} L | km/L_real={float(km_l_real):.2f} | "
+                f"km/L_cfg={float(km_l_configurado):.2f} | divergência={float(divergencia)*100:.1f}%"
+            )
+
+            # Limiar de 5%: abaixo disso é ruído de medição aceitável
+            if divergencia <= Decimal("0.05"):
+                return None
+
+            sinal = "▲" if km_l_real > km_l_configurado else "▼"
+            return {
+                "km_l_real": float(km_l_real),
+                "km_l_configurado": float(km_l_configurado),
+                "divergencia_pct": round(float(divergencia) * 100, 1),
+                "param_nome": param_nome,
+                "param_label": param_label,
+                "km_intervalo": float(km_intervalo),
+                "litros_intervalo": float(litros_intervalo),
+                "sinal": sinal,
+            }
+        except Exception as exc:
+            # Falha na recalibração nunca bloqueia o abastecimento — apenas loga.
+            logger.warning(f"[Full-to-Full] Erro na recalibração (veiculo={veiculo_id}): {exc}")
+            return None
 
     @staticmethod
     async def estornar_transacao(motorista_id: str, transacao_id: str) -> Dict[str, Any]:

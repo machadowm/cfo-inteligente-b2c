@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS public.transacoes (
     veiculo_id UUID REFERENCES public.veiculos(id) ON DELETE RESTRICT,
     tipo_movimentacao VARCHAR(20) NOT NULL CHECK (tipo_movimentacao IN ('receita', 'despesa', 'neutro')),
     categoria VARCHAR(50) NOT NULL,
-    valor NUMERIC(14,4) NOT NULL CHECK (valor > 0),
+    valor NUMERIC(14,4) NOT NULL CHECK (valor >= 0),  -- >= 0 permite recarga solar gratuita
     estabelecimento VARCHAR(100),
     metodo_pagamento VARCHAR(50),
     contexto_operacional VARCHAR(50),
@@ -161,12 +161,23 @@ CREATE TABLE IF NOT EXISTS public.transacoes (
     idempotencia_hash VARCHAR(100) UNIQUE,
     estornado BOOLEAN DEFAULT FALSE,
     data_transacao TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
+
     -- Controle de auditoria textual e idempotência Evolution/WhatsApp
     descricao TEXT,
     wpp_msg_id VARCHAR(255) UNIQUE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+
+    -- Telemetria de abastecimento (populada pelo fluxo FSM guiado)
+    litros_abastecidos    NUMERIC(10,2),
+    preco_por_litro       NUMERIC(10,4),
+    odometro_abastecimento NUMERIC(10,2),
+    tanque_cheio          BOOLEAN DEFAULT FALSE NOT NULL
 );
+
+-- Índice parcial para recalibração Full-to-Full (O(log N))
+CREATE INDEX IF NOT EXISTS idx_transacoes_recalibracao_telemetria
+    ON public.transacoes (veiculo_id, tanque_cheio, data_transacao)
+    WHERE estornado = FALSE AND categoria = 'combustivel';
 
 
 -- Tabela 7: despesas_fixas_mensais (Rateio Diário Contínuo)

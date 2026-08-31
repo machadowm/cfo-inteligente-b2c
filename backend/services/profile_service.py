@@ -48,7 +48,9 @@ class ProfileService:
                 # ── 1. Metas do motorista ──────────────────────────────────────
                 m = await conn.fetchrow(
                     """
-                    SELECT meta_mensal_faturamento, dias_uteis_mes
+                    SELECT meta_mensal_faturamento, dias_uteis_mes,
+                           COALESCE(piso_ganho_km, 2.0)   AS piso_ganho_km,
+                           COALESCE(piso_ganho_hora, 30.0) AS piso_ganho_hora
                     FROM public.motoristas
                     WHERE id = $1::uuid;
                     """,
@@ -119,6 +121,32 @@ class ProfileService:
                     motorista_id,
                 )
 
+                # ── 6. Despesas fixas mensais ativas ──────────────────────────
+                despesas_fixas = await conn.fetch(
+                    """
+                    SELECT nome, valor_mensal, valor_pro_rata_diario
+                    FROM public.despesas_fixas_mensais
+                    WHERE motorista_id = $1::uuid AND ativo = TRUE
+                    ORDER BY valor_mensal DESC;
+                    """,
+                    motorista_id,
+                )
+
+                # ── 7. Caixas de provisão ─────────────────────────────────────
+                caixas = await conn.fetch(
+                    """
+                    SELECT cp.nome_caixa, cp.saldo_atual,
+                           COALESCE(SUM(dfm.valor_pro_rata_diario), 0) AS aporte_diario
+                    FROM public.caixas_provisao cp
+                    LEFT JOIN public.despesas_fixas_mensais dfm
+                        ON dfm.caixa_id = cp.id AND dfm.ativo = TRUE
+                    WHERE cp.motorista_id = $1::uuid
+                    GROUP BY cp.id, cp.nome_caixa, cp.saldo_atual
+                    ORDER BY cp.saldo_atual DESC;
+                    """,
+                    motorista_id,
+                )
+
             # ── Extração e normalização do estoque JSONB ──────────────────────
             estoque_raw = v["estoque_financeiro"] if v else {}
             if isinstance(estoque_raw, str):
@@ -136,6 +164,8 @@ class ProfileService:
             # ── Cálculos financeiros ───────────────────────────────────────────
             meta_mensal   = Decimal(str(m["meta_mensal_faturamento"] or "12000.00"))
             dias_uteis    = int(m["dias_uteis_mes"] or 26)
+            piso_km       = float(m["piso_ganho_km"])
+            piso_hora     = float(m["piso_ganho_hora"])
             meta_diaria   = (meta_mensal / Decimal(str(dias_uteis))).quantize(Decimal("0.01"))
 
             fat_bruto     = Decimal(str(fat_row["fat_bruto"]  or 0))
@@ -244,6 +274,35 @@ class ProfileService:
                 else "• Estoque zerado — abasteça para ativar o rastreio de CMP."
             )
 
+            # ── Seção despesas fixas ───────────────────────────────────────────
+            if despesas_fixas:
+                total_df = sum(float(r["valor_pro_rata_diario"]) for r in despesas_fixas)
+                linhas_df = []
+                for r in despesas_fixas:
+                    linhas_df.append(
+                        f"• {r['nome']}:  *R$ {float(r['valor_mensal']):.2f}/mês*"
+                        f"  (≈ R$ {float(r['valor_pro_rata_diario']):.2f}/dia)"
+                    )
+                linhas_df.append(f"• *Total pro-rata diário: R$ {total_df:.2f}*")
+                despesas_fixas_str = "\n".join(linhas_df)
+            else:
+                despesas_fixas_str = "• Nenhuma despesa fixa cadastrada.\n_Use  *!adicionar despesa <nome> <R$/mês> <dias>*_"
+
+            # ── Seção caixas de provisão ──────────────────────────────────────
+            if caixas:
+                total_saldo = sum(float(r["saldo_atual"]) for r in caixas)
+                linhas_cx = []
+                for r in caixas:
+                    aporte = float(r["aporte_diario"])
+                    aporte_str = f"  _(+R$ {aporte:.2f}/turno)_" if aporte > 0 else ""
+                    linhas_cx.append(
+                        f"• {r['nome_caixa']}:  *R$ {float(r['saldo_atual']):.2f}*{aporte_str}"
+                    )
+                linhas_cx.append(f"• *Total reservado: R$ {total_saldo:.2f}*")
+                caixas_str = "\n".join(linhas_cx)
+            else:
+                caixas_str = "• Nenhuma caixa de provisão criada ainda.\n_Elas são criadas automaticamente ao cadastrar uma despesa fixa._"
+
             # ── Seção histórico ────────────────────────────────────────────────
             if qtd_turnos > 0:
                 historico_str = (
@@ -277,14 +336,18 @@ class ProfileService:
                 + (f"• Dias Úteis Restantes (est.):  *{dias_uteis_restantes} dias* \n" if dias_uteis_restantes > 0 else "")
                 + linha_projecao
                 + f"\n🎯  *CONFIGURAÇÕES ATUAIS* \n"
-                f"• Meta Diária:  *R$ {float(meta_diaria):.2f}* \n"
-                f"• Dias Úteis/Mês:  *{dias_uteis} dias* \n\n"
+                f"• Meta Diária:  *R$ {float(meta_diaria):.2f}*  ({dias_uteis} dias úteis/mês)\n"
+                f"• Piso por KM:  *R$ {piso_km:.2f}/km*   Piso por Hora:  *R$ {piso_hora:.2f}/h* \n\n"
+                f"📌  *DESPESAS FIXAS MENSAIS* \n"
+                f"{despesas_fixas_str}\n\n"
+                f"📦  *CAIXAS DE PROVISÃO* \n"
+                f"{caixas_str}\n\n"
                 f"📈  *HISTÓRICO RECENTE*  (últimos {qtd_turnos if qtd_turnos else '—'} turnos)\n"
                 f"{historico_str}\n"
                 + alerta_ritmo
                 + f"\n\n💡  _Quer ajustar algo?_\n"
-                f"  *alterar meta mensal 12000*\n"
-                f"  *alterar aluguel 1020*   ou   *parametros*"
+                f"  *!alterar meta mensal 12000*   *!alterar piso km 2,50*\n"
+                f"  *!adicionar despesa seguro 180 26*   *!caixas*"
             )
 
         except Exception as exc:

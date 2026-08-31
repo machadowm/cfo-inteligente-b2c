@@ -91,6 +91,8 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     minutos = int(res["tempo_total_min"] % 60)
     duracao_str = f"{horas}h {minutos}min" if horas > 0 else f"{minutos} min"
     km_rodados = res["km_rodados"] if res["km_rodados"] > 0 else 1.0
+    km_profissional = res.get("km_profissional", km_rodados)
+    km_pessoal_intra = res.get("km_pessoal_intra", 0.0)
     horas_trab = res["horas_trabalhadas"] if res["horas_trabalhadas"] > 0 else 1.0
     fat = res["faturamento_bruto"]
     c_var = res["custo_variavel"]
@@ -146,6 +148,15 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
             "3⃣  *Carro Financiado*  (mensalidade + manutenção):\n"
             "👉 Envie:  *'atualizar contrato Financiado [Pro-Rata Mensalidade + Manutenção] 0'*  (ex:  *atualizar contrato Financiado 45 0* )"
         )
+    # Linha de uso pessoal intra-turno — só exibida quando há km pessoal auditado.
+    # Evita poluição visual para motoristas que não fazem uso pessoal durante o turno.
+    linha_km_pessoal = ""
+    if km_pessoal_intra > 0:
+        linha_km_pessoal = (
+            f"• KM Profissional (serviço):  *{km_profissional:,.1f} km* \n".replace(",", ".") +
+            f"• KM Uso Pessoal (pausa auditada):  *{km_pessoal_intra:,.1f} km*  _(custo amortizado no cofre)_\n".replace(",", ".")
+        )
+
     return (
         f"🏁  *FECHAMENTO DE TURNO - DRE EXECUTIVO DIÁRIO* \n"
         f"👤 Motorista:  *{nome_motorista}* \n"
@@ -153,7 +164,9 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
         f"⏱  *1. RESUMO OPERACIONAL* \n"
         f"• Horário:  *{res['data_inicio']}*  às  *{res['data_fim']}*  ({duracao_str})\n"
         f"• Odômetro:  *{res['km_inicial']:,.1f} km*  ➔  *{res['km_final']:,.1f} km* \n".replace(",", ".") +
-        f"• Distância Rodada:  *{km_rodados:,.1f} km* \n\n".replace(",", ".") +
+        f"• Distância Total Rodada:  *{km_rodados:,.1f} km* \n".replace(",", ".") +
+        linha_km_pessoal +
+        "\n" +
         f"📊  *2. DEMONSTRATIVO DE RESULTADO (DRE)* \n"
         f"• (+) Faturamento Bruto:  *R$ {fat:.2f}* \n"
         f"• (-) Custos Variáveis:\n"

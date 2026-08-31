@@ -135,7 +135,9 @@ CREATE TABLE IF NOT EXISTS public.pausas_turno (
     turno_id UUID NOT NULL REFERENCES public.turnos(id) ON DELETE CASCADE,
     inicio_pausa TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     fim_pausa TIMESTAMP WITH TIME ZONE,
-    motivo VARCHAR(50)
+    motivo VARCHAR(50),
+    km_inicio NUMERIC(10,2),   -- Odômetro no momento da pausa (auditoria de uso pessoal)
+    km_fim    NUMERIC(10,2)    -- Odômetro na retomada (base do Power Split intra-turno)
 );
 
 

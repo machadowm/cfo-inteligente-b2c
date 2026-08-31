@@ -11,11 +11,16 @@ Formato do comando:
         !alterar meta mensal 12000
         !alterar aluguel 1020,85
         !alterar dias uteis 26
+        !alterar km gasolina 12.5
+        !alterar km etanol 9.0
+        !alterar km kwh 6.5
+        !alterar km m3 14.0
 
 Para listar os parâmetros disponíveis:
     !parametros
 """
 
+import json as _json
 import re
 import time
 import logging
@@ -43,16 +48,33 @@ PARAM_MAP: dict[str, _ParamEntry] = {
     "meta mensal":   ("meta_mensal_faturamento",  Decimal, "motoristas", "Meta Mensal (R$)"),
     "meta":          ("meta_mensal_faturamento",  Decimal, "motoristas", "Meta Mensal (R$)"),   # sinônimo
     "dias uteis":    ("dias_uteis_mes",            int,     "motoristas", "Dias Úteis/Mês"),
-    # ── Veículos ────────────────────────────────────────────────────────────
+    # ── Veículos (colunas planas) ────────────────────────────────────────────
     "aluguel":       ("custo_aluguel_semanal",     Decimal, "veiculos",   "Aluguel Semanal (R$)"),
     "franquia":      ("franquia_km_semanal",       Decimal, "veiculos",   "Franquia KM Semanal"),
+    # ── Rendimento energético (sub-chaves JSONB em estoque_financeiro) ────────
+    # tabela prefixada com "jsonb_estoque:<subdict>" — handler especializado no processar()
+    "km gasolina":   ("km_l_gasolina", Decimal, "jsonb_estoque:liquido",      "Rendimento Gasolina (km/L)"),
+    "km/l gasolina": ("km_l_gasolina", Decimal, "jsonb_estoque:liquido",      "Rendimento Gasolina (km/L)"),
+    "km etanol":     ("km_l_etanol",   Decimal, "jsonb_estoque:liquido",      "Rendimento Etanol (km/L)"),
+    "km/l etanol":   ("km_l_etanol",   Decimal, "jsonb_estoque:liquido",      "Rendimento Etanol (km/L)"),
+    "km kwh":        ("km_kwh",        Decimal, "jsonb_estoque:eletricidade", "Rendimento Elétrico (km/kWh)"),
+    "km/kwh":        ("km_kwh",        Decimal, "jsonb_estoque:eletricidade", "Rendimento Elétrico (km/kWh)"),
+    "km m3":         ("km_m3",         Decimal, "jsonb_estoque:gnv",          "Rendimento GNV (km/m³)"),
+    "km/m3":         ("km_m3",         Decimal, "jsonb_estoque:gnv",          "Rendimento GNV (km/m³)"),
 }
 
 # Nomes de exibição das tabelas para a mensagem de confirmação
 _TABELA_LABEL = {
-    "motoristas": "perfil do motorista",
-    "veiculos":   "veículo ativo",
+    "motoristas":              "perfil do motorista",
+    "veiculos":                "veículo ativo",
+    "jsonb_estoque:liquido":      "cofre de combustível líquido",
+    "jsonb_estoque:eletricidade": "cofre elétrico",
+    "jsonb_estoque:gnv":          "cofre de GNV",
 }
+
+# Alias genérico "km/l" ou "km l" sem especificação de combustível —
+# resolvido dinamicamente pelo tipo_combustivel do veículo ativo.
+_ALIASES_KM_GENERICOS = {"km/l", "km l", "kml"}
 
 
 class ParametrosService:
@@ -219,6 +241,44 @@ class ParametrosService:
         param_nome = match.group(1).strip().lower()
         valor_raw  = match.group(2)
 
+        # ── Resolução de alias genérico "km/l" / "km l" ─────────────────
+        # Sem especificação de combustível, consulta o tipo do veículo ativo
+        # para mapear automaticamente ao parâmetro correto.
+        # Veículos Flex/Híbridos são rejeitados com instrução educativa.
+        if param_nome in _ALIASES_KM_GENERICOS:
+            try:
+                async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                    veiculo_row = await conn.fetchrow(
+                        "SELECT tipo_combustivel, is_flex, is_hibrido "
+                        "FROM public.veiculos WHERE motorista_id = $1::uuid AND ativo = TRUE "
+                        "ORDER BY created_at DESC LIMIT 1;",
+                        motorista_id,
+                    )
+                if not veiculo_row:
+                    return "⚠ Nenhum veículo ativo localizado. Cadastre um veículo primeiro."
+                tipo_comb = (veiculo_row["tipo_combustivel"] or "").lower()
+                is_flex    = bool(veiculo_row["is_flex"])
+                is_hibrido = bool(veiculo_row["is_hibrido"])
+                if is_flex or is_hibrido or "flex" in tipo_comb or "hibrido" in tipo_comb:
+                    return (
+                        "⚠  *Seu veículo é Flex ou Híbrido!*\n\n"
+                        "Por favor, especifique qual combustível deseja alterar:\n"
+                        "  •  `!alterar km gasolina <valor>`\n"
+                        "  •  `!alterar km etanol <valor>`"
+                    )
+                # Veículo de combustível único — mapeia ao parâmetro correto
+                if "etanol" in tipo_comb or "alcool" in tipo_comb:
+                    param_nome = "km etanol"
+                elif "gnv" in tipo_comb:
+                    param_nome = "km m3"
+                elif "eletric" in tipo_comb:
+                    param_nome = "km kwh"
+                else:
+                    param_nome = "km gasolina"
+            except Exception as exc:
+                logger.error(f"[ParametrosService] Erro ao resolver alias km genérico: {exc}")
+                return "❌ Erro interno ao identificar o combustível do veículo."
+
         # Valida contra whitelist
         if param_nome not in PARAM_MAP:
             opcoes = "  |  ".join(f"*{k}*" for k in dict.fromkeys(PARAM_MAP))  # sem duplicatas
@@ -238,10 +298,17 @@ class ParametrosService:
             return (
                 f"⚠ Valor  *{valor_raw}*  inválido para  *{label}* .\n"
                 f"É esperado um valor {tipo_nome}.  Exemplo:  `!alterar {param_nome} "
-                f"{'26' if tipo is int else '12000,00'}` "
+                f"{'26' if tipo is int else '12,5'}` "
             )
 
-        # Persistência com RLS
+        # ── Persistência: JSONB (rendimento energético) ───────────────────
+        if tabela.startswith("jsonb_estoque:"):
+            subdict = tabela.split(":")[1]  # "liquido" | "eletricidade" | "gnv"
+            return await ParametrosService._alterar_rendimento(
+                motorista_id, tenant_id, param_nome, coluna, subdict, label, valor_final
+            )
+
+        # ── Persistência: colunas planas (motoristas / veiculos) ──────────
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 if tabela == "motoristas":
@@ -282,3 +349,76 @@ class ParametrosService:
                 f"coluna={coluna}): {exc}"
             )
             return "❌ Erro interno ao salvar o parâmetro. Verifique o valor e tente novamente."
+
+    @staticmethod
+    async def _alterar_rendimento(
+        motorista_id: str,
+        tenant_id: str,
+        param_nome: str,
+        coluna: str,
+        subdict: str,
+        label: str,
+        valor_final: Decimal,
+    ) -> str:
+        """Atualiza uma sub-chave de rendimento dentro do JSONB estoque_financeiro."""
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                row = await conn.fetchrow(
+                    "SELECT id, estoque_financeiro FROM public.veiculos "
+                    "WHERE motorista_id = $1::uuid AND ativo = TRUE "
+                    "ORDER BY created_at DESC LIMIT 1 FOR UPDATE;",
+                    motorista_id,
+                )
+                if not row:
+                    return "⚠ Nenhum veículo ativo localizado para alterar o rendimento."
+
+                veiculo_id = str(row["id"])
+                raw = row["estoque_financeiro"]
+                estoque: dict = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+
+                from services.turno_service import TurnoService
+                estoque = TurnoService._garantir_estrutura_estoque(estoque)
+
+                valor_float = float(
+                    valor_final.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                )
+                estoque[subdict][coluna] = valor_float
+
+                await conn.execute(
+                    "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
+                    _json.dumps(estoque), veiculo_id,
+                )
+
+            await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
+            await ParametrosService._registrar_auditoria(
+                tenant_id, motorista_id, param_nome,
+                f"estoque.{subdict}.{coluna}", valor_final
+            )
+
+            logger.info(
+                f"[ParametrosService] Rendimento atualizado: motorista={motorista_id} "
+                f"subdict={subdict} coluna={coluna} valor={valor_final}"
+            )
+
+            # Formata sem "R$" — unidade é km/L, km/kWh, km/m³
+            valor_fmt = f"{valor_float:.2f}".replace(".", ",")
+            unidade_map = {
+                "km_l_gasolina": "km/L",
+                "km_l_etanol":   "km/L",
+                "km_kwh":        "km/kWh",
+                "km_m3":         "km/m³",
+            }
+            unidade = unidade_map.get(coluna, "")
+            return (
+                f"✅  *{label}*  atualizado com sucesso!\n"
+                f"Novo valor:  *{valor_fmt} {unidade}*\n\n"
+                f"_{_TABELA_LABEL['jsonb_estoque:' + subdict]} recalibrado. "
+                f"O próximo DRE já usará o novo rendimento._"
+            )
+
+        except Exception as exc:
+            logger.error(
+                f"[ParametrosService] Erro ao alterar rendimento (motorista={motorista_id} "
+                f"coluna={coluna}): {exc}"
+            )
+            return "❌ Erro interno ao salvar o rendimento. Verifique o valor e tente novamente."

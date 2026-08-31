@@ -701,6 +701,10 @@ class TurnoService:
         """
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                # Limita a espera pelo lock a 5 s. Se outro worker estiver a processar
+                # uma pausa simultânea, evita que a conexão fique suspensa indefinidamente
+                # e esgote o pool (max_size=30) em cargas de múltiplos motoristas.
+                await conn.execute("SET LOCAL lock_timeout = '5s';")
                 turno = await conn.fetchrow(
                     """SELECT id, status, km_inicial FROM public.turnos
                        WHERE motorista_id = $1::uuid AND status IN ('em_andamento', 'ABERTO')
@@ -748,6 +752,7 @@ class TurnoService:
         """
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                await conn.execute("SET LOCAL lock_timeout = '5s';")
                 turno = await conn.fetchrow(
                     """SELECT id, status, km_inicial FROM public.turnos
                        WHERE motorista_id = $1::uuid AND status = 'em_pausa'

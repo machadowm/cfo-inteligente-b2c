@@ -23,7 +23,7 @@ class ORJSONResponse(Response):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Initializing CFO Inteligente B2C Backend stack (Peak Performance Ingestion Gateway)...")
+    logger.info("Initializing Parceiro do Painel Backend stack (Peak Performance Ingestion Gateway)...")
     await DatabaseService.initialize_pool()
     reminder_task = asyncio.create_task(loop_lembretes())
     yield
@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
         logger.error(f"Falha ao fechar conexão com Redis: {e}")
 
 app = FastAPI(
-    title="CFO Inteligente B2C API",
+    title="Parceiro do Painel API",
     description="SaaS financeiro e ERP logístico conversacional de fricção zero via WhatsApp - Ingestão de Alta Performance",
     version="5.0.0",
     default_response_class=ORJSONResponse,

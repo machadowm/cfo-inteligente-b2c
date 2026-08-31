@@ -421,7 +421,7 @@ class OrchestratorService:
                 await RedisFSMService.definir_estado(fsm_key, "AGUARDANDO_NOME")
                 await enviar_whatsapp(
                     remote_jid,
-                    "Ei, tudo bem? 👋 Seja bem-vindo ao  *CFO Inteligente* !\n\n"
+                    "Ei, tudo bem? 👋 Seja bem-vindo ao  *Parceiro do Painel* ! 🚗\n\n"
                     "Aqui você controla seus ganhos, gastos e lucro real direto pelo WhatsApp — sem planilha, sem complicação.\n\n"
                     "Vamos criar seu perfil rapidinho! Como você se chama?"
                 )
@@ -703,18 +703,39 @@ class OrchestratorService:
                 return
             # Prefixo '!' sem padrão reconhecido → cai no fluxo normal com ajuda contextual
 
-        # AJUDA GLOBAL (Stateless)
+        # AJUDA CONTEXTUAL (FSM-aware)
+        # Tópicos explícitos ("ajuda metas", "ajuda contrato"...) → ajuda estática por tópico.
+        # "ajuda" sem tópico → ajuda contextual baseada no estado atual da FSM.
         palavras_ajuda = ["ajuda", "help", "socorro", "como", "explicar"]
         if any(w in texto_limpo for w in palavras_ajuda):
             partes = texto_limpo.split()
-            topico = "geral"
+            topico_explicito = None
             for i, palavra in enumerate(partes):
                 if palavra in palavras_ajuda and i + 1 < len(partes):
-                    topico_potencial = partes[i+1]
-                    if topico_potencial in ["metas", "contrato", "lancamentos", "turno", "parametros", "perfil"]:
-                        topico = topico_potencial
+                    pot = partes[i + 1]
+                    if pot in ["metas", "contrato", "lancamentos", "turno", "parametros", "perfil", "geral"]:
+                        topico_explicito = pot
                         break
-            resposta_ajuda = HelpService.obter_ajuda(topico)
+            if topico_explicito:
+                # Tópico específico solicitado → resposta estática detalhada
+                resposta_ajuda = HelpService.obter_ajuda(topico_explicito)
+            else:
+                # Sem tópico → lê o estado FSM atual e entrega ajuda relevante ao momento
+                estado_para_ajuda = await RedisFSMService.obter_estado(fsm_turno_key)
+                # Resolve o status real do turno no DB quando a FSM Redis está vazia
+                # (turno em_andamento não grava estado na FSM — a FSM só existe para fluxos guiados)
+                if not estado_para_ajuda:
+                    async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                        turno_db = await conn.fetchrow(
+                            "SELECT status FROM public.turnos WHERE motorista_id = $1::uuid "
+                            "AND status IN ('ABERTO', 'em_andamento', 'em_pausa') "
+                            "ORDER BY data_inicio DESC LIMIT 1;",
+                            motorista_id,
+                        )
+                    estado_para_ajuda = turno_db["status"] if turno_db else None
+                fsm_onboard_key = f"onboard:{tenant_id}"
+                estado_onboard = await RedisFSMService.obter_estado(fsm_onboard_key)
+                resposta_ajuda = HelpService.obter_ajuda_contextual(estado_para_ajuda, estado_onboard)
             await enviar_whatsapp(remote_jid, resposta_ajuda)
             return
 
@@ -1542,15 +1563,20 @@ class OrchestratorService:
             return
 
         # =========================================================================
-        # 6. CATCH-ALL (Ajuda Contextual)
+        # 6. CATCH-ALL (Ajuda Contextual FSM-aware)
         # =========================================================================
-        resposta_ajuda = (
-            "Hmm, não entendi bem. 😅 Aqui vai um lembrete rápido:\n\n"
-            "🟢  *iniciar 45230*  → abre o turno\n"
-            "🏁  *fechar 45800*  → fecha e gera o DRE\n"
-            "⏸  *pausar*  /  ▶  *retomar* \n"
-            "📊  *status*  → resumo do dia\n"
-            "💰  *ganhei 120*  ou  *gastei 40 almoço* \n\n"
-            "O que você precisa?"
-        )
-        await enviar_whatsapp(remote_jid, resposta_ajuda)
+        # Reutiliza o mesmo método do bloco de ajuda explícita.
+        # O estado_turno já foi lido acima (linha ~740); só precisamos
+        # resolver o status do DB quando a FSM Redis está vazia.
+        estado_catch = estado_turno
+        if not estado_catch:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                turno_catch_row = await conn.fetchrow(
+                    "SELECT status FROM public.turnos WHERE motorista_id = $1::uuid "
+                    "AND status IN ('ABERTO', 'em_andamento', 'em_pausa') "
+                    "ORDER BY data_inicio DESC LIMIT 1;",
+                    motorista_id,
+                )
+            estado_catch = turno_catch_row["status"] if turno_catch_row else None
+        resposta_catch = "Hmm, não entendi bem. 😅\n\n" + HelpService.obter_ajuda_contextual(estado_catch)
+        await enviar_whatsapp(remote_jid, resposta_catch)

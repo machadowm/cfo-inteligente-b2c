@@ -230,7 +230,7 @@ class ProfileService:
 
             # ── Montagem final da mensagem ─────────────────────────────────────
             return (
-                f"👤  *RAIO-X DO MOTORISTA: {nome_exibicao.upper()}*  🛡\n"
+                f"👤  *PARCEIRO DO PAINEL — {nome_exibicao.upper()}*  🛡\n"
                 f"──────────────────────────────\n\n"
                 f"🚗  *VEÍCULO ATIVO* \n"
                 f"• Modelo:  *{v['modelo']}*  ({v['placa']})\n"

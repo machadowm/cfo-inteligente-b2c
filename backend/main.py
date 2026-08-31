@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 import orjson
@@ -9,6 +10,7 @@ from schemas import WebhookPayload
 from services.database_service import DatabaseService
 from services.redis_fsm import RedisFSMService
 from services.orchestrator_service import OrchestratorService
+from services.reminder_service import loop_lembretes
 
 # Logs de Observabilidade
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,7 +25,13 @@ class ORJSONResponse(Response):
 async def lifespan(app: FastAPI):
     logger.info("Initializing CFO Inteligente B2C Backend stack (Peak Performance Ingestion Gateway)...")
     await DatabaseService.initialize_pool()
+    reminder_task = asyncio.create_task(loop_lembretes())
     yield
+    reminder_task.cancel()
+    try:
+        await reminder_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Draining connections graciosamente...")
     await DatabaseService.close_pool()
     try:

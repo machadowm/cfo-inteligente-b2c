@@ -14,6 +14,7 @@ from services.turno_service import TurnoService
 from services.help_service import HelpService
 from services.parametros_service import ParametrosService
 from services.profile_service import ProfileService
+from services.reminder_service import registrar_interacao
 
 # Configuração de Logger
 logger = logging.getLogger(__name__)
@@ -277,6 +278,9 @@ class OrchestratorService:
         texto_bruto = " ".join(mensagens_buffer) if mensagens_buffer else texto_bruto
 
         texto_limpo = normalizar_texto(texto_bruto)
+
+        # Registra atividade do motorista — suprime lembretes por _BYPASS_INTERACAO_MIN minutos
+        await registrar_interacao(tenant_id)
 
         # 1. Bypass de Cache de Perfil no Redis para Velocidade Absoluta
         motorista = await RedisFSMService.obter_perfil_cache(tenant_id)

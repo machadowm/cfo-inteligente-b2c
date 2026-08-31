@@ -169,16 +169,30 @@ async def loop_lembretes() -> None:
     """
     Loop infinito de varredura. Deve ser iniciado como asyncio.Task no lifespan do FastAPI.
     Cada ciclo dorme _INTERVALO_LOOP_S segundos entre varreduras.
+
+    O sleep fica no FINAL do ciclo para que a primeira varredura ocorra imediatamente
+    na inicialização do container, sem esperar 5 minutos em branco.
+
+    CancelledError não é capturado pelo except Exception (herda de BaseException),
+    por isso o relançamento explícito serve apenas para documentar a intenção e
+    garantir log de shutdown limpo.
     """
     logger.info(f"[ReminderService] Loop iniciado (intervalo={_INTERVALO_LOOP_S}s).")
     while True:
-        await asyncio.sleep(_INTERVALO_LOOP_S)
         try:
             await _processar_pausas_prolongadas()
             await _processar_turnos_zumbi()
+        except asyncio.CancelledError:
+            logger.info("[ReminderService] Loop encerrado graciosamente.")
+            raise
         except Exception as e:
-            # Nunca deixa o loop morrer por erro pontual
+            # Nunca deixa o loop morrer por erro pontual de um ciclo
             logger.error(f"[ReminderService] Erro no ciclo de lembretes: {e}")
+        try:
+            await asyncio.sleep(_INTERVALO_LOOP_S)
+        except asyncio.CancelledError:
+            logger.info("[ReminderService] Loop encerrado graciosamente (durante sleep).")
+            raise
 
 
 async def registrar_interacao(tenant_id: str) -> None:

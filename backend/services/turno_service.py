@@ -659,45 +659,82 @@ class TurnoService:
                     caixa_id_row = df_row["caixa_id"]
 
                     if caixa_id_row:
-                        # Caixa vinculada por UUID — aporte direto e preciso
-                        await conn.execute(
-                            """
-                            UPDATE public.caixas_provisao
-                            SET saldo_atual = saldo_atual + $1
-                            WHERE id = $2::uuid AND motorista_id = $3::uuid;
-                            """,
-                            pro_rata, str(caixa_id_row), motorista_id,
+                        # Caixa vinculada por UUID — aporte respeitando teto (meta_valor)
+                        cx = await conn.fetchrow(
+                            "SELECT nome_caixa, saldo_atual, meta_valor "
+                            "FROM public.caixas_provisao WHERE id = $1::uuid AND motorista_id = $2::uuid;",
+                            str(caixa_id_row), motorista_id,
                         )
-                        # Busca nome da caixa para o relatório
-                        nome_caixa_row = await conn.fetchval(
-                            "SELECT nome_caixa FROM public.caixas_provisao WHERE id = $1::uuid;",
-                            str(caixa_id_row),
-                        )
-                        aportes_caixas.append({
-                            "caixa": nome_caixa_row or str(caixa_id_row),
-                            "aporte": float(pro_rata),
-                            "origem": df_row["nome"],
-                        })
+                        if cx:
+                            saldo_cx   = Decimal(str(cx["saldo_atual"] or "0"))
+                            meta_cx    = Decimal(str(cx["meta_valor"])) if cx["meta_valor"] is not None else None
+                            # Calcula quanto pode depositar: limitado pelo que falta para a meta
+                            if meta_cx is not None and saldo_cx >= meta_cx:
+                                aporte_real = Decimal("0.00")  # caixa já cheia — pula
+                            elif meta_cx is not None:
+                                aporte_real = min(pro_rata, meta_cx - saldo_cx)
+                            else:
+                                aporte_real = pro_rata  # sem teto — deposita tudo
+
+                            if aporte_real > 0:
+                                await conn.execute(
+                                    "UPDATE public.caixas_provisao "
+                                    "SET saldo_atual = saldo_atual + $1 "
+                                    "WHERE id = $2::uuid AND motorista_id = $3::uuid;",
+                                    aporte_real, str(caixa_id_row), motorista_id,
+                                )
+                                meta_atingida = meta_cx is not None and (saldo_cx + aporte_real) >= meta_cx
+                                aportes_caixas.append({
+                                    "caixa": cx["nome_caixa"],
+                                    "aporte": float(aporte_real),
+                                    "meta": float(meta_cx) if meta_cx else None,
+                                    "saldo_novo": float(saldo_cx + aporte_real),
+                                    "meta_atingida": meta_atingida,
+                                    "origem": df_row["nome"],
+                                })
+                            else:
+                                # Caixa cheia — registra no DRE mas sem novo depósito
+                                aportes_caixas.append({
+                                    "caixa": cx["nome_caixa"],
+                                    "aporte": 0.0,
+                                    "meta": float(meta_cx) if meta_cx else None,
+                                    "saldo_novo": float(saldo_cx),
+                                    "meta_atingida": True,
+                                    "origem": df_row["nome"],
+                                })
                     else:
                         # Despesa sem caixa vinculada: tenta match pelo nome da despesa
                         # (fallback legado para despesas criadas antes da migração v9)
-                        updated = await conn.execute(
-                            """
-                            UPDATE public.caixas_provisao
-                            SET saldo_atual = saldo_atual + $1
-                            WHERE motorista_id = $2::uuid AND lower(nome_caixa) = lower($3);
-                            """,
-                            pro_rata, motorista_id, df_row["nome"],
+                        cx_leg = await conn.fetchrow(
+                            "SELECT id, nome_caixa, saldo_atual, meta_valor "
+                            "FROM public.caixas_provisao "
+                            "WHERE motorista_id = $1::uuid AND lower(nome_caixa) = lower($2);",
+                            motorista_id, df_row["nome"],
                         )
-                        n_updated = int(updated.split()[-1]) if updated else 0
-                        if n_updated > 0:
+                        if cx_leg:
+                            saldo_cx   = Decimal(str(cx_leg["saldo_atual"] or "0"))
+                            meta_cx    = Decimal(str(cx_leg["meta_valor"])) if cx_leg["meta_valor"] is not None else None
+                            if meta_cx is not None and saldo_cx >= meta_cx:
+                                aporte_real = Decimal("0.00")
+                            elif meta_cx is not None:
+                                aporte_real = min(pro_rata, meta_cx - saldo_cx)
+                            else:
+                                aporte_real = pro_rata
+                            if aporte_real > 0:
+                                await conn.execute(
+                                    "UPDATE public.caixas_provisao SET saldo_atual = saldo_atual + $1 "
+                                    "WHERE id = $2::uuid;",
+                                    aporte_real, str(cx_leg["id"]),
+                                )
+                            meta_atingida = meta_cx is not None and (saldo_cx + aporte_real) >= meta_cx
                             aportes_caixas.append({
-                                "caixa": df_row["nome"],
-                                "aporte": float(pro_rata),
+                                "caixa": cx_leg["nome_caixa"],
+                                "aporte": float(aporte_real),
+                                "meta": float(meta_cx) if meta_cx else None,
+                                "saldo_novo": float(saldo_cx + aporte_real),
+                                "meta_atingida": meta_atingida,
                                 "origem": df_row["nome"],
                             })
-                        # Se não existe caixa com esse nome, o valor já foi deduzido no DRE
-                        # mas não há onde depositar — silencia (motorista pode criar a caixa depois)
 
                 # Persiste o snapshot contábil na tabela fechamento_diario
                 # Armazena km_profissional para que médias históricas reflitam apenas serviço real

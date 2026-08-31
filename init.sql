@@ -222,6 +222,7 @@ CREATE TABLE public.caixas_provisao (
     motorista_id uuid NOT NULL,
     nome_caixa character varying(50) NOT NULL,
     saldo_atual numeric(14,4) DEFAULT 0.00,
+    meta_valor numeric(14,4) DEFAULT NULL,  -- teto da caixinha; NULL = sem limite (acumulação livre)
     ultima_atualizacao timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );
 

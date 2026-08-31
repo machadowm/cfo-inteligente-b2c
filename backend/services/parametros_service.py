@@ -307,11 +307,14 @@ class ParametrosService:
                 "     _Ex: !adicionar despesa seguro 180 26_",
                 "  •  *!remover despesa <nome>*        → Desativar despesa pelo nome",
                 "",
-                "📦  *Caixas de Provisão (reserva para despesas futuras):*",
-                "  •  *!caixas*                        → Ver saldos de todas as caixas",
-                "  •  *!criar caixa <nome>*             → Criar caixa avulsa",
-                "  •  *!retirar caixa <nome> <valor>*   → Sacar da caixinha",
-                "     _Ex: !retirar caixa seguro 180_",
+                "📦  *Caixas de Provisão (sinking fund):*",
+                "  •  *!caixas*                              → Saldos + barras de progresso",
+                "  •  *!criar caixa <nome> <meta>*           → Ex: !criar caixa pneu 500",
+                "  •  *!criar caixa <nome>*                  → Sem meta (acumulação livre)",
+                "  •  *!definir meta caixa <nome> <valor>*   → Altera meta de caixa existente",
+                "  •  *!remover meta caixa <nome>*           → Remove o teto",
+                "  •  *!retirar caixa <nome> <valor>*        → Sacar quando a despesa chegar",
+                "     _Ex: !retirar caixa pneu 480_",
                 "",
                 "_Exemplos:_",
                 "  *!alterar meta mensal 12000*",
@@ -348,19 +351,51 @@ class ParametrosService:
         if re.match(r"^!caixas?\b", texto, re.IGNORECASE):
             return await ParametrosService._listar_caixas(motorista_id)
 
-        match_criar = re.match(r"^!criar\s+caixa\s+(.+)$", texto, re.IGNORECASE)
+        # !criar caixa <nome> [meta]   — meta é opcional
+        match_criar = re.match(
+            r"^!criar\s+caixa\s+(.+?)\s+(R\$\s*[\d.,]+|[\d.,]+)\s*$",
+            texto, re.IGNORECASE,
+        )
         if match_criar:
             nome_cx = match_criar.group(1).strip()[:60]
-            return await ParametrosService._criar_caixa(motorista_id, tenant_id, nome_cx)
+            try:
+                meta_cx = Decimal(ParametrosService._limpar_valor_bruto(match_criar.group(2)))
+            except Exception:
+                return "⚠ Valor de meta inválido. Ex:  *!criar caixa pneu 500*"
+            return await ParametrosService._criar_caixa(motorista_id, tenant_id, nome_cx, meta_cx)
+
+        match_criar_sem_meta = re.match(r"^!criar\s+caixa\s+(\S.*)$", texto, re.IGNORECASE)
+        if match_criar_sem_meta:
+            nome_cx = match_criar_sem_meta.group(1).strip()[:60]
+            # só aceita se não termina em número (caso contrário o regex acima teria casado)
+            return await ParametrosService._criar_caixa(motorista_id, tenant_id, nome_cx, None)
+
+        # !definir meta caixa <nome> <valor>   (ou !remover meta caixa <nome> para zerar)
+        match_def_meta = re.match(
+            r"^!definir\s+meta\s+caixa\s+(.+?)\s+(R\$\s*[\d.,]+|[\d.,]+)\s*$",
+            texto, re.IGNORECASE,
+        )
+        if match_def_meta:
+            nome_cx = match_def_meta.group(1).strip()[:60]
+            try:
+                meta_cx = Decimal(ParametrosService._limpar_valor_bruto(match_def_meta.group(2)))
+            except Exception:
+                return "⚠ Valor inválido. Ex:  *!definir meta caixa pneu 500*"
+            return await ParametrosService._definir_meta_caixa(motorista_id, tenant_id, nome_cx, meta_cx)
+
+        match_rem_meta = re.match(r"^!remover\s+meta\s+caixa\s+(.+)$", texto, re.IGNORECASE)
+        if match_rem_meta:
+            nome_cx = match_rem_meta.group(1).strip()[:60]
+            return await ParametrosService._definir_meta_caixa(motorista_id, tenant_id, nome_cx, None)
 
         match_retirar = re.match(
-            r"^!retirar\s+caixa\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)$",
+            r"^!retirar\s+caixa\s+(.+?)\s+(R\$\s*[\d.,]+|[\d.,]+)\s*$",
             texto, re.IGNORECASE,
         )
         if match_retirar:
             nome_cx = match_retirar.group(1).strip()[:60]
             try:
-                valor_cx = Decimal(match_retirar.group(2).replace(",", "."))
+                valor_cx = Decimal(ParametrosService._limpar_valor_bruto(match_retirar.group(2)))
             except Exception:
                 return "⚠ Valor inválido. Ex:  *!retirar caixa seguro 180*"
             return await ParametrosService._retirar_caixa(motorista_id, tenant_id, nome_cx, valor_cx)
@@ -692,20 +727,27 @@ class ParametrosService:
             return "❌ Erro ao salvar a despesa fixa. Verifique os dados e tente novamente."
 
     @staticmethod
+    def _barra_progresso_caixa(saldo: float, meta: float) -> str:
+        """Barra ASCII de 10 blocos proporcional ao progresso saldo/meta."""
+        pct = min(1.0, saldo / meta) if meta > 0 else 0.0
+        cheios = int(pct * 10)
+        return "█" * cheios + "░" * (10 - cheios)
+
+    @staticmethod
     async def _listar_caixas(motorista_id: str) -> str:
-        """Lista todas as caixas de provisão ativas com seus saldos atuais."""
+        """Lista caixas de provisão com barra de progresso e projeção de conclusão."""
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 rows = await conn.fetch(
                     """
-                    SELECT cp.nome_caixa, cp.saldo_atual,
+                    SELECT cp.id, cp.nome_caixa, cp.saldo_atual, cp.meta_valor,
                            COALESCE(SUM(dfm.valor_pro_rata_diario), 0) AS aporte_diario
                     FROM public.caixas_provisao cp
                     LEFT JOIN public.despesas_fixas_mensais dfm
                         ON dfm.caixa_id = cp.id AND dfm.ativo = TRUE
                     WHERE cp.motorista_id = $1::uuid
-                    GROUP BY cp.id, cp.nome_caixa, cp.saldo_atual
-                    ORDER BY cp.saldo_atual DESC;
+                    GROUP BY cp.id, cp.nome_caixa, cp.saldo_atual, cp.meta_valor
+                    ORDER BY cp.nome_caixa;
                     """,
                     motorista_id,
                 )
@@ -713,21 +755,45 @@ class ParametrosService:
                 return (
                     "📦  *Nenhuma caixa de provisão cadastrada ainda.*\n\n"
                     "As caixas são criadas automaticamente quando você adiciona uma despesa fixa.\n"
-                    "Ou crie manualmente com:\n"
-                    "  *!criar caixa <nome>*"
+                    "Ou crie manualmente:\n"
+                    "  *!criar caixa pneu 500*   _(cria com meta de R$ 500)_\n"
+                    "  *!criar caixa viagem*       _(cria sem meta — acumulação livre)_"
                 )
             linhas = ["📦  *Caixas de Provisão:*\n"]
             total_saldo = 0.0
             for r in rows:
-                saldo = float(r["saldo_atual"])
-                total_saldo += saldo
+                saldo  = float(r["saldo_atual"])
+                meta   = float(r["meta_valor"]) if r["meta_valor"] is not None else None
                 aporte = float(r["aporte_diario"])
-                aporte_str = f"  _(+R$ {aporte:.2f}/dia)_" if aporte > 0 else ""
-                linhas.append(f"• {r['nome_caixa']}:  *R$ {saldo:.2f}*{aporte_str}")
-            linhas.append(f"\n*Total em reserva: R$ {total_saldo:.2f}*")
+                total_saldo += saldo
+
+                if meta is not None:
+                    pct = min(100.0, saldo / meta * 100)
+                    barra = ParametrosService._barra_progresso_caixa(saldo, meta)
+                    if saldo >= meta:
+                        status = f"✅ Meta atingida!  *R$ {saldo:.2f} / R$ {meta:.2f}*"
+                        projecao_str = ""
+                    else:
+                        falta = meta - saldo
+                        dias_para_meta = f"{falta / aporte:.0f} turnos" if aporte > 0 else "—"
+                        status = f"*R$ {saldo:.2f} / R$ {meta:.2f}*  ({pct:.0f}%)"
+                        projecao_str = (
+                            f"\n  _Faltam R$ {falta:.2f}  ·  aprox. {dias_para_meta} para completar_"
+                            if aporte > 0 else ""
+                        )
+                    linhas.append(
+                        f"• {r['nome_caixa']}:  {status}\n"
+                        f"  [{barra}]{projecao_str}"
+                    )
+                else:
+                    # Sem meta — exibe saldo + aporte simples
+                    aporte_str = f"  _(+R$ {aporte:.2f}/turno)_" if aporte > 0 else ""
+                    linhas.append(f"• {r['nome_caixa']}:  *R$ {saldo:.2f}*{aporte_str}  _(sem meta definida)_")
+
+            linhas.append(f"\n*Total reservado: R$ {total_saldo:.2f}*")
             linhas.append(
-                "\n_Para retirar:  *!retirar caixa <nome> <valor>*_\n"
-                "_Para criar nova:  *!criar caixa <nome>*_"
+                "\n_!retirar caixa <nome> <valor>_   _!definir meta caixa <nome> <valor>_\n"
+                "_!criar caixa <nome> <meta>_"
             )
             return "\n".join(linhas)
         except Exception as exc:
@@ -735,35 +801,43 @@ class ParametrosService:
             return "❌ Erro ao buscar caixas de provisão. Tente novamente em instantes."
 
     @staticmethod
-    async def _criar_caixa(motorista_id: str, tenant_id: str, nome: str) -> str:
-        """Cria uma caixa de provisão avulsa (sem despesa fixa vinculada)."""
+    async def _criar_caixa(motorista_id: str, tenant_id: str, nome: str, meta: Optional[Decimal] = None) -> str:
+        """Cria uma caixa de provisão. Se meta for informada, aportes param ao atingir o teto."""
         nome = nome.strip()[:60]
         if not nome:
-            return "⚠ Informe um nome para a caixa. Ex:  *!criar caixa viagem*"
+            return "⚠ Informe um nome. Ex:  *!criar caixa pneu 500*"
+        if meta is not None and meta <= 0:
+            return "⚠ A meta deve ser maior que zero."
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
-                existing = await conn.fetchval(
-                    "SELECT id FROM public.caixas_provisao WHERE motorista_id = $1::uuid AND lower(nome_caixa) = lower($2);",
+                existing = await conn.fetchrow(
+                    "SELECT id, saldo_atual, meta_valor FROM public.caixas_provisao "
+                    "WHERE motorista_id = $1::uuid AND lower(nome_caixa) = lower($2);",
                     motorista_id, nome,
                 )
                 if existing:
-                    saldo = await conn.fetchval(
-                        "SELECT saldo_atual FROM public.caixas_provisao WHERE id = $1::uuid;",
-                        str(existing),
-                    )
+                    saldo = float(existing["saldo_atual"])
+                    meta_atual = float(existing["meta_valor"]) if existing["meta_valor"] else None
+                    meta_str = f"R$ {meta_atual:.2f}" if meta_atual else "sem meta"
                     return (
-                        f"ℹ️  A caixa  *{nome}*  já existe com saldo de  *R$ {float(saldo):.2f}* .\n"
-                        f"_Os aportes ocorrem automaticamente a cada fechamento de turno._\n"
-                        f"_Para sacar, use  *!retirar caixa {nome} <valor>*_"
+                        f"ℹ️  A caixa  *{nome}*  já existe.\n"
+                        f"• Saldo:  *R$ {saldo:.2f}*  · Meta:  *{meta_str}*\n\n"
+                        f"_Para alterar a meta:  *!definir meta caixa {nome} <valor>*_\n"
+                        f"_Para sacar:  *!retirar caixa {nome} <valor>*_"
                     )
                 await conn.execute(
-                    "INSERT INTO public.caixas_provisao (motorista_id, nome_caixa, saldo_atual) VALUES ($1::uuid, $2, 0.00);",
-                    motorista_id, nome,
+                    "INSERT INTO public.caixas_provisao (motorista_id, nome_caixa, saldo_atual, meta_valor) "
+                    "VALUES ($1::uuid, $2, 0.00, $3);",
+                    motorista_id, nome, meta,
                 )
-            await ParametrosService._registrar_auditoria(tenant_id, motorista_id, f"criar_caixa_{nome}", "saldo_atual", 0)
+            await ParametrosService._registrar_auditoria(
+                tenant_id, motorista_id, f"criar_caixa_{nome}", "meta_valor", meta
+            )
+            meta_txt = f"Meta:  *R$ {float(meta):.2f}*  — aportes param ao atingir." if meta else "Sem meta — acumulação livre."
             return (
-                f"✅  *Caixa  *{nome}*  criada com saldo R$ 0,00!*\n\n"
-                f"_Para vincular a uma despesa fixa, use:_\n"
+                f"✅  *Caixa  *{nome}*  criada!*\n"
+                f"• {meta_txt}\n\n"
+                f"_Para vincular a uma despesa fixa:_\n"
                 f"  *!adicionar despesa {nome} <R$/mês> <dias>*"
             )
         except Exception as exc:
@@ -771,14 +845,53 @@ class ParametrosService:
             return "❌ Erro ao criar a caixa. Tente novamente."
 
     @staticmethod
+    async def _definir_meta_caixa(motorista_id: str, tenant_id: str, nome: str, meta: Optional[Decimal]) -> str:
+        """Define ou remove a meta (teto) de uma caixa existente."""
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                row = await conn.fetchrow(
+                    "SELECT id, saldo_atual FROM public.caixas_provisao "
+                    "WHERE motorista_id = $1::uuid AND lower(nome_caixa) = lower($2);",
+                    motorista_id, nome,
+                )
+                if not row:
+                    return (
+                        f"⚠ Caixa  *{nome}*  não encontrada.\n"
+                        f"Envie  *!caixas*  para ver a lista."
+                    )
+                await conn.execute(
+                    "UPDATE public.caixas_provisao SET meta_valor = $1 WHERE id = $2::uuid;",
+                    meta, str(row["id"]),
+                )
+            await ParametrosService._registrar_auditoria(
+                tenant_id, motorista_id, f"meta_caixa_{nome}", "meta_valor", meta
+            )
+            saldo = float(row["saldo_atual"])
+            if meta is None:
+                return (
+                    f"✅  Meta da caixa  *{nome}*  removida.\n"
+                    f"_Agora acumula livremente sem teto._"
+                )
+            falta = max(0.0, float(meta) - saldo)
+            return (
+                f"✅  Meta da caixa  *{nome}*  definida em  *R$ {float(meta):.2f}* !\n"
+                f"• Saldo atual:  *R$ {saldo:.2f}*\n"
+                f"• Falta:  *R$ {falta:.2f}*\n\n"
+                f"_Os aportes automáticos param quando o saldo atingir a meta._"
+            )
+        except Exception as exc:
+            logger.error(f"[ParametrosService] Erro ao definir meta caixa (motorista={motorista_id}): {exc}")
+            return "❌ Erro ao definir meta. Tente novamente."
+
+    @staticmethod
     async def _retirar_caixa(motorista_id: str, tenant_id: str, nome: str, valor: Decimal) -> str:
-        """Registra uma retirada (saque real) de uma caixa de provisão."""
+        """Registra uma retirada (saque real) de uma caixa de provisão. Zera meta ao sacar tudo."""
         if valor <= 0:
             return "⚠ O valor da retirada deve ser maior que zero."
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 row = await conn.fetchrow(
-                    "SELECT id, saldo_atual FROM public.caixas_provisao "
+                    "SELECT id, saldo_atual, meta_valor FROM public.caixas_provisao "
                     "WHERE motorista_id = $1::uuid AND lower(nome_caixa) = lower($2);",
                     motorista_id, nome,
                 )
@@ -803,12 +916,16 @@ class ParametrosService:
             await ParametrosService._registrar_auditoria(
                 tenant_id, motorista_id, f"retirada_caixa_{nome}", "saldo_atual", -valor
             )
+            meta = float(row["meta_valor"]) if row["meta_valor"] else None
+            meta_str = ""
+            if meta and float(novo_saldo) < meta:
+                meta_str = f"\n_A caixinha voltará a acumular nos próximos fechamentos._"
             return (
                 f"✅  *Retirada registrada!*\n"
                 f"• Caixa:  *{nome}*\n"
                 f"• Valor retirado:  *R$ {float(valor):.2f}*\n"
                 f"• Novo saldo:  *R$ {float(novo_saldo):.2f}*\n\n"
-                f"_Use este dinheiro para pagar a despesa real quando chegar o vencimento._"
+                f"_Use este dinheiro para pagar a despesa real quando chegar o vencimento._{meta_str}"
             )
         except Exception as exc:
             logger.error(f"[ParametrosService] Erro ao retirar da caixa (motorista={motorista_id}): {exc}")

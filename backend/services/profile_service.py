@@ -135,14 +135,14 @@ class ProfileService:
                 # ── 7. Caixas de provisão ─────────────────────────────────────
                 caixas = await conn.fetch(
                     """
-                    SELECT cp.nome_caixa, cp.saldo_atual,
+                    SELECT cp.nome_caixa, cp.saldo_atual, cp.meta_valor,
                            COALESCE(SUM(dfm.valor_pro_rata_diario), 0) AS aporte_diario
                     FROM public.caixas_provisao cp
                     LEFT JOIN public.despesas_fixas_mensais dfm
                         ON dfm.caixa_id = cp.id AND dfm.ativo = TRUE
                     WHERE cp.motorista_id = $1::uuid
-                    GROUP BY cp.id, cp.nome_caixa, cp.saldo_atual
-                    ORDER BY cp.saldo_atual DESC;
+                    GROUP BY cp.id, cp.nome_caixa, cp.saldo_atual, cp.meta_valor
+                    ORDER BY cp.nome_caixa;
                     """,
                     motorista_id,
                 )
@@ -293,15 +293,32 @@ class ProfileService:
                 total_saldo = sum(float(r["saldo_atual"]) for r in caixas)
                 linhas_cx = []
                 for r in caixas:
-                    aporte = float(r["aporte_diario"])
-                    aporte_str = f"  _(+R$ {aporte:.2f}/turno)_" if aporte > 0 else ""
-                    linhas_cx.append(
-                        f"• {r['nome_caixa']}:  *R$ {float(r['saldo_atual']):.2f}*{aporte_str}"
-                    )
-                linhas_cx.append(f"• *Total reservado: R$ {total_saldo:.2f}*")
+                    saldo_cx = float(r["saldo_atual"])
+                    meta_cx  = float(r["meta_valor"]) if r["meta_valor"] is not None else None
+                    aporte   = float(r["aporte_diario"])
+                    if meta_cx is not None:
+                        pct = min(100.0, saldo_cx / meta_cx * 100)
+                        cheios = min(10, int(pct / 10))
+                        barra = "█" * cheios + "░" * (10 - cheios)
+                        if saldo_cx >= meta_cx:
+                            linhas_cx.append(
+                                f"• {r['nome_caixa']}:  ✅  *R$ {saldo_cx:.2f} / R$ {meta_cx:.2f}*  — Meta atingida!\n"
+                                f"  [{barra}]"
+                            )
+                        else:
+                            falta = meta_cx - saldo_cx
+                            dias_str = f"  ·  ~{falta / aporte:.0f} turnos para completar" if aporte > 0 else ""
+                            linhas_cx.append(
+                                f"• {r['nome_caixa']}:  *R$ {saldo_cx:.2f} / R$ {meta_cx:.2f}*  ({pct:.0f}%)\n"
+                                f"  [{barra}]  _Faltam R$ {falta:.2f}{dias_str}_"
+                            )
+                    else:
+                        aporte_str = f"  _(+R$ {aporte:.2f}/turno)_" if aporte > 0 else ""
+                        linhas_cx.append(f"• {r['nome_caixa']}:  *R$ {saldo_cx:.2f}*{aporte_str}")
+                linhas_cx.append(f"\n*Total reservado: R$ {total_saldo:.2f}*")
                 caixas_str = "\n".join(linhas_cx)
             else:
-                caixas_str = "• Nenhuma caixa de provisão criada ainda.\n_Elas são criadas automaticamente ao cadastrar uma despesa fixa._"
+                caixas_str = "• Nenhuma caixa criada ainda.\n_Use  *!criar caixa pneu 500*  para criar com meta._"
 
             # ── Seção histórico ────────────────────────────────────────────────
             if qtd_turnos > 0:

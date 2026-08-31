@@ -320,13 +320,26 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     if aportes_caixas:
         linhas_aportes = ""
         for ap in aportes_caixas:
-            linhas_aportes += f" -  *{ap['caixa']}* :  +R$ {ap['aporte']:.2f}\n"
+            if ap.get("meta_atingida") and ap["aporte"] == 0.0:
+                linhas_aportes += f" -  *{ap['caixa']}* :  ✅ Meta atingida! (R$ {ap['saldo_novo']:.2f})\n"
+            elif ap.get("meta_atingida"):
+                linhas_aportes += (
+                    f" -  *{ap['caixa']}* :  +R$ {ap['aporte']:.2f}  ✅ Meta atingida!\n"
+                )
+            elif ap.get("meta") is not None:
+                pct = min(100.0, ap["saldo_novo"] / ap["meta"] * 100)
+                linhas_aportes += (
+                    f" -  *{ap['caixa']}* :  +R$ {ap['aporte']:.2f}  "
+                    f"_(R$ {ap['saldo_novo']:.2f} / R$ {ap['meta']:.2f}  {pct:.0f}%)_\n"
+                )
+            else:
+                linhas_aportes += f" -  *{ap['caixa']}* :  +R$ {ap['aporte']:.2f}\n"
         secao_caixas = (
             f"📦  *5. CAIXAS DE PROVISÃO* \n"
-            f"• Aportes automáticos deste turno:\n"
+            f"• Aportes deste turno:\n"
             + linhas_aportes
             + f"• Total provisionado hoje:  *R$ {provisao_descontada:.2f}*\n"
-            f"_(Envie  *!caixas*  para ver os saldos acumulados)_\n\n"
+            f"_(Envie  *!caixas*  para ver saldos e progresso completo)_\n\n"
         )
 
     # ── Rodapé de configuração de contrato ────────────────────────────────────

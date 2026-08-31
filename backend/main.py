@@ -1,6 +1,7 @@
 import asyncio
 import os
 import logging
+import unicodedata
 import orjson
 from fastapi import FastAPI, Request, BackgroundTasks, Response
 from typing import Any
@@ -73,6 +74,13 @@ async def process_webhook_background(payload: WebhookPayload, background_tasks: 
             (message.extended_text_message.get("text") if message.extended_text_message else None) or
             (message.image_message.get("caption") if message.image_message else None) or
             ""
+        ).strip()
+        # Remove invisible unicode characters injected by some WhatsApp clients
+        # (zero-width space U+200B, zero-width no-break space U+FEFF, left-to-right mark U+200E, etc.)
+        # str.strip() does not remove these, causing startswith("!") checks to silently fail.
+        texto_bruto = "".join(
+            c for c in texto_bruto
+            if unicodedata.category(c) not in ("Cf", "Cc") or c in ("\n", "\r", "\t")
         ).strip()
 
         if not texto_bruto or tenant_id == "unknown":

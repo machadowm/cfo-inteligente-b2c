@@ -209,7 +209,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     horas_trab = res["horas_trabalhadas"] if res["horas_trabalhadas"] > 0 else 1.0
     fat              = res["faturamento_bruto"]
     c_var            = res["custo_variavel"]
-    c_fixo_contrato  = res["custo_fixo_rateado"]          # já inclui aluguel + despesas fixas
+    c_fixo_contrato  = res.get("custo_fixo_contrato", res["custo_fixo_rateado"])  # aluguel + despesas fixas (sem provisão)
     provisao         = res.get("provisao_descontada", 0.0)
     lucro            = res["lucro_liquido_real"]
 
@@ -300,8 +300,9 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     hoje = _date.today()
     # Dias úteis restantes no mês: escala linear sobre dias corridos
     dias_uteis_restantes = max(0, round(dias_uteis * (1 - hoje.day / 30)))
-    # Projeção usa meta_diaria × dias restantes (não fat do dia — que pode ser atípico)
-    projecao_mensal       = fat + (meta_diaria * dias_uteis_restantes)
+    # Projeção usa média histórica de faturamento × dias restantes (não fat de hoje — pode ser atípico)
+    media_fat_dia         = res.get("media_fat_dia", meta_diaria)  # fallback: meta_diaria se sem histórico
+    projecao_mensal       = fat + (media_fat_dia * dias_uteis_restantes)
     deficit_meta          = max(0.0, meta_mensal - fat)
     fat_diario_necessario = deficit_meta / dias_uteis_restantes if dias_uteis_restantes > 0 else 0.0
 

@@ -35,12 +35,14 @@ class RedisFSMService:
         if cls._client is None:
             async with cls._lock:
                 if cls._client is None:
-                    cls._client = redis.from_url(
-                        REDIS_URL, 
+                    pool = redis.ConnectionPool.from_url(
+                        REDIS_URL,
                         decode_responses=True,
                         socket_timeout=5.0,
-                        retry_on_timeout=True
+                        retry_on_timeout=True,
+                        health_check_interval=30,
                     )
+                    cls._client = redis.Redis(connection_pool=pool)
         return cls._client
 
     @classmethod

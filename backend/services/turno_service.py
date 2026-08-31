@@ -363,17 +363,31 @@ class TurnoService:
                     km_final_decimal, hora_fim_real, turno_id
                 )
 
+                # FIX #3 — Fechar com pausa aberta: se houver uma pausa sem fim_pausa,
+                # fecha-a agora com o timestamp de fechamento do turno.
+                # Sem isso: tempo_pausas usa COALESCE(fim_pausa, CURRENT_TIMESTAMP) e cresce
+                # indefinidamente, mas km_pessoal_intra fica 0 — os dois indicadores divergem.
+                await conn.execute(
+                    """
+                    UPDATE public.pausas_turno
+                    SET fim_pausa = $1
+                    WHERE turno_id = $2::uuid AND fim_pausa IS NULL;
+                    """,
+                    hora_fim_real, turno_id
+                )
+
                 dt_inicio = turno["data_inicio"]
                 if dt_inicio.tzinfo is not None:
                     dt_inicio = dt_inicio.astimezone(TZ_BR)
 
                 # Cálculo de tempo operacional e uso pessoal intra-turno
+                # FIX #3 aplicado acima: todas as pausas agora têm fim_pausa definido,
+                # portanto COALESCE(fim_pausa, CURRENT_TIMESTAMP) é idêntico a fim_pausa.
                 tempo_total_min = Decimal(str(int((hora_fim_real - dt_inicio).total_seconds() / 60)))
                 pausas_agg = await conn.fetchrow(
                     """
                     SELECT
-                        COALESCE(SUM(EXTRACT(EPOCH FROM
-                            (COALESCE(fim_pausa, CURRENT_TIMESTAMP) - inicio_pausa))/60), 0)
+                        COALESCE(SUM(EXTRACT(EPOCH FROM (fim_pausa - inicio_pausa))/60), 0)
                             AS tempo_pausas,
                         COALESCE(SUM(
                             CASE WHEN km_fim IS NOT NULL AND km_inicio IS NOT NULL
@@ -400,16 +414,24 @@ class TurnoService:
                 km_profissional = max(Decimal("0.00"), km_rodados - km_pessoal_intra)
 
                 # 2. LÓGICA DE QUEIMA HÍBRIDA MULTI-SOURCE DE ENERGIA (Power Split)
-                # Usa km_profissional como base — km pessoais já foram amortizados no retomar_turno
-                estoque_raw = turno["estoque_financeiro"]
+                # FIX #2 — lê o estoque com FOR UPDATE separado, após o UPDATE do turno,
+                # para capturar abastecimentos feitos entre a abertura e o fechamento do turno
+                # (inclusive durante pausas) sem depender do snapshot do JOIN inicial.
+                veiculo_estoque_row = await conn.fetchrow(
+                    "SELECT estoque_financeiro, tipo_combustivel, is_hibrido, is_eletrico "
+                    "FROM public.veiculos WHERE id = $1::uuid FOR UPDATE;",
+                    veiculo_id
+                )
+                estoque_raw = veiculo_estoque_row["estoque_financeiro"] if veiculo_estoque_row else turno["estoque_financeiro"]
                 estoque = json.loads(estoque_raw) if isinstance(estoque_raw, str) else (estoque_raw or {})
                 estoque = TurnoService._garantir_estrutura_estoque(estoque)
                 meta = estoque["meta"]
 
                 # Flags escalares têm precedência sobre JSONB.meta (banco de produção possui ambos)
-                is_hibrido = bool(turno.get("is_hibrido") if turno.get("is_hibrido") is not None else meta.get("is_hibrido", False))
-                is_eletrico = bool(turno.get("is_eletrico") if turno.get("is_eletrico") is not None else meta.get("is_eletrico", False))
-                tipo_comb = (turno["tipo_combustivel"] or meta.get("tipo_veiculo", "")).lower()
+                _vrow = veiculo_estoque_row or turno
+                is_hibrido = bool(_vrow.get("is_hibrido") if _vrow.get("is_hibrido") is not None else meta.get("is_hibrido", False))
+                is_eletrico = bool(_vrow.get("is_eletrico") if _vrow.get("is_eletrico") is not None else meta.get("is_eletrico", False))
+                tipo_comb = (_vrow["tipo_combustivel"] or meta.get("tipo_veiculo", "")).lower()
 
                 custo_combustivel_queimado = Decimal("0.00")
                 total_unidades_queimadas_liq = Decimal("0.00")
@@ -560,12 +582,17 @@ class TurnoService:
                             f"× R$ {float(preco_litro_real):.3f} = R$ {float(custo_estimado):.2f}"
                         )
                     else:
-                        # Fallback SRE: motorista rodou sem estoque e sem registrar abastecimento
-                        custo_estimado = (km_restante * Decimal("0.48")).quantize(
+                        # FIX #4 — Fallback SRE: sem estoque e sem abastecimento registrado.
+                        # Usa custo por km calibrado por tipo de motorização:
+                        #   Elétrico puro → R$ 0,12/km  (≈ 6 km/kWh × R$ 0,72/kWh médio)
+                        #   Combustão/híbrido → R$ 0,48/km  (≈ 12 km/L × R$ 5,76/L médio)
+                        _custo_km_fb = Decimal("0.12") if is_eletrico else Decimal("0.48")
+                        custo_estimado = (km_restante * _custo_km_fb).quantize(
                             Decimal("0.01"), rounding=ROUND_HALF_UP
                         )
                         custo_combustivel_queimado += custo_estimado
-                        detalhe_queima.append(f"Falta Estoque: R$ {float(custo_estimado):.2f}")
+                        tipo_fb = "elétrico" if is_eletrico else "combustão"
+                        detalhe_queima.append(f"Falta Estoque ({tipo_fb}): R$ {float(custo_estimado):.2f}")
 
                 # Salva o estoque total recalculado
                 await conn.execute(
@@ -613,11 +640,12 @@ class TurnoService:
                     })
 
                 # 4. ENGENHARIA DE CUSTO FIXO CONTRATUAL PRO-RATA (Localiza Zarp fallback)
-                custo_aluguel_semanal = Decimal(str(turno["custo_aluguel_semanal" ] or "1020.85"))
-                custo_fixo_rateado = (custo_aluguel_semanal / Decimal("6.00")).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
+                custo_aluguel_semanal = Decimal(str(turno["custo_aluguel_semanal"] or "1020.85"))
+                # Custo de aluguel/contrato: rateado por 6 dias de escala semanal
+                custo_fixo_contrato = (custo_aluguel_semanal / Decimal("6.00")).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
 
-                # Pro-rata extra de despesas fixas cadastradas pelo motorista
-                # Busca também caixa_id para aporte automático na caixinha vinculada
+                # Pro-rata de despesas fixas cadastradas — provisão diária para cada conta
+                # Busca também caixa_id e dia_vencimento para aporte e DRE
                 despesas_fixas_rows = await conn.fetch(
                     """
                     SELECT nome, valor_pro_rata_diario, caixa_id, dia_vencimento
@@ -627,7 +655,8 @@ class TurnoService:
                     motorista_id
                 )
                 df_extra = sum(Decimal(str(r["valor_pro_rata_diario"])) for r in despesas_fixas_rows)
-                custo_fixo_total = custo_fixo_rateado + df_extra
+                # custo_fixo_total inclui ambos para o cálculo contábil do lucro
+                custo_fixo_total = custo_fixo_contrato + df_extra
 
                 # 5. DRE COMPLETO E LÓGICA DE PROVISÃO
                 lucro_liquido_real = faturamento_bruto - custo_variavel_total - custo_fixo_total
@@ -750,6 +779,24 @@ class TurnoService:
                     custo_fixo_total, lucro_liquido_real, km_profissional, provisao_descontada_total
                 )
 
+                # FIX #6 — Média histórica de faturamento diário (últimos 10 fechamentos,
+                # excluindo o atual que acabou de ser inserido acima — usa LIMIT 10 OFFSET 1).
+                # Usada na projeção mensal do DRE para base realista em vez de meta_diaria.
+                hist_fat_row = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(AVG(NULLIF(faturamento_bruto, 0)), 0) AS media_fat
+                    FROM (
+                        SELECT faturamento_bruto
+                        FROM public.fechamento_diario
+                        WHERE motorista_id = $1::uuid
+                        ORDER BY data_fechamento DESC
+                        LIMIT 10 OFFSET 1
+                    ) sub;
+                    """,
+                    motorista_id,
+                )
+                media_fat_dia = float(hist_fat_row["media_fat"] or 0.0)
+
             return {
                 "sucesso": True,
                 "turno_id": turno_id,
@@ -769,13 +816,18 @@ class TurnoService:
                 "total_abastecido_turno": float(total_abastecido_turno),
                 "outras_despesas_variaveis": float(outras_despesas_variaveis),
                 "custo_variavel": float(custo_variavel_total),
+                # FIX #5 — separados para evitar duplicação no DRE:
+                # custo_fixo_contrato = só aluguel/pro-rata contratual (linha visível no DRE)
+                # provisao_descontada = rateio das despesas fixas (linha separada no DRE)
+                # custo_fixo_rateado  = soma dos dois (usado no lucro_liquido_real)
+                "custo_fixo_contrato": float(custo_fixo_contrato),
                 "custo_fixo_rateado": float(custo_fixo_total),
                 "lucro_liquido_real": float(lucro_liquido_real),
                 "ganho_por_km": float(ganho_por_km),
                 "custo_por_km": float(custo_por_km),
                 "lucro_por_km": float(lucro_por_km),
                 "ganho_por_hora": float(ganho_por_hora),
-                "km_por_litro": float(km_por_unidade), # Retorna a média de consumo ponderada do turno
+                "km_por_litro": float(km_por_unidade),
                 "meta_mensal": float(meta_mensal),
                 "dias_uteis": dias_uteis,
                 "piso_ganho_km": float(turno["piso_ganho_km"]),
@@ -790,6 +842,7 @@ class TurnoService:
                 "despesas_detalhadas": despesas_detalhadas,
                 "aportes_caixas": aportes_caixas,
                 "provisao_descontada": float(provisao_descontada_total),
+                "media_fat_dia": media_fat_dia,  # FIX #6 — histórico real para projeção mensal
             }
 
         except Exception as e:

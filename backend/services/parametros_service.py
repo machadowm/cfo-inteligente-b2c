@@ -1004,6 +1004,7 @@ class ParametrosService:
             await ParametrosService._registrar_auditoria(
                 tenant_id, motorista_id, f"excluir_caixa_{nome}", "deleted", True
             )
+            await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
             return (
                 f"🗑  *Caixa  *{nome}*  excluída com sucesso.*\n"
                 f"_Despesas fixas vinculadas foram desvinculadas mas não removidas._"

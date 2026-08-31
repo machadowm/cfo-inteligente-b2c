@@ -1,341 +1,136 @@
--- ====================================================================================
--- CFO INTELIGENTE B2C - SCHEMA FÍSICO MASTER DEFINITIVO (VERSÃO CONSOLIDADA V5)
--- Nível: SRE / Arquiteto & DBA Sênior Enterprise (Bank-Grade)
--- Alinhado com: banco_sobrinho.txt, backup_db.txt, schema_limpo.sql e Onboarding Conversacional
--- ====================================================================================
+--
+-- PostgreSQL database dump
+--
 
--- 1. Extensões e Esquemas Globais
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE SCHEMA IF NOT EXISTS evolution; -- Schema isolado para o gateway Evolution API
+\restrict HGX7hRR6AY1WRkNgtzumk6d07eFUnNDG53gh4fBOp0jfAooB60ymF1koMwA6qWe
 
--- 2. Função Universal de Auto-Update de Timestamps
-CREATE OR REPLACE FUNCTION public.update_timestamp_func()
-RETURNS TRIGGER AS $$
-BEGIN
-    BEGIN
-        NEW.updated_at = CURRENT_TIMESTAMP;
-    EXCEPTION WHEN undefined_column THEN
-        -- Ignora se a coluna não existir na tabela
-    END;
+-- Dumped from database version 15.18
+-- Dumped by pg_dump version 15.18
 
-    BEGIN
-        NEW.atualizado_em = CURRENT_TIMESTAMP;
-    EXCEPTION WHEN undefined_column THEN
-        -- Ignora se a coluna não existir na tabela
-    END;
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
 
-    BEGIN
-        NEW.ultima_atualizacao = CURRENT_TIMESTAMP;
-    EXCEPTION WHEN undefined_column THEN
-        -- Ignora se a coluna não existir na tabela
-    END;
+DROP POLICY IF EXISTS isolamento_veiculos ON public.veiculos;
+DROP POLICY IF EXISTS isolamento_turnos ON public.turnos;
+DROP POLICY IF EXISTS isolamento_transacoes ON public.transacoes;
+DROP POLICY IF EXISTS isolamento_motoristas ON public.motoristas;
+DROP POLICY IF EXISTS isolamento_lgpd ON public.lgpd_logs;
+DROP POLICY IF EXISTS isolamento_fechamentos_macro ON public.fechamentos_consolidados;
+DROP POLICY IF EXISTS isolamento_fechamento ON public.fechamento_diario;
+DROP POLICY IF EXISTS isolamento_dlq ON public.dlq_eventos;
+DROP POLICY IF EXISTS isolamento_despesas ON public.despesas_fixas_mensais;
+DROP POLICY IF EXISTS isolamento_caixas ON public.caixas_provisao;
+DROP POLICY IF EXISTS isolamento_assinaturas ON public.assinaturas;
+ALTER TABLE IF EXISTS ONLY public.veiculos DROP CONSTRAINT IF EXISTS veiculos_motorista_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.turnos DROP CONSTRAINT IF EXISTS turnos_veiculo_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.turnos DROP CONSTRAINT IF EXISTS turnos_motorista_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.transacoes DROP CONSTRAINT IF EXISTS transacoes_veiculo_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.transacoes DROP CONSTRAINT IF EXISTS transacoes_turno_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.transacoes DROP CONSTRAINT IF EXISTS transacoes_motorista_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.regras_manutencao DROP CONSTRAINT IF EXISTS regras_manutencao_veiculo_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.pausas_turno DROP CONSTRAINT IF EXISTS pausas_turno_turno_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.historico_manutencao DROP CONSTRAINT IF EXISTS historico_manutencao_veiculo_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.historico_manutencao DROP CONSTRAINT IF EXISTS historico_manutencao_transacao_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.historico_manutencao DROP CONSTRAINT IF EXISTS historico_manutencao_regra_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.fechamentos_consolidados DROP CONSTRAINT IF EXISTS fechamentos_consolidados_motorista_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.fechamento_diario DROP CONSTRAINT IF EXISTS fechamento_diario_turno_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.fechamento_diario DROP CONSTRAINT IF EXISTS fechamento_diario_motorista_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.dlq_eventos DROP CONSTRAINT IF EXISTS dlq_eventos_motorista_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.despesas_fixas_mensais DROP CONSTRAINT IF EXISTS despesas_fixas_mensais_motorista_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.caixas_provisao DROP CONSTRAINT IF EXISTS caixas_provisao_motorista_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.assinaturas DROP CONSTRAINT IF EXISTS assinaturas_motorista_id_fkey;
+DROP TRIGGER IF EXISTS trig_motoristas_atualizado_em ON public.motoristas;
+DROP TRIGGER IF EXISTS trig_caixas_atualizacao ON public.caixas_provisao;
+DROP TRIGGER IF EXISTS trg_trava_periodo_transacoes ON public.transacoes;
+DROP INDEX IF EXISTS public.idx_veiculos_motorista;
+DROP INDEX IF EXISTS public.idx_veiculos_estoque_gin;
+DROP INDEX IF EXISTS public.idx_unico_turno_aberto;
+DROP INDEX IF EXISTS public.idx_unico_fechamento_periodo;
+DROP INDEX IF EXISTS public.idx_turnos_veiculo;
+DROP INDEX IF EXISTS public.idx_turnos_motorista;
+DROP INDEX IF EXISTS public.idx_transacoes_veiculo;
+DROP INDEX IF EXISTS public.idx_transacoes_turno;
+DROP INDEX IF EXISTS public.idx_transacoes_recalibracao_telemetria;
+DROP INDEX IF EXISTS public.idx_transacoes_motorista;
+DROP INDEX IF EXISTS public.idx_transacoes_data;
+DROP INDEX IF EXISTS public.idx_transacoes_created;
+DROP INDEX IF EXISTS public.idx_regras_veiculo;
+DROP INDEX IF EXISTS public.idx_pausas_turno;
+DROP INDEX IF EXISTS public.idx_lgpd_motorista;
+DROP INDEX IF EXISTS public.idx_historico_veiculo;
+DROP INDEX IF EXISTS public.idx_fechamentos_consolidados_motorista;
+DROP INDEX IF EXISTS public.idx_fechamento_turno;
+DROP INDEX IF EXISTS public.idx_fechamento_motorista;
+DROP INDEX IF EXISTS public.idx_dlq_payload_gin;
+DROP INDEX IF EXISTS public.idx_dlq_motorista;
+DROP INDEX IF EXISTS public.idx_despesas_fixas_motorista;
+DROP INDEX IF EXISTS public.idx_caixas_provisao_motorista;
+DROP INDEX IF EXISTS public.idx_assinaturas_motorista;
+ALTER TABLE IF EXISTS ONLY public.veiculos DROP CONSTRAINT IF EXISTS veiculos_placa_key;
+ALTER TABLE IF EXISTS ONLY public.veiculos DROP CONSTRAINT IF EXISTS veiculos_pkey;
+ALTER TABLE IF EXISTS ONLY public.turnos DROP CONSTRAINT IF EXISTS turnos_pkey;
+ALTER TABLE IF EXISTS ONLY public.transacoes DROP CONSTRAINT IF EXISTS transacoes_wpp_msg_id_key;
+ALTER TABLE IF EXISTS ONLY public.transacoes DROP CONSTRAINT IF EXISTS transacoes_pkey;
+ALTER TABLE IF EXISTS ONLY public.transacoes DROP CONSTRAINT IF EXISTS transacoes_idempotencia_hash_key;
+ALTER TABLE IF EXISTS ONLY public.regras_manutencao DROP CONSTRAINT IF EXISTS regras_manutencao_pkey;
+ALTER TABLE IF EXISTS ONLY public.pausas_turno DROP CONSTRAINT IF EXISTS pausas_turno_pkey;
+ALTER TABLE IF EXISTS ONLY public.motoristas DROP CONSTRAINT IF EXISTS motoristas_telefone_key;
+ALTER TABLE IF EXISTS ONLY public.motoristas DROP CONSTRAINT IF EXISTS motoristas_pkey;
+ALTER TABLE IF EXISTS ONLY public.lgpd_logs DROP CONSTRAINT IF EXISTS lgpd_logs_pkey;
+ALTER TABLE IF EXISTS ONLY public.historico_manutencao DROP CONSTRAINT IF EXISTS historico_manutencao_pkey;
+ALTER TABLE IF EXISTS ONLY public.fechamentos_consolidados DROP CONSTRAINT IF EXISTS fechamentos_consolidados_pkey;
+ALTER TABLE IF EXISTS ONLY public.fechamento_diario DROP CONSTRAINT IF EXISTS fechamento_diario_pkey;
+ALTER TABLE IF EXISTS ONLY public.dlq_eventos DROP CONSTRAINT IF EXISTS dlq_eventos_pkey;
+ALTER TABLE IF EXISTS ONLY public.despesas_fixas_mensais DROP CONSTRAINT IF EXISTS despesas_fixas_mensais_pkey;
+ALTER TABLE IF EXISTS ONLY public.caixas_provisao DROP CONSTRAINT IF EXISTS caixas_provisao_pkey;
+ALTER TABLE IF EXISTS ONLY public.caixas_provisao DROP CONSTRAINT IF EXISTS caixas_provisao_motorista_id_nome_caixa_key;
+ALTER TABLE IF EXISTS ONLY public.assinaturas DROP CONSTRAINT IF EXISTS assinaturas_pkey;
+DROP TABLE IF EXISTS public.veiculos;
+DROP TABLE IF EXISTS public.turnos;
+DROP TABLE IF EXISTS public.transacoes;
+DROP TABLE IF EXISTS public.regras_manutencao;
+DROP TABLE IF EXISTS public.pausas_turno;
+DROP TABLE IF EXISTS public.motoristas;
+DROP TABLE IF EXISTS public.lgpd_logs;
+DROP TABLE IF EXISTS public.historico_manutencao;
+DROP TABLE IF EXISTS public.fechamentos_consolidados;
+DROP TABLE IF EXISTS public.fechamento_diario;
+DROP TABLE IF EXISTS public.dlq_eventos;
+DROP TABLE IF EXISTS public.despesas_fixas_mensais;
+DROP TABLE IF EXISTS public.caixas_provisao;
+DROP TABLE IF EXISTS public.assinaturas;
+DROP FUNCTION IF EXISTS public.update_timestamp_func();
+DROP FUNCTION IF EXISTS public.function_verificar_periodo_fechado();
+DROP SCHEMA IF EXISTS public;
+--
+-- Name: public; Type: SCHEMA; Schema: -; Owner: -
+--
 
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-
--- ====================================================================================
--- DOMÍNIO 1: USUÁRIOS, ASSINATURAS & ONBOARDING CONVERSACIONAL
--- ====================================================================================
-
--- Tabela 1: motoristas (Tenant Principal)
-CREATE TABLE IF NOT EXISTS public.motoristas (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    telefone VARCHAR(50) UNIQUE NOT NULL,
-    nome VARCHAR(150) NOT NULL,
-    status_assinatura VARCHAR(32) NOT NULL DEFAULT 'TRIAL',
-    ativo BOOLEAN DEFAULT TRUE,
-    criado_em TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
-    -- Configurações e metas financeiras base
-    meta_mensal_faturamento NUMERIC(14,4) DEFAULT 12000.00,
-    dias_uteis_mes INT DEFAULT 26,
-    
-    -- Últimas implantações: dados de onboarding tático conversacional ( celular / fricção zero )
-    nome_social VARCHAR(100), -- "Como deseja ser chamado"
-    meta_faturamento_diario NUMERIC(14,4) DEFAULT 0.00,
-    meta_faturamento_semanal NUMERIC(14,4) DEFAULT 0.00,
-    meta_horas_diarias NUMERIC(5,2) DEFAULT 8.00, -- "Meta de horas de trabalho diária"
-    meta_km_diarios NUMERIC(10,2) DEFAULT 0.00, -- "Kms rodados previstos"
-    possui_multiplos_veiculos BOOLEAN DEFAULT FALSE -- "Se possui mais de um veículo"
-);
-
-CREATE TRIGGER trig_motoristas_atualizado_em
-    BEFORE UPDATE ON public.motoristas
-    FOR EACH ROW EXECUTE FUNCTION public.update_timestamp_func();
-
-
--- Tabela 2: assinaturas (Billing SaaS B2C)
-CREATE TABLE IF NOT EXISTS public.assinaturas (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID NOT NULL REFERENCES public.motoristas(id) ON DELETE RESTRICT,
-    gateway_id VARCHAR(100),
-    plano VARCHAR(50) NOT NULL,
-    data_vencimento DATE NOT NULL,
-    status VARCHAR(20) NOT NULL,
-    criado_em TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-
--- ====================================================================================
--- DOMÍNIO 2: ATIVOS (FROTAS MULTI-COMBUSTÍVEL / LOCADORAS)
--- ====================================================================================
-
--- Tabela 3: veiculos (Ativos Multi-energia e Parâmetros de Onboarding de Frota)
-CREATE TABLE IF NOT EXISTS public.veiculos (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID NOT NULL REFERENCES public.motoristas(id) ON DELETE RESTRICT,
-    placa VARCHAR(20) NOT NULL,
-    modelo VARCHAR(150) NOT NULL,
-    tipo_combustivel VARCHAR(50) NOT NULL, -- Híbrido, Elétrico, Flex, etc.
-    estoque_financeiro JSONB DEFAULT '{"liquido": {"litros": 0.0, "custo_total": 0.0, "gasolina_litros": 0.0, "etanol_litros": 0.0, "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0, "km_l_gasolina": 12.0, "km_l_etanol": 8.5}, "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5}}'::jsonb,
-    ativo BOOLEAN DEFAULT TRUE,
-    criado_em TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
-    -- Dados contratuais da locadora (Zarp, etc.)
-    locadora VARCHAR(100) DEFAULT 'Localiza Zarp',
-    custo_aluguel_semanal NUMERIC(10,2) DEFAULT 1020.85,
-    franquia_km_semanal NUMERIC(10,2) DEFAULT 1505.00,
-    valor_km_excedente NUMERIC(10,4) DEFAULT 0.75,
-    escala_trabalho VARCHAR(100) DEFAULT 'De quarta a segunda (6 dias)',
-    contrato_personalizado BOOLEAN DEFAULT FALSE,
-    
-    -- Últimas implantações: parâmetros técnicos e físicos de combustão/carga coletados no onboarding
-    capacidade_tanque NUMERIC(10,2) DEFAULT 50.00,
-    capacidade_bateria NUMERIC(10,2) DEFAULT 30.00, -- Adicionado para carros Híbridos e Elétricos com fallback
-    is_flex BOOLEAN DEFAULT FALSE,
-    qtd_tanques INT DEFAULT 1,
-    is_hibrido BOOLEAN DEFAULT FALSE,
-    is_eletrico BOOLEAN DEFAULT FALSE
-);
-
-
--- Tabela 4: turnos (Jornadas Operacionais)
-CREATE TABLE IF NOT EXISTS public.turnos (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID NOT NULL REFERENCES public.motoristas(id) ON DELETE RESTRICT,
-    veiculo_id UUID NOT NULL REFERENCES public.veiculos(id) ON DELETE RESTRICT,
-    km_inicial NUMERIC(10,2) NOT NULL,
-    km_final NUMERIC(10,2) CHECK (km_final IS NULL OR km_final >= km_inicial),
-    data_inicio TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    data_fim TIMESTAMP WITH TIME ZONE,
-    status VARCHAR(20) DEFAULT 'em_andamento', -- 'em_andamento', 'em_pausa', 'concluido'
-    
-    -- Auditoria de Fuga de Hodômetro (km de uso pessoal)
-    km_uso_pessoal NUMERIC(10,2) DEFAULT 0.00
-);
+CREATE SCHEMA public;
 
 
--- Tabela 5: pausas_turno (Intervalos e Eficiência Logística)
-CREATE TABLE IF NOT EXISTS public.pausas_turno (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    turno_id UUID NOT NULL REFERENCES public.turnos(id) ON DELETE CASCADE,
-    inicio_pausa TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    fim_pausa TIMESTAMP WITH TIME ZONE,
-    motivo VARCHAR(50),
-    km_inicio NUMERIC(10,2),   -- Odômetro no momento da pausa (auditoria de uso pessoal)
-    km_fim    NUMERIC(10,2)    -- Odômetro na retomada (base do Power Split intra-turno)
-);
+--
+-- Name: SCHEMA public; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON SCHEMA public IS 'standard public schema';
 
 
--- ====================================================================================
--- DOMÍNIO 3: O NÚCLEO CONTÁBIL (LEDGER COMPLETO)
--- ====================================================================================
+--
+-- Name: function_verificar_periodo_fechado(); Type: FUNCTION; Schema: public; Owner: -
+--
 
--- Tabela 6: transacoes (Livro Append-Only com Idempotência e Suporte a Descrições)
-CREATE TABLE IF NOT EXISTS public.transacoes (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID NOT NULL REFERENCES public.motoristas(id) ON DELETE RESTRICT,
-    turno_id UUID REFERENCES public.turnos(id) ON DELETE SET NULL,
-    veiculo_id UUID REFERENCES public.veiculos(id) ON DELETE RESTRICT,
-    tipo_movimentacao VARCHAR(20) NOT NULL CHECK (tipo_movimentacao IN ('receita', 'despesa', 'neutro')),
-    categoria VARCHAR(50) NOT NULL,
-    valor NUMERIC(14,4) NOT NULL CHECK (valor >= 0),  -- >= 0 permite recarga solar gratuita
-    estabelecimento VARCHAR(100),
-    metodo_pagamento VARCHAR(50),
-    contexto_operacional VARCHAR(50),
-    comprovante_url VARCHAR(255),
-    idempotencia_hash VARCHAR(100) UNIQUE,
-    estornado BOOLEAN DEFAULT FALSE,
-    data_transacao TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-
-    -- Controle de auditoria textual e idempotência Evolution/WhatsApp
-    descricao TEXT,
-    wpp_msg_id VARCHAR(255) UNIQUE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-
-    -- Telemetria de abastecimento (populada pelo fluxo FSM guiado)
-    litros_abastecidos    NUMERIC(10,2),
-    preco_por_litro       NUMERIC(10,4),
-    odometro_abastecimento NUMERIC(10,2),
-    tanque_cheio          BOOLEAN DEFAULT FALSE NOT NULL
-);
-
--- Índice parcial para recalibração Full-to-Full (O(log N))
-CREATE INDEX IF NOT EXISTS idx_transacoes_recalibracao_telemetria
-    ON public.transacoes (veiculo_id, tanque_cheio, data_transacao)
-    WHERE estornado = FALSE AND categoria = 'combustivel';
-
-
--- Tabela 7: despesas_fixas_mensais (Rateio Diário Contínuo)
-CREATE TABLE IF NOT EXISTS public.despesas_fixas_mensais (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID NOT NULL REFERENCES motoristas(id) ON DELETE RESTRICT,
-    nome VARCHAR(50) NOT NULL,
-    valor_mensal NUMERIC(14,4) NOT NULL,
-    dias_trabalho_previstos INTEGER NOT NULL CHECK (dias_trabalho_previstos > 0),
-    valor_pro_rata_diario NUMERIC(14,4) GENERATED ALWAYS AS (valor_mensal / NULLIF(dias_trabalho_previstos, 0)) STORED,
-    dia_vencimento INTEGER NOT NULL,
-    ativo BOOLEAN DEFAULT TRUE
-);
-
-
--- Tabela 8: caixas_provisao (Provisões de Manutenção e Amortização de Caixa)
-CREATE TABLE IF NOT EXISTS public.caixas_provisao (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID NOT NULL REFERENCES public.motoristas(id) ON DELETE RESTRICT,
-    nome_caixa VARCHAR(50) NOT NULL,
-    saldo_atual NUMERIC(14,4) DEFAULT 0.00,
-    ultima_atualizacao TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TRIGGER trig_caixas_atualizacao
-    BEFORE UPDATE ON public.caixas_provisao
-    FOR EACH ROW EXECUTE FUNCTION public.update_timestamp_func();
-
-
--- Tabela 9: fechamento_diario (Consolidação de Margens Contábeis e DRE Real)
-CREATE TABLE IF NOT EXISTS public.fechamento_diario (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID NOT NULL REFERENCES public.motoristas(id) ON DELETE RESTRICT,
-    turno_id UUID REFERENCES public.turnos(id) ON DELETE SET NULL,
-    faturamento_bruto NUMERIC(14,4) NOT NULL,
-    custo_variavel_direto NUMERIC(14,4) NOT NULL,
-    custo_fixo_rateado NUMERIC(14,4) NOT NULL,
-    lucro_liquido_real NUMERIC(14,4) NOT NULL,
-    km_rodados NUMERIC(10,2) NOT NULL,
-    clima_predominante VARCHAR(30),
-    data_fechamento DATE DEFAULT CURRENT_DATE,
-    
-    -- Despesa de provisão descontada automaticamente do caixa
-    provisao_descontada NUMERIC(14,4) NOT NULL DEFAULT 0.00
-);
-
-
--- Tabela 10: fechamentos_consolidados (OLAP interno para DRE consolidada imutável)
-CREATE TABLE IF NOT EXISTS public.fechamentos_consolidados (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID NOT NULL REFERENCES public.motoristas(id) ON DELETE RESTRICT,
-    tipo_periodo VARCHAR(10) NOT NULL CHECK (tipo_periodo IN ('MENSAL', 'ANUAL')),
-    referencia VARCHAR(7) NOT NULL, -- Formato ISO: 'YYYY-MM' ou 'YYYY'
-    faturacao_bruta NUMERIC(14,4) NOT NULL DEFAULT 0.00,
-    custo_variavel_direto NUMERIC(14,4) NOT NULL DEFAULT 0.00,
-    custo_fixo_rateado NUMERIC(14,4) NOT NULL DEFAULT 0.00,
-    provisao_descontada NUMERIC(14,4) NOT NULL DEFAULT 0.00,
-    lucro_liquido_real NUMERIC(14,4) NOT NULL DEFAULT 0.00,
-    km_rodados NUMERIC(10,2) NOT NULL DEFAULT 0.00,
-    horas_trabalhadas NUMERIC(10,2) NOT NULL DEFAULT 0.00,
-    status VARCHAR(20) NOT NULL DEFAULT 'FECHADO',
-    data_consolidacao TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unico_fechamento_periodo 
-    ON public.fechamentos_consolidados(motorista_id, tipo_periodo, referencia);
-
-
--- ====================================================================================
--- DOMÍNIO 4: GOVERNANÇA, ALARMES E HISTÓRICO DE MANUTENÇÃO
--- ====================================================================================
-
--- Tabela 11: regras_manutencao (Configuração de Alarmes de Amortização)
-CREATE TABLE IF NOT EXISTS public.regras_manutencao (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    veiculo_id UUID NOT NULL REFERENCES public.veiculos(id) ON DELETE CASCADE,
-    tipo_servico VARCHAR(100) NOT NULL,
-    intervalo_km INTEGER NOT NULL,
-    aviso_previo_km INTEGER NOT NULL DEFAULT 500,
-    ativo BOOLEAN DEFAULT TRUE
-);
-
-
--- Tabela 12: historico_manutencao (Auditoria de Intervenções Técnicas)
-CREATE TABLE IF NOT EXISTS public.historico_manutencao (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    veiculo_id UUID NOT NULL REFERENCES public.veiculos(id) ON DELETE RESTRICT,
-    regra_id UUID REFERENCES public.regras_manutencao(id) ON DELETE SET NULL,
-    transacao_id UUID REFERENCES public.transacoes(id) ON DELETE RESTRICT,
-    km_execucao NUMERIC(10,2) NOT NULL,
-    data_execucao TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-
--- Tabela 13: dlq_eventos (Dead Letter Queue para contingência de Webhooks)
-CREATE TABLE IF NOT EXISTS public.dlq_eventos (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID REFERENCES public.motoristas(id) ON DELETE CASCADE,
-    payload_original JSONB NOT NULL,
-    motivo_falha TEXT NOT NULL,
-    tentativas INTEGER DEFAULT 1,
-    status VARCHAR(20) DEFAULT 'pendente',
-    criado_em TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-
--- Tabela 14: lgpd_logs (Trilha de Consentimento e Privacidade)
-CREATE TABLE IF NOT EXISTS public.lgpd_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    motorista_id UUID NOT NULL,
-    acao_realizada VARCHAR(50) NOT NULL,
-    ip_origem VARCHAR(50),
-    data_evento TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-
--- ====================================================================================
--- ÍNDICES DE PERFORMANCE (PREVENÇÃO DE SEQUENTIAL SCANS SOB RLS MULTI-TENANT)
--- ====================================================================================
-CREATE INDEX IF NOT EXISTS idx_assinaturas_motorista ON public.assinaturas(motorista_id);
-CREATE INDEX IF NOT EXISTS idx_veiculos_motorista ON public.veiculos(motorista_id);
-CREATE INDEX IF NOT EXISTS idx_turnos_motorista ON public.turnos(motorista_id);
-CREATE INDEX IF NOT EXISTS idx_turnos_veiculo ON public.turnos(veiculo_id);
-CREATE INDEX IF NOT EXISTS idx_pausas_turno ON public.pausas_turno(turno_id);
-CREATE INDEX IF NOT EXISTS idx_transacoes_motorista ON public.transacoes(motorista_id);
-CREATE INDEX IF NOT EXISTS idx_transacoes_turno ON public.transacoes(turno_id);
-CREATE INDEX IF NOT EXISTS idx_transacoes_veiculo ON public.transacoes(veiculo_id);
-CREATE INDEX IF NOT EXISTS idx_despesas_fixas_motorista ON public.despesas_fixas_mensais(motorista_id);
-CREATE INDEX IF NOT EXISTS idx_caixas_provisao_motorista ON public.caixas_provisao(motorista_id);
-CREATE INDEX IF NOT EXISTS idx_fechamento_motorista ON public.fechamento_diario(motorista_id);
-CREATE INDEX IF NOT EXISTS idx_fechamento_turno ON public.fechamento_diario(turno_id);
-CREATE INDEX IF NOT EXISTS idx_regras_veiculo ON public.regras_manutencao(veiculo_id);
-CREATE INDEX IF NOT EXISTS idx_historico_veiculo ON public.historico_manutencao(veiculo_id);
-CREATE INDEX IF NOT EXISTS idx_dlq_motorista ON public.dlq_eventos(motorista_id);
-CREATE INDEX IF NOT EXISTS idx_lgpd_motorista ON public.lgpd_logs(motorista_id);
-CREATE INDEX IF NOT EXISTS idx_fechamentos_consolidados_motorista ON public.fechamentos_consolidados(motorista_id);
-
--- Índices de auditoria temporal
-CREATE INDEX IF NOT EXISTS idx_transacoes_created ON public.transacoes(created_at);
-CREATE INDEX IF NOT EXISTS idx_transacoes_data ON public.transacoes(data_transacao);
-
--- Índices GIN para busca estruturada e indexada no JSONB
-CREATE INDEX IF NOT EXISTS idx_veiculos_estoque_gin ON public.veiculos USING GIN (estoque_financeiro);
-CREATE INDEX IF NOT EXISTS idx_dlq_payload_gin ON public.dlq_eventos USING GIN (payload_original);
-
--- Trava de Concorrência Física: Impede múltiplos turnos ativos/abertos simultaneamente por motorista
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unico_turno_aberto 
-    ON public.turnos (motorista_id) 
-    WHERE status IN ('em_andamento', 'em_pausa', 'ABERTO');
-
-
--- ====================================================================================
--- GATILHOS (TRIGGERS) E REGRAS DE INTEGRIDADE CONTÁBIL
--- ====================================================================================
-
--- Função de Bloqueio de Período (Imutabilidade Contábil)
-CREATE OR REPLACE FUNCTION public.function_verificar_periodo_fechado()
-RETURNS TRIGGER AS $$
+CREATE FUNCTION public.function_verificar_periodo_fechado() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
 DECLARE
     mes_referencia VARCHAR(7);
     periodo_fechado BOOLEAN;
@@ -365,63 +160,1067 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
-
--- Acopla a trava de período contábil à tabela de transações
-DROP TRIGGER IF EXISTS trg_trava_periodo_transacoes ON public.transacoes;
-CREATE TRIGGER trg_trava_periodo_transacoes
-BEFORE INSERT OR UPDATE OR DELETE ON public.transacoes
-FOR EACH ROW EXECUTE FUNCTION public.function_verificar_periodo_fechado();
+$$;
 
 
--- ====================================================================================
--- RLS (ROW-LEVEL SECURITY) - BLINDAGEM SUÍÇA DE TENANTS
--- ====================================================================================
+--
+-- Name: update_timestamp_func(); Type: FUNCTION; Schema: public; Owner: -
+--
 
--- Habilitar RLS em todas as tabelas de Domínio public
-ALTER TABLE public.motoristas ENABLE ROW LEVEL SECURITY;
+CREATE FUNCTION public.update_timestamp_func() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    BEGIN
+        NEW.updated_at = CURRENT_TIMESTAMP;
+    EXCEPTION WHEN undefined_column THEN
+        -- Ignora se a coluna não existir na tabela
+    END;
+
+    BEGIN
+        NEW.atualizado_em = CURRENT_TIMESTAMP;
+    EXCEPTION WHEN undefined_column THEN
+        -- Ignora se a coluna não existir na tabela
+    END;
+
+    BEGIN
+        NEW.ultima_atualizacao = CURRENT_TIMESTAMP;
+    EXCEPTION WHEN undefined_column THEN
+        -- Ignora se a coluna não existir na tabela
+    END;
+
+    RETURN NEW;
+END;
+$$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: assinaturas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.assinaturas (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    gateway_id character varying(100),
+    plano character varying(50) NOT NULL,
+    data_vencimento date NOT NULL,
+    status character varying(20) NOT NULL,
+    criado_em timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- Name: caixas_provisao; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.caixas_provisao (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    nome_caixa character varying(50) NOT NULL,
+    saldo_atual numeric(14,4) DEFAULT 0.00,
+    ultima_atualizacao timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- Name: despesas_fixas_mensais; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.despesas_fixas_mensais (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    nome character varying(50) NOT NULL,
+    valor_mensal numeric(14,4) NOT NULL,
+    dias_trabalho_previstos integer NOT NULL,
+    valor_pro_rata_diario numeric(14,4) GENERATED ALWAYS AS ((valor_mensal / (NULLIF(dias_trabalho_previstos, 0))::numeric)) STORED,
+    dia_vencimento integer NOT NULL,
+    ativo boolean DEFAULT true,
+    caixa_id uuid,  -- FK para caixas_provisao; nullable (despesa sem caixa vinculada é válida)
+    CONSTRAINT despesas_fixas_mensais_dias_trabalho_previstos_check CHECK ((dias_trabalho_previstos > 0))
+);
+
+
+--
+-- Name: dlq_eventos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.dlq_eventos (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid,
+    payload_original jsonb NOT NULL,
+    motivo_falha text NOT NULL,
+    tentativas integer DEFAULT 1,
+    status character varying(20) DEFAULT 'pendente'::character varying,
+    criado_em timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- Name: fechamento_diario; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.fechamento_diario (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    turno_id uuid,
+    faturamento_bruto numeric(14,4) NOT NULL,
+    custo_variavel_direto numeric(14,4) NOT NULL,
+    custo_fixo_rateado numeric(14,4) NOT NULL,
+    lucro_liquido_real numeric(14,4) NOT NULL,
+    km_rodados numeric(10,2) NOT NULL,
+    clima_predominante character varying(30),
+    data_fechamento date DEFAULT CURRENT_DATE,
+    provisao_descontada numeric(14,4) DEFAULT 0.00 NOT NULL
+);
+
+
+--
+-- Name: fechamentos_consolidados; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.fechamentos_consolidados (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    tipo_periodo character varying(10) NOT NULL,
+    referencia character varying(7) NOT NULL,
+    faturacao_bruta numeric(14,4) DEFAULT 0.00 NOT NULL,
+    custo_variavel_direto numeric(14,4) DEFAULT 0.00 NOT NULL,
+    custo_fixo_rateado numeric(14,4) DEFAULT 0.00 NOT NULL,
+    provisao_descontada numeric(14,4) DEFAULT 0.00 NOT NULL,
+    lucro_liquido_real numeric(14,4) DEFAULT 0.00 NOT NULL,
+    km_rodados numeric(10,2) DEFAULT 0.00 NOT NULL,
+    horas_trabalhadas numeric(10,2) DEFAULT 0.00 NOT NULL,
+    status character varying(20) DEFAULT 'FECHADO'::character varying NOT NULL,
+    data_consolidacao timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fechamentos_consolidados_tipo_periodo_check CHECK (((tipo_periodo)::text = ANY ((ARRAY['MENSAL'::character varying, 'ANUAL'::character varying])::text[])))
+);
+
+
+--
+-- Name: historico_manutencao; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.historico_manutencao (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    veiculo_id uuid NOT NULL,
+    regra_id uuid,
+    transacao_id uuid,
+    km_execucao numeric(10,2) NOT NULL,
+    data_execucao timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- Name: lgpd_logs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.lgpd_logs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    acao_realizada character varying(50) NOT NULL,
+    ip_origem character varying(50),
+    data_evento timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- Name: motoristas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.motoristas (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    telefone character varying(50) NOT NULL,
+    nome character varying(150) NOT NULL,
+    status_assinatura character varying(32) DEFAULT 'TRIAL'::character varying NOT NULL,
+    ativo boolean DEFAULT true,
+    criado_em timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    meta_mensal_faturamento numeric(14,4) DEFAULT 12000.00,
+    dias_uteis_mes integer DEFAULT 26,
+    nome_social character varying(100),
+    meta_faturamento_diario numeric(14,4) DEFAULT 0.00,
+    meta_faturamento_semanal numeric(14,4) DEFAULT 0.00,
+    meta_horas_diarias numeric(5,2) DEFAULT 8.00,
+    meta_km_diarios numeric(10,2) DEFAULT 0.00,
+    possui_multiplos_veiculos boolean DEFAULT false
+);
+
+
+--
+-- Name: pausas_turno; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pausas_turno (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    turno_id uuid NOT NULL,
+    inicio_pausa timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    fim_pausa timestamp with time zone,
+    motivo character varying(50),
+    km_inicio numeric(10,2),
+    km_fim numeric(10,2)
+);
+
+
+--
+-- Name: regras_manutencao; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.regras_manutencao (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    veiculo_id uuid NOT NULL,
+    tipo_servico character varying(100) NOT NULL,
+    intervalo_km integer NOT NULL,
+    aviso_previo_km integer DEFAULT 500 NOT NULL,
+    ativo boolean DEFAULT true
+);
+
+
+--
+-- Name: transacoes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.transacoes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    turno_id uuid,
+    veiculo_id uuid,
+    tipo_movimentacao character varying(20) NOT NULL,
+    categoria character varying(50) NOT NULL,
+    valor numeric(14,4) NOT NULL,
+    estabelecimento character varying(100),
+    metodo_pagamento character varying(50),
+    contexto_operacional character varying(50),
+    comprovante_url character varying(255),
+    idempotencia_hash character varying(100),
+    estornado boolean DEFAULT false,
+    data_transacao timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    descricao text,
+    wpp_msg_id character varying(255),
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    litros_abastecidos numeric(10,2),
+    preco_por_litro numeric(10,4),
+    odometro_abastecimento numeric(10,2),
+    tanque_cheio boolean DEFAULT false NOT NULL,
+    CONSTRAINT transacoes_tipo_movimentacao_check CHECK (((tipo_movimentacao)::text = ANY ((ARRAY['receita'::character varying, 'despesa'::character varying, 'neutro'::character varying])::text[]))),
+    CONSTRAINT transacoes_valor_check CHECK ((valor >= (0)::numeric))
+);
+
+
+--
+-- Name: turnos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turnos (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    veiculo_id uuid NOT NULL,
+    km_inicial numeric(10,2) NOT NULL,
+    km_final numeric(10,2),
+    data_inicio timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    data_fim timestamp with time zone,
+    status character varying(20) DEFAULT 'em_andamento'::character varying,
+    km_uso_pessoal numeric(10,2) DEFAULT 0.00,
+    CONSTRAINT turnos_check CHECK (((km_final IS NULL) OR (km_final >= km_inicial)))
+);
+
+
+--
+-- Name: veiculos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.veiculos (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    motorista_id uuid NOT NULL,
+    placa character varying(20) NOT NULL,
+    modelo character varying(150) NOT NULL,
+    tipo_combustivel character varying(50) NOT NULL,
+    estoque_financeiro jsonb DEFAULT '{"liquido": {"litros": 0.0, "custo_total": 0.0, "km_l_etanol": 8.5, "etanol_litros": 0.0, "km_l_gasolina": 12.0, "gasolina_litros": 0.0, "etanol_proporcao": 0.0, "gasolina_proporcao": 1.0}, "eletricidade": {"kwh": 0.0, "km_kwh": 6.5, "custo_total": 0.0}}'::jsonb,
+    ativo boolean DEFAULT true,
+    criado_em timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    locadora character varying(100) DEFAULT 'Localiza Zarp'::character varying,
+    custo_aluguel_semanal numeric(10,2) DEFAULT 1020.85,
+    franquia_km_semanal numeric(10,2) DEFAULT 1505.00,
+    valor_km_excedente numeric(10,4) DEFAULT 0.75,
+    escala_trabalho character varying(100) DEFAULT 'De quarta a segunda (6 dias)'::character varying,
+    contrato_personalizado boolean DEFAULT false,
+    capacidade_bateria numeric(10,2) DEFAULT 30.00,
+    is_flex boolean DEFAULT false,
+    qtd_tanques integer DEFAULT 1,
+    is_hibrido boolean DEFAULT false,
+    is_eletrico boolean DEFAULT false
+);
+
+
+--
+-- Data for Name: assinaturas; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.assinaturas (id, motorista_id, gateway_id, plano, data_vencimento, status, criado_em) FROM stdin;
+\.
+
+
+--
+-- Data for Name: caixas_provisao; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.caixas_provisao (id, motorista_id, nome_caixa, saldo_atual, ultima_atualizacao) FROM stdin;
+59539b40-b01d-4021-858a-3857593d175b	4ef8c731-7878-4091-923d-50f1c06c34d0	Manutenção Corretiva (Pneus/Freios)	0.0000	2026-08-30 09:33:56.742338-03
+1a5fb189-3c22-43ee-bf7c-82cc7fed79f2	4ef8c731-7878-4091-923d-50f1c06c34d0	Amortização de IPVA/Seguro	0.0000	2026-08-30 09:33:56.742338-03
+0a885bed-68d0-4765-b10f-c263069d202b	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	Manutenção Corretiva (Pneus/Freios)	0.0000	2026-08-30 14:57:03.318752-03
+5898f3eb-f30c-4f9e-9aa2-8ac7822f151a	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	Amortização de IPVA/Seguro	0.0000	2026-08-30 14:57:03.318752-03
+\.
+
+
+--
+-- Data for Name: despesas_fixas_mensais; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.despesas_fixas_mensais (id, motorista_id, nome, valor_mensal, dias_trabalho_previstos, dia_vencimento, ativo) FROM stdin;
+\.
+
+
+--
+-- Data for Name: dlq_eventos; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.dlq_eventos (id, motorista_id, payload_original, motivo_falha, tentativas, status, criado_em) FROM stdin;
+\.
+
+
+--
+-- Data for Name: fechamento_diario; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.fechamento_diario (id, motorista_id, turno_id, faturamento_bruto, custo_variavel_direto, custo_fixo_rateado, lucro_liquido_real, km_rodados, clima_predominante, data_fechamento, provisao_descontada) FROM stdin;
+e5e3977a-985e-4b9d-9067-ebbd9e982b6d	4ef8c731-7878-4091-923d-50f1c06c34d0	a20e342c-e0ed-4348-ac0f-caf9c1bbe3c7	380.0000	59.8118	42.0000	278.1882	123.00	\N	2026-08-30	0.0000
+\.
+
+
+--
+-- Data for Name: fechamentos_consolidados; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.fechamentos_consolidados (id, motorista_id, tipo_periodo, referencia, faturacao_bruta, custo_variavel_direto, custo_fixo_rateado, provisao_descontada, lucro_liquido_real, km_rodados, horas_trabalhadas, status, data_consolidacao) FROM stdin;
+\.
+
+
+--
+-- Data for Name: historico_manutencao; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.historico_manutencao (id, veiculo_id, regra_id, transacao_id, km_execucao, data_execucao) FROM stdin;
+\.
+
+
+--
+-- Data for Name: lgpd_logs; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.lgpd_logs (id, motorista_id, acao_realizada, ip_origem, data_evento) FROM stdin;
+79dce11d-28e0-4a2b-8b11-0cd8e75d258e	4ef8c731-7878-4091-923d-50f1c06c34d0	UPGRADE_DATABASE_SCHEMA_V4_PAUSAS_KM	127.0.0.1	2026-08-29 23:51:24.102327-03
+4b8bc4cd-c1d4-4da4-84e8-e30cc3dd4824	4ef8c731-7878-4091-923d-50f1c06c34d0	UPGRADE_DATABASE_SCHEMA_V3	127.0.0.1	2026-08-29 23:52:05.096587-03
+2638394c-ad67-444c-b619-5da9e23d7b61	4ef8c731-7878-4091-923d-50f1c06c34d0	UPGRADE_SCHEMA_V8_FULL_TO_FULL	127.0.0.1	2026-08-31 12:09:22.506907-03
+\.
+
+
+--
+-- Data for Name: motoristas; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.motoristas (id, telefone, nome, status_assinatura, ativo, criado_em, atualizado_em, meta_mensal_faturamento, dias_uteis_mes, nome_social, meta_faturamento_diario, meta_faturamento_semanal, meta_horas_diarias, meta_km_diarios, possui_multiplos_veiculos) FROM stdin;
+4ef8c731-7878-4091-923d-50f1c06c34d0	5513997971393	Willian Machado	TRIAL	t	2026-08-29 09:33:13.797524-03	2026-08-29 09:35:05.48117-03	9100.0000	26	\N	0.0000	0.0000	8.00	0.00	f
+bbe4e5f7-2137-4a29-a28d-a9b629be82cb	5513981454327	Gabriel Machado	TRIAL	t	2026-08-30 14:57:03.318752-03	2026-08-30 14:57:03.318752-03	12000.0000	26	\N	0.0000	0.0000	8.00	0.00	f
+\.
+
+
+--
+-- Data for Name: pausas_turno; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.pausas_turno (id, turno_id, inicio_pausa, fim_pausa, motivo, km_inicio, km_fim) FROM stdin;
+0f800612-41ec-4b6e-bda4-988fb6878d26	a20e342c-e0ed-4348-ac0f-caf9c1bbe3c7	2026-08-30 13:21:28.515811-03	2026-08-30 17:34:44.712491-03	Pausa Operacional	1230.00	\N
+\.
+
+
+--
+-- Data for Name: regras_manutencao; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.regras_manutencao (id, veiculo_id, tipo_servico, intervalo_km, aviso_previo_km, ativo) FROM stdin;
+\.
+
+
+--
+-- Data for Name: transacoes; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.transacoes (id, motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria, valor, estabelecimento, metodo_pagamento, contexto_operacional, comprovante_url, idempotencia_hash, estornado, data_transacao, descricao, wpp_msg_id, created_at, litros_abastecidos, preco_por_litro, odometro_abastecimento, tanque_cheio) FROM stdin;
+2dcbaa3d-f14d-467f-855a-67afc9d668e4	4ef8c731-7878-4091-923d-50f1c06c34d0	a20e342c-e0ed-4348-ac0f-caf9c1bbe3c7	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	combustivel	25.0000	\N	\N	\N	\N	\N	f	2026-08-30 10:35:39.319519-03	Abasteci 25	ACF45D985899461A83AEADBEC09CE7A8	2026-08-30 10:35:39.319519-03	7.84	3.1900	179876.00	f
+cd8df731-e2f3-4a49-bbda-a218c025f731	4ef8c731-7878-4091-923d-50f1c06c34d0	a20e342c-e0ed-4348-ac0f-caf9c1bbe3c7	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	combustivel	37.0000	\N	\N	\N	\N	\N	f	2026-08-30 12:45:42.67019-03	Abasteci 37	AC89FAC2ACD45E668DDC32A7DC478095	2026-08-30 12:45:42.67019-03	11.60	3.1900	179890.00	f
+8f153575-5d5b-49e5-a727-cd7f34207b49	4ef8c731-7878-4091-923d-50f1c06c34d0	a20e342c-e0ed-4348-ac0f-caf9c1bbe3c7	7debe768-155b-4d25-b8a1-22a7b8bd13f5	receita	geral	380.0000	\N	\N	\N	\N	\N	f	2026-08-30 20:46:11.376985-03	Ganhei 380 na Uber	ACBEF38E08235A08B5443EA4B29223DE	2026-08-30 20:46:11.376985-03	\N	\N	\N	f
+22ec151d-1392-402e-add7-0be8cd72ce96	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	geral	18.0000	\N	\N	\N	\N	\N	f	2026-08-30 22:39:55.567181-03	Gastei 18 na farmácia	AC5C9001FDF9A190C44D4C3D8BE24AF2	2026-08-30 22:39:55.567181-03	\N	\N	\N	f
+223fc0bb-be0c-4209-ab6e-4c870ecb40b5	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	geral	24.0000	\N	\N	\N	\N	\N	f	2026-08-31 10:41:24.643308-03	Gastei 24 na farmácia	AC711B45D384CF58D06BCBB72A5220A2	2026-08-31 10:41:24.643308-03	\N	\N	\N	f
+a9f1addd-2fd8-4922-9a98-e9c923b65a65	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	geral	227.0000	\N	\N	\N	\N	\N	f	2026-08-31 13:54:45.597082-03	Gastei 227 no mercado	AC307C9EF7824A6BEDDE30CB9FDD7560	2026-08-31 13:54:45.597082-03	\N	\N	\N	f
+ad0680c1-3146-437f-980f-b1ee11791a2a	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	geral	0.0100	\N	\N	\N	\N	\N	f	2026-08-31 16:16:09.767451-03	Gastei 0,01 em teste	AC66671CB5468BDE947A2CD2A7277B1A	2026-08-31 16:16:09.767451-03	\N	\N	\N	f
+919faca9-9cf9-4b39-8676-7fdb79055da4	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7debe768-155b-4d25-b8a1-22a7b8bd13f5	receita	gorjeta	0.0100	\N	\N	\N	\N	\N	f	2026-08-31 16:16:43.453343-03	Ganhei 0,01 de gorjeta	ACC885857394F81FE64AA9D682CC857B	2026-08-31 16:16:43.453343-03	\N	\N	\N	f
+\.
+
+
+--
+-- Data for Name: turnos; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.turnos (id, motorista_id, veiculo_id, km_inicial, km_final, data_inicio, data_fim, status, km_uso_pessoal) FROM stdin;
+a20e342c-e0ed-4348-ac0f-caf9c1bbe3c7	4ef8c731-7878-4091-923d-50f1c06c34d0	7debe768-155b-4d25-b8a1-22a7b8bd13f5	179869.00	179992.00	2026-08-30 10:07:03.68517-03	2026-08-30 20:46:26.401066-03	concluido	0.00
+\.
+
+
+--
+-- Data for Name: veiculos; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.veiculos (id, motorista_id, placa, modelo, tipo_combustivel, estoque_financeiro, ativo, criado_em, created_at, locadora, custo_aluguel_semanal, franquia_km_semanal, valor_km_excedente, escala_trabalho, contrato_personalizado, capacidade_bateria, is_flex, qtd_tanques, is_hibrido, is_eletrico) FROM stdin;
+7debe768-155b-4d25-b8a1-22a7b8bd13f5	4ef8c731-7878-4091-923d-50f1c06c34d0	EPT8C00	Uno Fiat	etanol	{"gnv": {"m3": 0.0, "km_m3": 14.0, "custo_total": 0.0}, "meta": {"is_flex": false, "is_hibrido": false, "is_eletrico": false, "qtd_tanques": 1, "tipo_veiculo": "etanol", "capacidade_tanque_l": 40.0, "capacidade_bateria_kwh": 0.0}, "liquido": {"litros": 1.4, "custo_total": 2.19, "km_l_etanol": 7.5, "etanol_litros": 1.4, "km_l_gasolina": 12.0, "gasolina_litros": 0.0, "etanol_proporcao": 1.0, "gasolina_proporcao": 0.0}, "eletricidade": {"kwh": 0.0, "km_kwh": 6.5, "custo_total": 0.0}}	t	2026-08-29 09:33:13.797524-03	2026-08-29 09:33:13.797524-03	Financiado	252.00	0.00	0.7500	De quarta a segunda (6 dias)	t	30.00	f	1	f	f
+cd405a97-ddb9-4384-8895-628b262bc9dc	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	UDE7C38	Start honda	gasolina	{"gnv": {"m3": 0.0, "km_m3": 14.0, "custo_total": 0.0}, "meta": {"is_flex": false, "is_hibrido": false, "is_eletrico": false, "qtd_tanques": 1, "tipo_veiculo": "gasolina", "categoria_veiculo": "moto", "capacidade_tanque_l": 14.0, "capacidade_bateria_kwh": 0.0}, "liquido": {"litros": 0.0, "custo_total": 0.0, "km_l_etanol": 8.5, "etanol_litros": 0.0, "km_l_gasolina": 12.0, "gasolina_litros": 0.0, "etanol_proporcao": 0.0, "gasolina_proporcao": 1.0}, "eletricidade": {"kwh": 0.0, "km_kwh": 6.5, "custo_total": 0.0}}	t	2026-08-30 14:57:03.318752-03	2026-08-30 14:57:03.318752-03	Localiza Zarp	1020.85	1505.00	0.7500	De quarta a segunda (6 dias)	f	30.00	f	1	f	f
+\.
+
+
+--
+-- Name: assinaturas assinaturas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.assinaturas
+    ADD CONSTRAINT assinaturas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: caixas_provisao caixas_provisao_motorista_id_nome_caixa_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.caixas_provisao
+    ADD CONSTRAINT caixas_provisao_motorista_id_nome_caixa_key UNIQUE (motorista_id, nome_caixa);
+
+
+--
+-- Name: caixas_provisao caixas_provisao_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.caixas_provisao
+    ADD CONSTRAINT caixas_provisao_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: despesas_fixas_mensais despesas_fixas_mensais_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.despesas_fixas_mensais
+    ADD CONSTRAINT despesas_fixas_mensais_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: dlq_eventos dlq_eventos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dlq_eventos
+    ADD CONSTRAINT dlq_eventos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: fechamento_diario fechamento_diario_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fechamento_diario
+    ADD CONSTRAINT fechamento_diario_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: fechamentos_consolidados fechamentos_consolidados_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fechamentos_consolidados
+    ADD CONSTRAINT fechamentos_consolidados_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: historico_manutencao historico_manutencao_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.historico_manutencao
+    ADD CONSTRAINT historico_manutencao_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: lgpd_logs lgpd_logs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.lgpd_logs
+    ADD CONSTRAINT lgpd_logs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: motoristas motoristas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.motoristas
+    ADD CONSTRAINT motoristas_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: motoristas motoristas_telefone_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.motoristas
+    ADD CONSTRAINT motoristas_telefone_key UNIQUE (telefone);
+
+
+--
+-- Name: pausas_turno pausas_turno_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pausas_turno
+    ADD CONSTRAINT pausas_turno_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: regras_manutencao regras_manutencao_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.regras_manutencao
+    ADD CONSTRAINT regras_manutencao_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: transacoes transacoes_idempotencia_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transacoes
+    ADD CONSTRAINT transacoes_idempotencia_hash_key UNIQUE (idempotencia_hash);
+
+
+--
+-- Name: transacoes transacoes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transacoes
+    ADD CONSTRAINT transacoes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: transacoes transacoes_wpp_msg_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transacoes
+    ADD CONSTRAINT transacoes_wpp_msg_id_key UNIQUE (wpp_msg_id);
+
+
+--
+-- Name: turnos turnos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turnos
+    ADD CONSTRAINT turnos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: veiculos veiculos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.veiculos
+    ADD CONSTRAINT veiculos_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: veiculos veiculos_placa_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.veiculos
+    ADD CONSTRAINT veiculos_placa_key UNIQUE (placa);
+
+
+--
+-- Name: idx_assinaturas_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_assinaturas_motorista ON public.assinaturas USING btree (motorista_id);
+
+
+--
+-- Name: idx_caixas_provisao_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_caixas_provisao_motorista ON public.caixas_provisao USING btree (motorista_id);
+
+
+--
+-- Name: idx_despesas_fixas_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_despesas_fixas_motorista ON public.despesas_fixas_mensais USING btree (motorista_id);
+
+
+--
+-- Name: idx_dlq_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_dlq_motorista ON public.dlq_eventos USING btree (motorista_id);
+
+
+--
+-- Name: idx_dlq_payload_gin; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_dlq_payload_gin ON public.dlq_eventos USING gin (payload_original);
+
+
+--
+-- Name: idx_fechamento_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_fechamento_motorista ON public.fechamento_diario USING btree (motorista_id);
+
+
+--
+-- Name: idx_fechamento_turno; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_fechamento_turno ON public.fechamento_diario USING btree (turno_id);
+
+
+--
+-- Name: idx_fechamentos_consolidados_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_fechamentos_consolidados_motorista ON public.fechamentos_consolidados USING btree (motorista_id);
+
+
+--
+-- Name: idx_historico_veiculo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_historico_veiculo ON public.historico_manutencao USING btree (veiculo_id);
+
+
+--
+-- Name: idx_lgpd_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_lgpd_motorista ON public.lgpd_logs USING btree (motorista_id);
+
+
+--
+-- Name: idx_pausas_turno; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_pausas_turno ON public.pausas_turno USING btree (turno_id);
+
+
+--
+-- Name: idx_regras_veiculo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_regras_veiculo ON public.regras_manutencao USING btree (veiculo_id);
+
+
+--
+-- Name: idx_transacoes_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transacoes_created ON public.transacoes USING btree (created_at);
+
+
+--
+-- Name: idx_transacoes_data; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transacoes_data ON public.transacoes USING btree (data_transacao);
+
+
+--
+-- Name: idx_transacoes_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transacoes_motorista ON public.transacoes USING btree (motorista_id);
+
+
+--
+-- Name: idx_transacoes_recalibracao_telemetria; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transacoes_recalibracao_telemetria ON public.transacoes USING btree (veiculo_id, tanque_cheio, data_transacao) WHERE ((estornado = false) AND ((categoria)::text = 'combustivel'::text));
+
+
+--
+-- Name: idx_transacoes_turno; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transacoes_turno ON public.transacoes USING btree (turno_id);
+
+
+--
+-- Name: idx_transacoes_veiculo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transacoes_veiculo ON public.transacoes USING btree (veiculo_id);
+
+
+--
+-- Name: idx_turnos_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_turnos_motorista ON public.turnos USING btree (motorista_id);
+
+
+--
+-- Name: idx_turnos_veiculo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_turnos_veiculo ON public.turnos USING btree (veiculo_id);
+
+
+--
+-- Name: idx_unico_fechamento_periodo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_unico_fechamento_periodo ON public.fechamentos_consolidados USING btree (motorista_id, tipo_periodo, referencia);
+
+
+--
+-- Name: idx_unico_turno_aberto; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_unico_turno_aberto ON public.turnos USING btree (motorista_id) WHERE ((status)::text = ANY ((ARRAY['em_andamento'::character varying, 'em_pausa'::character varying, 'ABERTO'::character varying])::text[]));
+
+
+--
+-- Name: idx_veiculos_estoque_gin; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_veiculos_estoque_gin ON public.veiculos USING gin (estoque_financeiro);
+
+
+--
+-- Name: idx_veiculos_motorista; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_veiculos_motorista ON public.veiculos USING btree (motorista_id);
+
+
+--
+-- Name: transacoes trg_trava_periodo_transacoes; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_trava_periodo_transacoes BEFORE INSERT OR DELETE OR UPDATE ON public.transacoes FOR EACH ROW EXECUTE FUNCTION public.function_verificar_periodo_fechado();
+
+
+--
+-- Name: caixas_provisao trig_caixas_atualizacao; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trig_caixas_atualizacao BEFORE UPDATE ON public.caixas_provisao FOR EACH ROW EXECUTE FUNCTION public.update_timestamp_func();
+
+
+--
+-- Name: motoristas trig_motoristas_atualizado_em; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trig_motoristas_atualizado_em BEFORE UPDATE ON public.motoristas FOR EACH ROW EXECUTE FUNCTION public.update_timestamp_func();
+
+
+--
+-- Name: assinaturas assinaturas_motorista_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.assinaturas
+    ADD CONSTRAINT assinaturas_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: caixas_provisao caixas_provisao_motorista_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.caixas_provisao
+    ADD CONSTRAINT caixas_provisao_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: despesas_fixas_mensais despesas_fixas_mensais_motorista_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.despesas_fixas_mensais
+    ADD CONSTRAINT despesas_fixas_mensais_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: dlq_eventos dlq_eventos_motorista_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dlq_eventos
+    ADD CONSTRAINT dlq_eventos_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE CASCADE;
+
+
+--
+-- Name: fechamento_diario fechamento_diario_motorista_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fechamento_diario
+    ADD CONSTRAINT fechamento_diario_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: fechamento_diario fechamento_diario_turno_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fechamento_diario
+    ADD CONSTRAINT fechamento_diario_turno_id_fkey FOREIGN KEY (turno_id) REFERENCES public.turnos(id) ON DELETE SET NULL;
+
+
+--
+-- Name: fechamentos_consolidados fechamentos_consolidados_motorista_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.fechamentos_consolidados
+    ADD CONSTRAINT fechamentos_consolidados_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: historico_manutencao historico_manutencao_regra_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.historico_manutencao
+    ADD CONSTRAINT historico_manutencao_regra_id_fkey FOREIGN KEY (regra_id) REFERENCES public.regras_manutencao(id) ON DELETE SET NULL;
+
+
+--
+-- Name: historico_manutencao historico_manutencao_transacao_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.historico_manutencao
+    ADD CONSTRAINT historico_manutencao_transacao_id_fkey FOREIGN KEY (transacao_id) REFERENCES public.transacoes(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: historico_manutencao historico_manutencao_veiculo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.historico_manutencao
+    ADD CONSTRAINT historico_manutencao_veiculo_id_fkey FOREIGN KEY (veiculo_id) REFERENCES public.veiculos(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: pausas_turno pausas_turno_turno_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pausas_turno
+    ADD CONSTRAINT pausas_turno_turno_id_fkey FOREIGN KEY (turno_id) REFERENCES public.turnos(id) ON DELETE CASCADE;
+
+
+--
+-- Name: regras_manutencao regras_manutencao_veiculo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.regras_manutencao
+    ADD CONSTRAINT regras_manutencao_veiculo_id_fkey FOREIGN KEY (veiculo_id) REFERENCES public.veiculos(id) ON DELETE CASCADE;
+
+
+--
+-- Name: transacoes transacoes_motorista_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transacoes
+    ADD CONSTRAINT transacoes_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: transacoes transacoes_turno_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transacoes
+    ADD CONSTRAINT transacoes_turno_id_fkey FOREIGN KEY (turno_id) REFERENCES public.turnos(id) ON DELETE SET NULL;
+
+
+--
+-- Name: transacoes transacoes_veiculo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transacoes
+    ADD CONSTRAINT transacoes_veiculo_id_fkey FOREIGN KEY (veiculo_id) REFERENCES public.veiculos(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: turnos turnos_motorista_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turnos
+    ADD CONSTRAINT turnos_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: turnos turnos_veiculo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turnos
+    ADD CONSTRAINT turnos_veiculo_id_fkey FOREIGN KEY (veiculo_id) REFERENCES public.veiculos(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: veiculos veiculos_motorista_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.veiculos
+    ADD CONSTRAINT veiculos_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: assinaturas; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
 ALTER TABLE public.assinaturas ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.veiculos ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.turnos ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.transacoes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.despesas_fixas_mensais ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: caixas_provisao; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
 ALTER TABLE public.caixas_provisao ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.fechamento_diario ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: despesas_fixas_mensais; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.despesas_fixas_mensais ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: dlq_eventos; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
 ALTER TABLE public.dlq_eventos ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.lgpd_logs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: fechamento_diario; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.fechamento_diario ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: fechamentos_consolidados; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
 ALTER TABLE public.fechamentos_consolidados ENABLE ROW LEVEL SECURITY;
 
--- Políticas utilizando estritamente a variável de sessão 'app.current_driver_id'
--- Alinhado à perfeição com o backend em Python (DatabaseService/TurnoService/TransacaoService)
-DROP POLICY IF EXISTS isolamento_motoristas ON public.motoristas;
-CREATE POLICY isolamento_motoristas ON public.motoristas FOR ALL USING (id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
+--
+-- Name: assinaturas isolamento_assinaturas; Type: POLICY; Schema: public; Owner: -
+--
 
-DROP POLICY IF EXISTS isolamento_assinaturas ON public.assinaturas;
-CREATE POLICY isolamento_assinaturas ON public.assinaturas FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
+CREATE POLICY isolamento_assinaturas ON public.assinaturas USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
 
-DROP POLICY IF EXISTS isolamento_veiculos ON public.veiculos;
-CREATE POLICY isolamento_veiculos ON public.veiculos FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
 
-DROP POLICY IF EXISTS isolamento_turnos ON public.turnos;
-CREATE POLICY isolamento_turnos ON public.turnos FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
+--
+-- Name: caixas_provisao isolamento_caixas; Type: POLICY; Schema: public; Owner: -
+--
 
-DROP POLICY IF EXISTS isolamento_transacoes ON public.transacoes;
-CREATE POLICY isolamento_transacoes ON public.transacoes FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
+CREATE POLICY isolamento_caixas ON public.caixas_provisao USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
 
-DROP POLICY IF EXISTS isolamento_despesas ON public.despesas_fixas_mensais;
-CREATE POLICY isolamento_despesas ON public.despesas_fixas_mensais FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
 
-DROP POLICY IF EXISTS isolamento_caixas ON public.caixas_provisao;
-CREATE POLICY isolamento_caixas ON public.caixas_provisao FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
+--
+-- Name: despesas_fixas_mensais isolamento_despesas; Type: POLICY; Schema: public; Owner: -
+--
 
-DROP POLICY IF EXISTS isolamento_fechamento ON public.fechamento_diario;
-CREATE POLICY isolamento_fechamento ON public.fechamento_diario FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
+CREATE POLICY isolamento_despesas ON public.despesas_fixas_mensais USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
 
-DROP POLICY IF EXISTS isolamento_dlq ON public.dlq_eventos;
-CREATE POLICY isolamento_dlq ON public.dlq_eventos FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
 
-DROP POLICY IF EXISTS isolamento_lgpd ON public.lgpd_logs;
-CREATE POLICY isolamento_lgpd ON public.lgpd_logs FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
+--
+-- Name: dlq_eventos isolamento_dlq; Type: POLICY; Schema: public; Owner: -
+--
 
-DROP POLICY IF EXISTS isolamento_fechamentos_macro ON public.fechamentos_consolidados;
-CREATE POLICY isolamento_fechamentos_macro ON public.fechamentos_consolidados FOR ALL USING (motorista_id = nullif(current_setting('app.current_driver_id', true), '')::uuid);
+CREATE POLICY isolamento_dlq ON public.dlq_eventos USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
+
+
+--
+-- Name: fechamento_diario isolamento_fechamento; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY isolamento_fechamento ON public.fechamento_diario USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
+
+
+--
+-- Name: fechamentos_consolidados isolamento_fechamentos_macro; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY isolamento_fechamentos_macro ON public.fechamentos_consolidados USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
+
+
+--
+-- Name: lgpd_logs isolamento_lgpd; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY isolamento_lgpd ON public.lgpd_logs USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
+
+
+--
+-- Name: motoristas isolamento_motoristas; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY isolamento_motoristas ON public.motoristas USING ((id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
+
+
+--
+-- Name: transacoes isolamento_transacoes; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY isolamento_transacoes ON public.transacoes USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
+
+
+--
+-- Name: turnos isolamento_turnos; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY isolamento_turnos ON public.turnos USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
+
+
+--
+-- Name: veiculos isolamento_veiculos; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY isolamento_veiculos ON public.veiculos USING ((motorista_id = (NULLIF(current_setting('app.current_driver_id'::text, true), ''::text))::uuid));
+
+
+--
+-- Name: lgpd_logs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.lgpd_logs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: motoristas; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.motoristas ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: transacoes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.transacoes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: turnos; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.turnos ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: veiculos; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.veiculos ENABLE ROW LEVEL SECURITY;
+
+--
+-- PostgreSQL database dump complete
+--
+
+\unrestrict HGX7hRR6AY1WRkNgtzumk6d07eFUnNDG53gh4fBOp0jfAooB60ymF1koMwA6qWe
+

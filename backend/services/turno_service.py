@@ -615,11 +615,17 @@ class TurnoService:
                 custo_fixo_rateado = (custo_aluguel_semanal / Decimal("6.00")).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
 
                 # Pro-rata extra de despesas fixas cadastradas pelo motorista
-                df_extra = await conn.fetchval(
-                    "SELECT COALESCE(SUM(valor_pro_rata_diario), 0.0000) FROM public.despesas_fixas_mensais WHERE motorista_id = $1::uuid AND ativo = TRUE;",
+                # Busca também caixa_id para aporte automático na caixinha vinculada
+                despesas_fixas_rows = await conn.fetch(
+                    """
+                    SELECT nome, valor_pro_rata_diario, caixa_id
+                    FROM public.despesas_fixas_mensais
+                    WHERE motorista_id = $1::uuid AND ativo = TRUE;
+                    """,
                     motorista_id
                 )
-                custo_fixo_total = custo_fixo_rateado + Decimal(str(df_extra or "0.00"))
+                df_extra = sum(Decimal(str(r["valor_pro_rata_diario"])) for r in despesas_fixas_rows)
+                custo_fixo_total = custo_fixo_rateado + df_extra
 
                 # 5. DRE COMPLETO E LÓGICA DE PROVISÃO
                 lucro_liquido_real = faturamento_bruto - custo_variavel_total - custo_fixo_total
@@ -638,15 +644,68 @@ class TurnoService:
                 total_unidades_queimadas = total_unidades_queimadas_liq + total_unidades_queimadas_ele
                 km_por_unidade = (km_profissional / total_unidades_queimadas) if total_unidades_queimadas > 0 else Decimal("0.00")
 
+                # 5.1. APORTE AUTOMÁTICO NAS CAIXAS DE PROVISÃO
+                # Para cada despesa fixa com caixa vinculada, credita o pro-rata na caixinha.
+                # Usa INSERT ... ON CONFLICT para criar a caixa se ainda não existir.
+                # Retorna lista de aportes para exibição no DRE.
+                aportes_caixas: list[dict] = []
+                provisao_descontada_total = Decimal("0.00")
+
+                for df_row in despesas_fixas_rows:
+                    pro_rata = Decimal(str(df_row["valor_pro_rata_diario"]))
+                    provisao_descontada_total += pro_rata
+                    caixa_id_row = df_row["caixa_id"]
+
+                    if caixa_id_row:
+                        # Caixa vinculada por UUID — aporte direto e preciso
+                        await conn.execute(
+                            """
+                            UPDATE public.caixas_provisao
+                            SET saldo_atual = saldo_atual + $1
+                            WHERE id = $2::uuid AND motorista_id = $3::uuid;
+                            """,
+                            pro_rata, str(caixa_id_row), motorista_id,
+                        )
+                        # Busca nome da caixa para o relatório
+                        nome_caixa_row = await conn.fetchval(
+                            "SELECT nome_caixa FROM public.caixas_provisao WHERE id = $1::uuid;",
+                            str(caixa_id_row),
+                        )
+                        aportes_caixas.append({
+                            "caixa": nome_caixa_row or str(caixa_id_row),
+                            "aporte": float(pro_rata),
+                            "origem": df_row["nome"],
+                        })
+                    else:
+                        # Despesa sem caixa vinculada: tenta match pelo nome da despesa
+                        # (fallback legado para despesas criadas antes da migração v9)
+                        updated = await conn.execute(
+                            """
+                            UPDATE public.caixas_provisao
+                            SET saldo_atual = saldo_atual + $1
+                            WHERE motorista_id = $2::uuid AND lower(nome_caixa) = lower($3);
+                            """,
+                            pro_rata, motorista_id, df_row["nome"],
+                        )
+                        n_updated = int(updated.split()[-1]) if updated else 0
+                        if n_updated > 0:
+                            aportes_caixas.append({
+                                "caixa": df_row["nome"],
+                                "aporte": float(pro_rata),
+                                "origem": df_row["nome"],
+                            })
+                        # Se não existe caixa com esse nome, o valor já foi deduzido no DRE
+                        # mas não há onde depositar — silencia (motorista pode criar a caixa depois)
+
                 # Persiste o snapshot contábil na tabela fechamento_diario
                 # Armazena km_profissional para que médias históricas reflitam apenas serviço real
                 await conn.execute(
                     "INSERT INTO public.fechamento_diario ("
                     "    motorista_id, turno_id, faturamento_bruto, custo_variavel_direto, "
-                    "    custo_fixo_rateado, lucro_liquido_real, km_rodados, data_fechamento"
-                    ") VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, CURRENT_DATE);",
+                    "    custo_fixo_rateado, lucro_liquido_real, km_rodados, data_fechamento, provisao_descontada"
+                    ") VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, CURRENT_DATE, $8);",
                     motorista_id, turno_id, faturamento_bruto, custo_variavel_total,
-                    custo_fixo_total, lucro_liquido_real, km_profissional
+                    custo_fixo_total, lucro_liquido_real, km_profissional, provisao_descontada_total
                 )
 
             return {
@@ -684,7 +743,9 @@ class TurnoService:
                 "valor_km_excedente": float(turno["valor_km_excedente"] or 0.75),
                 "contrato_personalizado": bool(turno["contrato_personalizado"]),
                 "detalhe_queima": " | ".join(detalhe_queima),
-                "despesas_detalhadas": despesas_detalhadas
+                "despesas_detalhadas": despesas_detalhadas,
+                "aportes_caixas": aportes_caixas,
+                "provisao_descontada": float(provisao_descontada_total),
             }
 
         except Exception as e:

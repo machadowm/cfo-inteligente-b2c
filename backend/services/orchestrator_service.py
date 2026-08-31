@@ -287,6 +287,22 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     else:
         secao_projecao = ""
 
+    # ── Caixas de provisão (aportes automáticos do turno) ─────────────────────
+    aportes_caixas = res.get("aportes_caixas", [])
+    provisao_descontada = res.get("provisao_descontada", 0.0)
+    secao_caixas = ""
+    if aportes_caixas:
+        linhas_aportes = ""
+        for ap in aportes_caixas:
+            linhas_aportes += f" -  *{ap['caixa']}* :  +R$ {ap['aporte']:.2f}\n"
+        secao_caixas = (
+            f"📦  *5. CAIXAS DE PROVISÃO* \n"
+            f"• Aportes automáticos deste turno:\n"
+            + linhas_aportes
+            + f"• Total provisionado hoje:  *R$ {provisao_descontada:.2f}*\n"
+            f"_(Envie  *!caixas*  para ver os saldos acumulados)_\n\n"
+        )
+
     # ── Rodapé de configuração de contrato ────────────────────────────────────
     rodape_sugestao = ""
     if not res.get("contrato_personalizado", False):
@@ -333,6 +349,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
         + f"• Rendimento ({label_rendimento}):  *{km_por_unidade:.2f}* \n"
         + f"• Atingimento Meta Diária (R$ {meta_diaria:.2f}):  *{perc_meta:.1f}%* \n\n"
         + secao_projecao
+        + secao_caixas
         + _nota_qualidade_dados(km_por_unidade, res.get("detalhe_queima", ""))
         + f"🛡  *Cofre Contábil Atualizado! Bom descanso, {nome_motorista}!*"
         + rodape_sugestao

@@ -339,36 +339,35 @@ class OrchestratorService:
                 await RedisFSMService.definir_estado(fsm_key, "AGUARDANDO_NOME")
                 await enviar_whatsapp(
                     remote_jid,
-                    "Fala, motorista! Seja bem-vindo ao  *CFO Inteligente B2C*  🚀\n"
-                    "Percebi que você ainda não tem cadastro por aqui. Vamos resolver isso em 1 minuto de forma simples!\n\n"
-                    "Para começar, digite o seu  **nome completo** :"
+                    "Ei, tudo bem? 👋 Seja bem-vindo ao  *CFO Inteligente* !\n\n"
+                    "Aqui você controla seus ganhos, gastos e lucro real direto pelo WhatsApp — sem planilha, sem complicação.\n\n"
+                    "Vamos criar seu perfil rapidinho! Como você se chama?"
                 )
                 return
 
             elif estado_atual == "AGUARDANDO_NOME":
                 if len(texto_bruto) < 3:
                     await registrar_erro_e_verificar_escape(
-                        remote_jid, tenant_id, fsm_key, "⚠ O seu nome deve conter pelo menos 3 caracteres. Digite novamente:"
+                        remote_jid, tenant_id, fsm_key, "Hmm, parece curto demais. 😅 Me manda seu nome completo:"
                     )
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_VEICULO|name:{texto_bruto}")
                 await enviar_whatsapp(
-                    remote_jid, f"Prazer em te conhecer,  *{texto_bruto}* ! 🚗\nQual é o  **modelo e marca**  do seu principal veículo de trabalho?"
+                    remote_jid,
+                    f"Que nome bonito,  *{texto_bruto}* ! 😄\n\n"
+                    "Agora me fala: qual é o modelo do seu veículo de trabalho? (Ex:  *Honda CG 160* ,  *HB20* ,  *Gol 1.6* )"
                 )
                 return
 
             elif estado_atual.startswith("AGUARDANDO_VEICULO"):
                 nome = estado_atual.split("|name:")[1] if "|name:" in estado_atual else "Motorista"
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                # Pergunta a categoria antes do combustível — define os defaults de rendimento
-                # corretos para carros (~12 km/L) vs. motos (~35 km/L), evitando o cold-start
-                # do sanity check Full-to-Full rejeitar motos no primeiro ciclo.
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CATEGORIA_VEICULO|name:{nome}|veiculo:{texto_bruto}")
                 await enviar_whatsapp(
                     remote_jid,
-                    f"Show!  *{texto_bruto}*  anotado! 🚗🏍\n\n"
-                    "É um  *Carro*  ou uma  *Moto* ?\n\n"
+                    f"Boa,  *{texto_bruto}*  anotado! 🚗🏍\n\n"
+                    "Ele é um  *Carro*  ou uma  *Moto* ?\n\n"
                     "👉  *Carro*\n"
                     "👉  *Moto*"
                 )
@@ -387,20 +386,19 @@ class OrchestratorService:
                 else:
                     await registrar_erro_e_verificar_escape(
                         remote_jid, tenant_id, fsm_key,
-                        "⚠ Por favor, responda  *Carro*  ou  *Moto* :"
+                        "Não entendi bem. 😅 Responda  *Carro*  ou  *Moto* :"
                     )
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_COMBUSTIVEL|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}")
                 await enviar_whatsapp(
                     remote_jid,
-                    f"Perfeito! E qual é o combustível da sua {veiculo}? ⛽\n\n"
-                    "Responda exatamente com uma das opções:\n"
-                    "👉  *Gasolina* \n"
-                    "👉  *Etanol* \n"
-                    "👉  *Flex* \n"
-                    "👉  *Hibrido* \n"
-                    "👉  *Eletrico* \n"
+                    f"Entendido! ⛽ Qual é o combustível do  *{veiculo}* ?\n\n"
+                    "👉  *Gasolina*\n"
+                    "👉  *Etanol*\n"
+                    "👉  *Flex*  _(aceita os dois)_\n"
+                    "👉  *Hibrido*\n"
+                    "👉  *Eletrico*\n"
                     "👉  *GNV*"
                 )
                 return
@@ -416,13 +414,16 @@ class OrchestratorService:
                 if comb_input not in combustiveis_suportados:
                     await registrar_erro_e_verificar_escape(
                         remote_jid, tenant_id, fsm_key,
-                        "⚠ Por favor, responda exatamente com um dos combustíveis suportados:  *Gasolina, Etanol, Flex, Hibrido, Eletrico*  ou  *GNV* :"
+                        "Esse combustível não reconheci. 😅 Tenta uma dessas opções:\n"
+                        "*Gasolina, Etanol, Flex, Hibrido, Eletrico* ou *GNV*"
                     )
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_PLACA|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}|combustivel:{comb_input}")
                 await enviar_whatsapp(
-                    remote_jid, f"Perfeito! E qual é a  **placa do seu veículo** ? (Ex: ABC-1234 ou ABC1D23)"
+                    remote_jid,
+                    "Ótimo! Agora me passa a  *placa*  do veículo. 🔡\n"
+                    "_(Ex: ABC1234 ou ABC1D23)_"
                 )
                 return
 
@@ -435,13 +436,16 @@ class OrchestratorService:
                 placa_limpa = re.sub(r'[^A-Za-z0-9]', '', texto_bruto).upper()
                 if len(placa_limpa) != 7:
                     await registrar_erro_e_verificar_escape(
-                        remote_jid, tenant_id, fsm_key, "⚠ A placa do veículo deve conter exatamente 7 caracteres alfanuméricos. Digite novamente:"
+                        remote_jid, tenant_id, fsm_key,
+                        "Hmm, a placa precisa ter 7 caracteres (ex:  *ABC1234* ). Tenta de novo:"
                     )
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CAPACIDADE_TANQUE|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}|combustivel:{combustivel}|placa:{placa_limpa}")
                 await enviar_whatsapp(
-                    remote_jid, "Legal! Agora me diz qual a  **capacidade máxima do tanque**  em litros do seu veículo? (Se for elétrico puro, responda  *0* ):"
+                    remote_jid,
+                    "Quase lá! ⛽ Qual a  *capacidade do tanque*  em litros?\n"
+                    "_(Se for elétrico puro, manda  *0* )_"
                 )
                 return
 
@@ -455,13 +459,13 @@ class OrchestratorService:
                 tanque_val = converter_para_float(texto_bruto)
                 if tanque_val < 0:
                     await registrar_erro_e_verificar_escape(
-                        remote_jid, tenant_id, fsm_key, "⚠ A capacidade não pode ser negativa. Digite novamente:"
+                        remote_jid, tenant_id, fsm_key, "Valor negativo não funciona aqui. 😅 Manda a capacidade em litros:"
                     )
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 if combustivel in ["hibrido", "eletrico"]:
                     await RedisFSMService.definir_estado(fsm_key, f"AGUARDANDO_CAPACIDADE_BATERIA|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}|combustivel:{combustivel}|placa:{placa}|tanque:{tanque_val}")
-                    await enviar_whatsapp(remote_jid, "E qual a  **capacidade da bateria**  em kWh do seu veículo? (Ex: 30):")
+                    await enviar_whatsapp(remote_jid, "🔋 E qual a capacidade da bateria em  *kWh* ? (Ex:  *30* )")
                     return
                 else:
                     await enviar_whatsapp(remote_jid, "⚙  *A preparar o seu cofre contábil... Só um segundo!*")
@@ -514,9 +518,11 @@ class OrchestratorService:
                             )
                         await RedisFSMService.limpar_buffer(fsm_key)
                         await enviar_whatsapp(
-                            remote_jid, f"Cadastro concluído com sucesso, {nome}! 🛡\n"
-                            f"O seu cofre contábil está ativo e configurado para o seu  *{veiculo}*  ({placa}).\n\n"
-                            "Envie  *'Iniciar'*  ou  *'Iniciar turno'*  acompanhado do seu odômetro atual para começar!"
+                            remote_jid,
+                            f"Tudo pronto,  *{nome}* ! 🎉\n\n"
+                            f"Seu cofre está ativo para o  *{veiculo}*  ({placa}).\n\n"
+                            "Sempre que iniciar seu dia, manda  *iniciar*  com o km do painel.\n"
+                            "Ex:  *iniciar 45230*"
                         )
                     except Exception as e:
                         logger.error(f"Falha ao salvar onboarding no banco: {e}")
@@ -534,11 +540,11 @@ class OrchestratorService:
                 bateria_val = converter_para_float(texto_bruto)
                 if bateria_val < 0:
                     await registrar_erro_e_verificar_escape(
-                        remote_jid, tenant_id, fsm_key, "⚠ A capacidade não pode ser negativa. Digite novamente:"
+                        remote_jid, tenant_id, fsm_key, "Valor negativo não funciona aqui. 😅 Manda a capacidade em kWh:"
                     )
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                await enviar_whatsapp(remote_jid, "⚙  *A preparar o seu cofre contábil... Só um segundo!*")
+                await enviar_whatsapp(remote_jid, "⚙ Configurando seu cofre... um segundo!")
                 try:
                     motorista_uuid = await DatabaseService.registrar_novo_motorista(
                         telefone=tenant_id, nome=nome, veiculo_modelo=veiculo, combustivel=combustivel, placa=placa
@@ -586,9 +592,11 @@ class OrchestratorService:
                         )
                     await RedisFSMService.limpar_buffer(fsm_key)
                     await enviar_whatsapp(
-                        remote_jid, f"Cadastro concluído com sucesso, {nome}! 🛡\n"
-                        f"O seu cofre contábil está ativo e configurado para o seu  *{veiculo}*  ({placa}).\n\n"
-                        "Envie  *'Iniciar'*  ou  *'Iniciar turno'* acompanhado do seu odômetro atual para começar!"
+                        remote_jid,
+                        f"Tudo pronto,  *{nome}* ! 🎉\n\n"
+                        f"Seu cofre está ativo para o  *{veiculo}*  ({placa}).\n\n"
+                        "Sempre que iniciar seu dia, manda  *iniciar*  com o km do painel.\n"
+                        "Ex:  *iniciar 45230*"
                     )
                 except Exception as e:
                     logger.error(f"Falha ao salvar onboarding híbrido no banco: {e}")
@@ -716,7 +724,7 @@ class OrchestratorService:
                         }
                         resposta = formatar_relatorio_parcial(motorista["nome"], info_turno)
                     else:
-                        resposta = "⚠ Você não possui uma jornada em andamento. Envie  *'Iniciar'*  com o seu odômetro para abrir o turno!"
+                        resposta = "Você ainda não abriu um turno hoje. 😊 Manda  *iniciar*  com o km do painel para começar!"
             except Exception as e:
                 logger.error(f"Erro ao obter status: {e}")
                 resposta = "❌ Ocorreu um erro interno de banco de dados ao buscar seu status."
@@ -767,7 +775,7 @@ class OrchestratorService:
                 if total <= 0:
                     await registrar_erro_e_verificar_escape(
                         remote_jid, tenant_id, fsm_turno_key,
-                        "⚠ Valor inválido. Digite o valor total gasto no abastecimento (ex:  *150,00* ):"
+                        "Não consegui ler o valor. 😅 Manda o total gasto (ex:  *150,00* ):"
                     )
                     return
                 desc = params.get("desc", "Abastecimento")
@@ -787,7 +795,7 @@ class OrchestratorService:
                 if preco <= 0:
                     await registrar_erro_e_verificar_escape(
                         remote_jid, tenant_id, fsm_turno_key,
-                        "⚠ Preço por litro inválido. Digite o preço unitário (ex:  *5,85* ):"
+                        "Não entendi o preço. 😅 Manda o valor por litro (ex:  *5,85* ):"
                     )
                     return
                 total = float(params.get("total", "0"))
@@ -800,8 +808,9 @@ class OrchestratorService:
                 await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
                 await enviar_whatsapp(
                     remote_jid,
-                    f"Calculado:  *{litros_fmt} litros* .\nQual é o  *odômetro atual*  do painel? (Ex:  *179500* )\n\n"
-                    f"_(Ou envie  *pular*  para registrar sem odômetro)_"
+                    f"Calculei  *{litros_fmt} litros*  abastecidos. 👍\n\n"
+                    f"Qual o  *km do painel*  agora? (Ex:  *179500* )\n"
+                    f"_(Ou manda  *pular*  se não quiser registrar o odômetro)_"
                 )
                 return
 
@@ -815,7 +824,7 @@ class OrchestratorService:
                     if odometro <= 0:
                         await registrar_erro_e_verificar_escape(
                             remote_jid, tenant_id, fsm_turno_key,
-                            "⚠ Odômetro inválido. Informe o valor em km (ex:  *179500* ) ou envie  *pular* :"
+                            "Km inválido. Manda o valor do painel (ex:  *179500* ) ou  *pular*  para ignorar:"
                         )
                         return
                 total   = float(params.get("total",  "0"))
@@ -831,8 +840,10 @@ class OrchestratorService:
                 await RedisFSMService.definir_estado(fsm_turno_key, novo_estado, ex_seconds=_ABT_TTL)
                 await enviar_whatsapp(
                     remote_jid,
-                    "O tanque ficou  *cheio* ? (Responda  *sim*  ou  *não* )\n\n"
-                    "_(Isso permite calcular seu KM/L real no próximo abastecimento cheio)_"
+                    "O tanque ficou  *cheio* ? 🔋\n\n"
+                    "👉  *Sim*\n"
+                    "👉  *Não*\n\n"
+                    "_(Tanque cheio nos dá uma medição precisa do seu consumo real)_"
                 )
                 return
 
@@ -869,28 +880,27 @@ class OrchestratorService:
                     odo_fmt    = f"  |  Odômetro:  *{int(odometro):,} km*".replace(",", ".") if odometro else ""
                     if res_tx.get("self_healed"):
                         resposta = (
-                            f"⛽  *Abastecimento + Self-Heal Registrado!*\n\n"
+                            f"⛽  *Abastecimento registrado!*\n\n"
                             f"• Valor:  *{valor_fmt}*\n"
-                            f"• Volume real:  *{litros_fmt} L*\n"
+                            f"• Volume:  *{litros_fmt} L*\n"
                             f"• Preço/L:  *{preco_fmt}*"
                             f"{odo_fmt}\n\n"
-                            f"🔧  *Cofre auto-recalibrado:* tanque virtual ancorado à capacidade nominal.\n"
-                            f"🛡 CMP corrigido. Estoque saneado!"
+                            f"🔧 Cofre recalibrado — tanque zerado e recarregado com a capacidade real do veículo. Tudo certinho! 🛡"
                         )
                     else:
-                        cheio_str  = "  |  🔋 Tanque cheio registrado!" if tanque_cheio else ""
+                        cheio_str = "  ✅ Tanque cheio registrado!" if tanque_cheio else ""
                         resposta = (
-                            f"⛽  *Abastecimento Registrado!*\n\n"
+                            f"⛽  *Abastecimento registrado!*\n\n"
                             f"• Valor:  *{valor_fmt}*\n"
                             f"• Volume:  *{litros_fmt} L*\n"
                             f"• Preço/L:  *{preco_fmt}*"
                             f"{odo_fmt}{cheio_str}\n\n"
-                            f"🛡 Estoque e cofre atualizados!"
+                            f"Cofre atualizado! 🛡"
                         )
                 elif res_tx.get("status") == "duplicate":
-                    resposta = "⚠ Este lançamento já foi guardado anteriormente no cofre contábil."
+                    resposta = "Esse lançamento já estava guardado no cofre. 👍"
                 else:
-                    resposta = f"❌ Falha ao registrar: {res_tx.get('message')}"
+                    resposta = f"❌ Não consegui registrar: {res_tx.get('message')}"
                 await enviar_whatsapp(remote_jid, resposta)
                 # Envia sugestão de recalibração em mensagem separada para não poluir
                 # a confirmação de abastecimento com dados de engenharia.
@@ -930,8 +940,8 @@ class OrchestratorService:
                 # Resposta não reconhecida: pede novamente sem consumir o estado
                 await enviar_whatsapp(
                     remote_jid,
-                    "⚠ Não entendi. Responda com o tempo total de pausa (ex:  *1h30* ,  *45min* ,  *2h* ) "
-                    "ou  *não*  se não houve pausa."
+                    "Não entendi bem. 😅 Me diz o tempo total de pausa (ex:  *1h30* ,  *45min* ,  *2h* ) "
+                    "ou manda  *não*  se não parou."
                 )
                 return
 
@@ -990,11 +1000,11 @@ class OrchestratorService:
                 tempo_str  = f"{horas_fmt}h{minutos_fmt:02d}min" if horas_fmt else f"{minutos_fmt}min"
                 await enviar_whatsapp(
                     remote_jid,
-                    f"⏱ Pausa de  *{tempo_str}*  registrada retroativamente.\n"
-                    f"📊  *A auditar movimentações e gerando DRE...*"
+                    f"✅  *{tempo_str}*  de pausa anotada!\n"
+                    f"📊 Gerando seu DRE agora..."
                 )
             else:
-                await enviar_whatsapp(remote_jid, "📊  *Nenhuma pausa registrada. A gerar seu DRE...*")
+                await enviar_whatsapp(remote_jid, "📊 Sem pausa registrada. Gerando seu DRE...")
 
             res = await TurnoService.fechar_turno_com_dre(motorista_id, km_final)
             if res["sucesso"]:
@@ -1021,15 +1031,15 @@ class OrchestratorService:
                         )
                     if not turno_confirmacao:
                         await RedisFSMService.limpar_buffer(fsm_turno_key)
-                        await enviar_whatsapp(remote_jid, "⚠ Nenhum turno ativo localizado. O turno pode ter sido fechado anteriormente.")
+                        await enviar_whatsapp(remote_jid, "Não encontrei um turno aberto. Talvez ele já tenha sido fechado antes. 🙂")
                         return
                     # Verifica se o motorista inseriu receitas pelo bypass antes de confirmar.
                     # Evita a mensagem contraditória "faturamento zerado" quando há lançamentos.
                     receitas_agora = await TurnoService.verificar_transacoes_turno(motorista_id)
                     if receitas_agora == 0:
-                        await enviar_whatsapp(remote_jid, "📊  *Confirmado faturamento zerado. Gerando DRE definitivo...*")
+                        await enviar_whatsapp(remote_jid, "📊 Confirmado! Fechando o turno com faturamento zerado...")
                     else:
-                        await enviar_whatsapp(remote_jid, "📊  *Processando lançamentos e gerando seu DRE definitivo...*")
+                        await enviar_whatsapp(remote_jid, "📊 Ótimo! Processando seus lançamentos e gerando o DRE...")
                     res = await TurnoService.fechar_turno_com_dre(motorista_id, km_final)
                     await RedisFSMService.limpar_buffer(fsm_turno_key)
                     resposta = formatar_relatorio_fechamento_dre(motorista["nome"], res) if res["sucesso"] else res['erro']
@@ -1042,9 +1052,9 @@ class OrchestratorService:
                         cat_event = 'combustivel' if any(c in texto_limpo for c in ['gasolin', 'posto', 'combustiv', 'etanol', 'recarga', 'kwh', 'tomada']) else 'geral'
                         tipo_event = 'despesa' if is_desp else 'receita'
                         await TransacaoService.registrar_transacao(motorista_id, tipo_event, cat_event, km_digitado, texto_bruto, wpp_msg_id)
-                        resposta = f"✅ Lançamento de  *R$ {km_digitado:.2f}*  guardado! Envie mais valores ou digite  *'Confirmar'*  para fechar o DRE:"
+                        resposta = f"✅  *R$ {km_digitado:.2f}*  guardado! Manda mais lançamentos ou responde  *Confirmar*  para fechar o DRE:"
                     else:
-                        resposta = "Entendido. Se quiser registrar transações, envie o valor acompanhado da descrição (ex:  *ganhei 150* ), ou responda  *'Confirmar'*  para fechar:"
+                        resposta = "Ok! Se quiser registrar algo, manda o valor com uma descrição (ex:  *ganhei 150* ) ou responde  *Confirmar*  para fechar:"
                     await enviar_whatsapp(remote_jid, resposta)
                 return
 
@@ -1052,7 +1062,7 @@ class OrchestratorService:
             if km_digitado > 100:
                 veiculo = await DatabaseService.buscar_veiculo_ativo_do_motorista(motorista_id)
                 if not veiculo:
-                    await enviar_whatsapp(remote_jid, "⚠ Nenhum veículo ativo localizado no seu cadastro.")
+                    await enviar_whatsapp(remote_jid, "Não encontrei um veículo ativo no seu cadastro. Fala com o suporte! 🙏")
                     return
 
                 if estado_turno == "AGUARDANDO_KM_INICIAL":
@@ -1089,9 +1099,9 @@ class OrchestratorService:
                                 await RedisFSMService.registrar_audit_trava_zero(tenant_id, km_digitado)
                                 logger.warning(f"[TRAVA_ZERO] Motorista {motorista_id} tentou fechar turno sem lançamentos (km={km_digitado})")
                                 resposta = (
-                                    "⚠  *Atenção, motorista!*  Não encontrei nenhuma receita ou despesa registrada neste turno.\n\n"
-                                    "Tem certeza absoluta que o faturamento de hoje foi R$ 0,00?\n\n"
-                                    "Responda  *'Confirmar'* para fechar assim mesmo ou envie o valor de uma despesa/receita."
+                                    "⚠  *Ei, espera!*  Não achei nenhum lançamento neste turno.\n\n"
+                                    "Tem certeza que o faturamento de hoje foi  *R$ 0,00* ?\n\n"
+                                    "Se sim, manda  *Confirmar* . Se não, manda o valor de uma corrida ou gasto antes de fechar."
                                 )
                                 await enviar_whatsapp(remote_jid, resposta)
                                 return
@@ -1113,7 +1123,7 @@ class OrchestratorService:
                     await enviar_whatsapp(remote_jid, resposta)
                 return
             else:
-                await registrar_erro_e_verificar_escape(remote_jid, tenant_id, fsm_turno_key, "⚠ Por favor, envie apenas o número válido correspondente ao odômetro atual do painel (ex: 1399):")
+                await registrar_erro_e_verificar_escape(remote_jid, tenant_id, fsm_turno_key, "Preciso do número do odômetro do painel. 😊 (ex:  *45230* )")
                 return
 
         # =========================================================================
@@ -1123,9 +1133,9 @@ class OrchestratorService:
             if km_encontrado:
                 veiculo = await DatabaseService.buscar_veiculo_ativo_do_motorista(motorista_id)
                 if not veiculo:
-                    await enviar_whatsapp(remote_jid, "⚠ Nenhum veículo ativo localizado no seu cadastro.")
+                    await enviar_whatsapp(remote_jid, "Não encontrei um veículo ativo no seu cadastro. Fala com o suporte! 🙏")
                     return
-                await enviar_whatsapp(remote_jid, "⏳  *A validar coerência de quilometragem e abrindo turno...* ")
+                await enviar_whatsapp(remote_jid, "⏳ Abrindo turno...")
                 res = await TurnoService.abrir_turno(motorista_id, str(veiculo["id"]), km_encontrado)
                 if res["sucesso"]:
                     await RedisFSMService.limpar_erros_consecutivos(tenant_id)
@@ -1142,7 +1152,7 @@ class OrchestratorService:
                 await enviar_whatsapp(remote_jid, resposta)
             else:
                 await RedisFSMService.definir_estado(fsm_turno_key, "AGUARDANDO_KM_INICIAL")
-                await enviar_whatsapp(remote_jid, "🟢 Beleza! Qual é a  **quilometragem atual**  do painel? (Ex: 1399)")
+                await enviar_whatsapp(remote_jid, "🟢 Qual o km do painel agora? (Ex:  *45230* )")
             return
 
         if tem_intencao_fim:
@@ -1160,9 +1170,9 @@ class OrchestratorService:
                             await RedisFSMService.registrar_audit_trava_zero(tenant_id, km_encontrado)
                             logger.warning(f"[TRAVA_ZERO] Motorista {motorista_id} tentou fechar turno sem lançamentos (km={km_encontrado})")
                             await enviar_whatsapp(remote_jid, (
-                                "⚠  *Atenção, motorista!*  Não encontrei nenhuma receita ou despesa registrada neste turno.\n\n"
-                                "Tem certeza absoluta que o faturamento de hoje foi R$ 0,00?\n\n"
-                                "Responda  *'Confirmar'*  para fechar assim mesmo ou envie o valor de uma despesa/receita."
+                                "⚠  *Ei, espera!*  Não achei nenhum lançamento neste turno.\n\n"
+                                "Tem certeza que o faturamento de hoje foi  *R$ 0,00* ?\n\n"
+                                "Se sim, manda  *Confirmar* . Se não, manda o valor de uma corrida ou gasto antes de fechar."
                             ))
                             return
                         # Pausa declarativa: jornadas ≥ 6h sem pausas registradas
@@ -1181,18 +1191,18 @@ class OrchestratorService:
                                 fsm_turno_key, f"AGUARDANDO_DECLARACAO_PAUSA|km:{km_encontrado}"
                             )
                             await enviar_whatsapp(remote_jid, (
-                                f"⏱ Sua jornada durou  *{duracao_h:.1f}h* . Para calcular o  *faturamento por hora*  corretamente, "
-                                f"você fez alguma pausa para almoço ou descanso hoje?\n\n"
-                                f"Responda com o tempo total (ex:  *1h30* ,  *45min* ,  *2h* ) ou  *não*  se não parou."
+                                f"Boa jornada! 👏 Você trabalhou  *{duracao_h:.1f}h*  hoje.\n\n"
+                                f"Fez alguma pausa para almoço ou descanso? Me diz o tempo total:\n"
+                                f"_(Ex:  *1h30* ,  *45min* ,  *2h* — ou manda  *não*  se não parou)_"
                             ))
                             return
-                await enviar_whatsapp(remote_jid, "📊  *A auditar movimentações e gerando DRE...* ")
+                await enviar_whatsapp(remote_jid, "📊 Gerando seu DRE...")
                 res = await TurnoService.fechar_turno_com_dre(motorista_id, km_encontrado)
                 resposta = formatar_relatorio_fechamento_dre(motorista["nome"], res) if res["sucesso"] else res['erro']
                 await enviar_whatsapp(remote_jid, resposta)
             else:
                 await RedisFSMService.definir_estado(fsm_turno_key, "AGUARDANDO_KM_FINAL")
-                await enviar_whatsapp(remote_jid, "🏁 Para gerar o seu DRE diário, qual é a  **quilometragem final**  no painel?")
+                await enviar_whatsapp(remote_jid, "🏁 Qual o km final no painel agora?")
             return
 
         if tem_intencao_pausa:
@@ -1215,8 +1225,8 @@ class OrchestratorService:
                 res = await TurnoService.pausar_turno(motorista_id, km_pausa=None)
             if res["sucesso"]:
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                extra = "  _KM registrado para auditoria de uso pessoal._" if res.get("km_pausa_registrado") else ""
-                resposta = f"⏸ Turno pausado com sucesso. Quando voltar, envie  *'retomar'* !{extra}{aviso_km_descartado}"
+                extra = "  _Km anotado para auditoria._" if res.get("km_pausa_registrado") else ""
+                resposta = f"⏸ Turno pausado! Descansa bem. Quando voltar, manda  *retomar* .{extra}{aviso_km_descartado}"
             else:
                 resposta = f"⚠ {res['erro']}"
             await enviar_whatsapp(remote_jid, resposta)
@@ -1233,8 +1243,8 @@ class OrchestratorService:
                 logger.warning(f"[retomar_turno] km={km_retomada} fora do envelope — descartado (motorista={motorista_id})")
                 if _km_intencao_explicita:
                     aviso_km_descartado = (
-                        f"\n\n⚠ _O odômetro  *{int(km_retomada):,}*  informado é menor que o km de abertura do turno "
-                        f"e foi ignorado. Se quiser registrar o km de retomada, envie  *'retomar NNNNN'*  com o valor correto._"
+                        f"\n\n⚠ _O km  *{int(km_retomada):,}*  informado é menor que o km de abertura — ignorei. "
+                        f"Se quiser registrar, manda  *retomar NNNNN*  com o valor correto._"
                     ).replace(",", ".")
                 res = await TurnoService.retomar_turno(motorista_id, km_retomada=None)
             if res["sucesso"]:
@@ -1243,14 +1253,14 @@ class OrchestratorService:
                 if custo_intra > 0:
                     detalhe = res.get("detalhe_uso_pessoal", "")
                     resposta = (
-                        f"▶ Turno retomado! Bom trabalho.\n\n"
-                        f"🛣️  *Uso Pessoal na Pausa Auditado*\n"
-                        f"• Custo amortizado do cofre:  *R$ {custo_intra:.2f}*\n"
+                        f"▶ Bem-vindo de volta! Turno retomado. 💪\n\n"
+                        f"🛣️  *Km de uso pessoal na pausa auditado*\n"
+                        f"• Custo debitado do cofre:  *R$ {custo_intra:.2f}*\n"
                         f"  _{detalhe}_\n"
-                        f"_Seu Lucro Real está protegido._{aviso_km_descartado}"
+                        f"_Seu lucro real continua protegido._{aviso_km_descartado}"
                     )
                 else:
-                    resposta = f"▶ Turno retomado com sucesso! Bom trabalho.{aviso_km_descartado}"
+                    resposta = f"▶ Bem-vindo de volta! Turno retomado. 💪{aviso_km_descartado}"
             else:
                 resposta = f"⚠ {res['erro']}"
             await enviar_whatsapp(remote_jid, resposta)
@@ -1337,7 +1347,7 @@ class OrchestratorService:
             valor_fmt = f"R$ {valor_transacao:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             await enviar_whatsapp(
                 remote_jid,
-                f"⛽  *{valor_fmt}*  anotado!\nQual foi o  *preço por litro*  cobrado? (Ex:  *5,85* )"
+                f"⛽  *{valor_fmt}*  anotado! Qual foi o  *preço por litro* ? (Ex:  *5,85* )"
             )
             return
 
@@ -1353,7 +1363,7 @@ class OrchestratorService:
             )
             await enviar_whatsapp(
                 remote_jid,
-                "⛽ Vamos registrar o abastecimento!\nQual foi o  *valor total*  gasto? (Ex:  *150,00* )"
+                "⛽ Beleza! Qual foi o  *valor total*  gasto no abastecimento? (Ex:  *150,00* )"
             )
             return
 
@@ -1385,7 +1395,7 @@ class OrchestratorService:
             if res_tx.get("status") == "success":
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 valor_fmt_geral = f"R$ {valor_transacao:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                resposta = f"✅ Lançamento de  *{valor_fmt_geral}*  guardado com sucesso no cofre! 🛡"
+                resposta = f"✅  *{valor_fmt_geral}*  guardado no cofre! 🛡"
 
                 # ── AUTO-RESUME ──────────────────────────────────────────────────────────
                 # Se o turno está em pausa e o motorista acabou de registrar uma RECEITA,
@@ -1402,7 +1412,7 @@ class OrchestratorService:
                         if turno_pausado:
                             res_retomada = await TurnoService.retomar_turno(motorista_id)
                             if res_retomada.get("sucesso"):
-                                resposta += "\n\n▶  *Auto-Retomada:*  Seu turno foi reativado automaticamente! 🚀"
+                                resposta += "\n\n▶ Turno reativado automaticamente — parece que você voltou a trabalhar! 🚀"
                                 logger.info(f"[AUTO_RESUME] Turno retomado automaticamente na receita (motorista={motorista_id})")
                             else:
                                 logger.warning(f"[AUTO_RESUME] Falha ao retomar turno: {res_retomada.get('erro')} (motorista={motorista_id})")
@@ -1411,9 +1421,9 @@ class OrchestratorService:
                 # ─────────────────────────────────────────────────────────────────────────
             else:
                 if res_tx.get("status") == "duplicate":
-                    resposta = "⚠ Este lançamento já foi guardado anteriormente no cofre contábil."
+                    resposta = "Esse lançamento já estava guardado no cofre. 👍"
                 else:
-                    resposta = f"❌ Falha ao salvar no cofre contábil:\n_{res_tx.get('message')}_"
+                    resposta = f"❌ Não consegui guardar:\n_{res_tx.get('message')}_"
             await enviar_whatsapp(remote_jid, resposta)
             return
 
@@ -1421,12 +1431,12 @@ class OrchestratorService:
         # 6. CATCH-ALL (Ajuda Contextual)
         # =========================================================================
         resposta_ajuda = (
-            "🤖 Não reconheci a ação! Aqui tens os comandos rápidos:\n\n"
-            "🟢  *Iniciar*  (ou 'iniciar 1399')\n"
-            "🏁  *Fechar*  (ou 'fechar 1450')\n"
-            "⏸  *Pausar*  /  *Retomar* \n"
-            "📊  *Status*  (resumo do dia)\n"
-            "💰  *[Valor]* (ex: 'ganhei 100' ou 'gastei 40 almoço')\n\n"
-            "Como posso ajudar agora?"
+            "Hmm, não entendi bem. 😅 Aqui vai um lembrete rápido:\n\n"
+            "🟢  *iniciar 45230*  → abre o turno\n"
+            "🏁  *fechar 45800*  → fecha e gera o DRE\n"
+            "⏸  *pausar*  /  ▶  *retomar* \n"
+            "📊  *status*  → resumo do dia\n"
+            "💰  *ganhei 120*  ou  *gastei 40 almoço* \n\n"
+            "O que você precisa?"
         )
         await enviar_whatsapp(remote_jid, resposta_ajuda)

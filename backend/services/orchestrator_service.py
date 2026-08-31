@@ -69,6 +69,10 @@ def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
     aluguel_diario = info["custo_aluguel_semanal"] / 6.0
     franquia_diaria = info["franquia_km_semanal"] / 7.0
     meta_diaria = info["meta_mensal"] / info["dias_uteis"]
+    piso_km   = info.get("piso_ganho_km",   2.0)
+    piso_hora = info.get("piso_ganho_hora", 30.0)
+    piso_km_fmt   = f"{piso_km:.2f}".replace(".", ",")
+    piso_hora_fmt = f"{piso_hora:.2f}".replace(".", ",")
     return (
         f"📥  *DADOS PARCIAIS DO TURNO DE HOJE ({info['data_turno']})* \n\n"
         f"• Início:  *{info['data_inicio_hora']}* \n"
@@ -81,7 +85,7 @@ def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
         f"• KM Excedente:  *R$ {info['valor_km_excedente']:.2f}/km* \n\n"
         f"🎯  *METAS DE HOJE* \n\n"
         f"• Meta Diária:  *R$ {meta_diaria:.2f}* \n"
-        f"• Piso Mínimo Indicado:  *R$ 2,00/km*  |  *R$ 30,00/h* \n\n"
+        f"• Piso Indicado:  *R$ {piso_km_fmt}/km*  |  *R$ {piso_hora_fmt}/h* \n\n"
         f"🔮 Para encerrar a sua jornada e emitir o DRE, envie:  *'fechar [KM final]'"
     )
 
@@ -255,6 +259,28 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     else:
         linha_resultado = f"💰  *LUCRO LÍQUIDO REAL DO DIA: R$ {lucro:.2f}* \n"
 
+    # ── Pisos de performance (alertas configuráveis por motorista) ────────────
+    piso_km   = res.get("piso_ganho_km",   2.0)
+    piso_hora = res.get("piso_ganho_hora", 30.0)
+
+    alertas_piso: list[str] = []
+    if fat > 0:  # só alerta se houve faturamento — turno zero já tem seu próprio aviso
+        if km_rodados > 1 and faturamento_por_km < piso_km:
+            piso_km_fmt = f"{piso_km:.2f}".replace(".", ",")
+            real_km_fmt = f"{faturamento_por_km:.2f}".replace(".", ",")
+            alertas_piso.append(
+                f"⚠  _Ganho por km (R$ {real_km_fmt}/km) abaixo do piso configurado "
+                f"(R$ {piso_km_fmt}/km). Avalie a plataforma ou o horário de trabalho._"
+            )
+        if horas_trab > 0.5 and faturamento_por_hora < piso_hora:
+            piso_h_fmt = f"{piso_hora:.2f}".replace(".", ",")
+            real_h_fmt = f"{faturamento_por_hora:.2f}".replace(".", ",")
+            alertas_piso.append(
+                f"⚠  _Ganho por hora (R$ {real_h_fmt}/h) abaixo do piso configurado "
+                f"(R$ {piso_h_fmt}/h). Pode indicar muitas viagens curtas ou pico ruim._"
+            )
+    secao_alertas_piso = ("\n".join(alertas_piso) + "\n\n") if alertas_piso else ""
+
     # ── Meta diária e projeção mensal ─────────────────────────────────────────
     meta_mensal  = res["meta_mensal"]
     dias_uteis   = res["dias_uteis"]
@@ -348,6 +374,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
         + f"• Lucro Real por Hora:  *R$ {lucro_por_hora:.2f}/h* \n"
         + f"• Rendimento ({label_rendimento}):  *{km_por_unidade:.2f}* \n"
         + f"• Atingimento Meta Diária (R$ {meta_diaria:.2f}):  *{perc_meta:.1f}%* \n\n"
+        + secao_alertas_piso
         + secao_projecao
         + secao_caixas
         + _nota_qualidade_dados(km_por_unidade, res.get("detalhe_queima", ""))
@@ -866,7 +893,7 @@ class OrchestratorService:
                 async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                     turno_ativo = await conn.fetchrow(
                         """
-                        SELECT t.id, t.km_inicial, t.data_inicio, v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal, v.valor_km_excedente, v.escala_trabalho, m.meta_mensal_faturamento, m.dias_uteis_mes 
+                        SELECT t.id, t.km_inicial, t.data_inicio, v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal, v.valor_km_excedente, v.escala_trabalho, m.meta_mensal_faturamento, m.dias_uteis_mes, COALESCE(m.piso_ganho_km, 2.0) AS piso_ganho_km, COALESCE(m.piso_ganho_hora, 30.0) AS piso_ganho_hora
                         FROM public.turnos t 
                         JOIN public.veiculos v ON v.id = t.veiculo_id 
                         JOIN public.motoristas m ON m.id = t.motorista_id 
@@ -894,6 +921,8 @@ class OrchestratorService:
                             "escala_trabalho": turno_ativo["escala_trabalho"] or "De quarta a segunda (6 dias)",
                             "meta_mensal": float(turno_ativo["meta_mensal_faturamento"] or 12000.0),
                             "dias_uteis": int(turno_ativo["dias_uteis_mes"] or 26),
+                            "piso_ganho_km":   float(turno_ativo["piso_ganho_km"]),
+                            "piso_ganho_hora": float(turno_ativo["piso_ganho_hora"]),
                             "total_abastecido": float(tx["abastecido"])
                         }
                         resposta = formatar_relatorio_parcial(motorista["nome"], info_turno)

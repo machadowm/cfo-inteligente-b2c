@@ -58,6 +58,8 @@ PARAM_MAP: dict[str, _ParamEntry] = {
     "meta mensal":   ("meta_mensal_faturamento",  Decimal, "motoristas", "Meta Mensal (R$)"),
     "meta":          ("meta_mensal_faturamento",  Decimal, "motoristas", "Meta Mensal (R$)"),
     "dias uteis":    ("dias_uteis_mes",            int,     "motoristas", "Dias Úteis/Mês"),
+    "piso km":       ("piso_ganho_km",             Decimal, "motoristas", "Piso de Ganho por KM (R$/km)"),
+    "piso hora":     ("piso_ganho_hora",           Decimal, "motoristas", "Piso de Ganho por Hora (R$/h)"),
     # ── Veículos (colunas planas) ────────────────────────────────────────────
     "aluguel":       ("custo_aluguel_semanal",     Decimal, "veiculos",   "Aluguel Semanal (R$)"),
     "franquia":      ("franquia_km_semanal",       Decimal, "veiculos",   "Franquia KM Semanal (km)"),
@@ -239,6 +241,8 @@ class ParametrosService:
                 "💰  *Financeiro e Metas:*",
                 "  •  *!alterar meta mensal <R$>*   →  Meta de faturamento mensal",
                 "  •  *!alterar dias uteis <n>*      →  Dias úteis trabalhados por mês",
+                "  •  *!alterar piso km <R$/km>*    →  Piso mínimo de ganho por km rodado",
+                "  •  *!alterar piso hora <R$/h>*   →  Piso mínimo de ganho por hora trabalhada",
                 "",
                 "🚗  *Contrato e Veículo:*",
                 "  •  *!alterar aluguel <R$/sem>*    →  Custo semanal do aluguel/contrato",

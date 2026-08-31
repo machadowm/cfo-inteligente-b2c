@@ -323,7 +323,9 @@ class TurnoService:
                            v.is_hibrido, v.is_eletrico, v.is_flex,
                            v.capacidade_bateria,
                            v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal, v.valor_km_excedente,
-                           v.escala_trabalho, v.contrato_personalizado, m.meta_mensal_faturamento, m.dias_uteis_mes
+                           v.escala_trabalho, v.contrato_personalizado, m.meta_mensal_faturamento, m.dias_uteis_mes,
+                           COALESCE(m.piso_ganho_km, 2.0) AS piso_ganho_km,
+                           COALESCE(m.piso_ganho_hora, 30.0) AS piso_ganho_hora
                     FROM public.turnos t
                     JOIN public.veiculos v ON v.id = t.veiculo_id
                     JOIN public.motoristas m ON m.id = t.motorista_id
@@ -736,6 +738,8 @@ class TurnoService:
                 "km_por_litro": float(km_por_unidade), # Retorna a média de consumo ponderada do turno
                 "meta_mensal": float(meta_mensal),
                 "dias_uteis": dias_uteis,
+                "piso_ganho_km": float(turno["piso_ganho_km"]),
+                "piso_ganho_hora": float(turno["piso_ganho_hora"]),
                 "locadora": turno["locadora"] or "Localiza Zarp",
                 "custo_aluguel_semanal": float(turno["custo_aluguel_semanal"] or 1020.85),
                 "escala_trabalho": turno["escala_trabalho"] or "De quarta a segunda (6 dias)",

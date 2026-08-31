@@ -346,7 +346,9 @@ CREATE TABLE public.motoristas (
     meta_faturamento_semanal numeric(14,4) DEFAULT 0.00,
     meta_horas_diarias numeric(5,2) DEFAULT 8.00,
     meta_km_diarios numeric(10,2) DEFAULT 0.00,
-    possui_multiplos_veiculos boolean DEFAULT false
+    possui_multiplos_veiculos boolean DEFAULT false,
+    piso_ganho_km numeric(10,4) DEFAULT 2.0000,
+    piso_ganho_hora numeric(10,4) DEFAULT 30.0000
 );
 
 

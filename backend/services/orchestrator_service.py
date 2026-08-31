@@ -644,8 +644,18 @@ class OrchestratorService:
         tem_intencao_pausa = any(w in texto_limpo for w in ["pausa", "pausar", "pause", "pausei", "almocar"])
         tem_intencao_retomada = any(w in texto_limpo for w in ["retomar", "voltar", "voltei", "continuar", "retom"])
         # Detecta lançamentos de RECEITA (aciona auto-resume se turno estiver em pausa)
-        _PALAVRAS_RECEITA = ['recebi', 'ganhei', 'faturei', 'corrida', 'uber', '99', 'indrive', 'faturamento', 'ganho']
-        is_intencao_receita = any(w in texto_limpo for w in _PALAVRAS_RECEITA)
+        _PALAVRAS_RECEITA = [
+            'recebi', 'ganhei', 'faturei', 'corrida', 'uber', 'indrive', 'faturamento', 'ganho',
+            'gorjeta', 'gorjet', 'bico', 'freela', 'freelance', 'salario', 'salário', 'pagamento',
+            'bonus', 'bônus', 'comissao', 'comissão', 'clt', 'extra', 'renda', 'entrada',
+        ]
+        # '99' e 'pj' precisam de word boundary — são curtos demais para substring matching
+        # (ex: "ganhei 99" → '99' bate no valor; "pj" bate em "hoje trabalhei")
+        _PALAVRAS_RECEITA_WB = [r'\b99\b', r'\bpj\b']
+        is_intencao_receita = (
+            any(w in texto_limpo for w in _PALAVRAS_RECEITA)
+            or any(re.search(p, texto_limpo) for p in _PALAVRAS_RECEITA_WB)
+        )
         is_status = any(t in texto_limpo for t in ['status', 'resumo', 'como estou', 'parcial', 'relatorio'])
         is_perfil = any(t in texto_limpo for t in ['perfil', 'meus dados', 'minha conta', 'raio x', 'raiox', 'configuracoes', 'meu perfil'])
         is_contrato = "atualizar contrato" in texto_limpo
@@ -1378,13 +1388,26 @@ class OrchestratorService:
             )
             tipo = 'despesa' if is_despesa else 'receita'
 
-            # Categoria
+            # ── Categoria de DESPESA ──────────────────────────────────────────
             if any(c in texto_limpo for c in ['gasolin', 'etanol', 'gnv', 'diesel', 'alcool', 'reabastec', 'abastec', 'recarga', 'posto', 'solar', 'kwh', 'tomada', 'combustiv']):
                 cat = 'combustivel'
             elif any(c in texto_limpo for c in ['almoco', 'marmita', 'lanche', 'refeicao', 'comida', 'rango']):
                 cat = 'alimentacao'
             elif any(c in texto_limpo for c in ['lava', 'oleo', 'pneu', 'oficina', 'mecanico', 'manutencao']):
                 cat = 'manutencao'
+            # ── Categoria de RECEITA ──────────────────────────────────────────
+            # '99' requer word boundary — "ganhei 99" vs "ganhei 199" são contextos distintos
+            elif tipo == 'receita' and (
+                any(c in texto_limpo for c in ['corrida', 'uber', 'indrive', 'passageiro', 'viagem', 'trip'])
+                or bool(re.search(r'\b99\b', texto_limpo))
+            ):
+                cat = 'corrida'
+            elif tipo == 'receita' and any(c in texto_limpo for c in ['gorjeta', 'gorjet', 'tip']):
+                cat = 'gorjeta'
+            elif tipo == 'receita' and any(c in texto_limpo for c in ['bico', 'freela', 'freelance', 'extra', 'servico', 'fiz um']):
+                cat = 'bico'
+            elif tipo == 'receita' and any(c in texto_limpo for c in ['salario', 'salário', 'clt', 'pj', 'pagamento', 'bonus', 'bônus', 'comissao', 'comissão', 'renda', 'entrada']):
+                cat = 'outras_receitas'
             else:
                 cat = 'corrida' if tipo == 'receita' else 'geral'
 
@@ -1395,7 +1418,16 @@ class OrchestratorService:
             if res_tx.get("status") == "success":
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
                 valor_fmt_geral = f"R$ {valor_transacao:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                resposta = f"✅  *{valor_fmt_geral}*  guardado no cofre! 🛡"
+                # Confirmação explícita do tipo para eliminar dúvida se foi debitado ou creditado.
+                _cat_label = {
+                    "combustivel": "combustível", "alimentacao": "alimentação",
+                    "manutencao": "manutenção", "corrida": "corrida", "geral": "despesa geral",
+                    "gorjeta": "gorjeta", "bico": "bico/freela", "outras_receitas": "outras receitas",
+                }.get(cat, cat)
+                if tipo == "despesa":
+                    resposta = f"✅  *{valor_fmt_geral}*  registrado como  *despesa*  ({_cat_label})! 🛡"
+                else:
+                    resposta = f"✅  *{valor_fmt_geral}*  registrado como  *receita*  ({_cat_label})! 🛡"
 
                 # ── AUTO-RESUME ──────────────────────────────────────────────────────────
                 # Se o turno está em pausa e o motorista acabou de registrar uma RECEITA,

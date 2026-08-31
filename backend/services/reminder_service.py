@@ -16,8 +16,10 @@ Bypass de interação: se o motorista enviou qualquer mensagem nos últimos 15 m
 import asyncio
 import logging
 import os
+from datetime import datetime, timedelta
 
 import httpx
+import pytz
 
 from services.database_service import DatabaseService
 from services.redis_fsm import RedisFSMService
@@ -33,6 +35,7 @@ _ZUMBI_LIMITE_H         = 12        # horas de turno aberto antes de lembrar
 _BYPASS_INTERACAO_MIN   = 15        # ignora lembrete se motorista interagiu neste intervalo
 _TTL_REMINDER_PAUSA_S   = 60 * 60   # reenvio mínimo: 1 h
 _TTL_REMINDER_ZUMBI_S   = 60 * 120  # reenvio mínimo: 2 h
+_TTL_REMINDER_VENC_S    = 60 * 60 * 20  # vencimento: reenvio mínimo 20 h (1× por dia)
 _INTERVALO_LOOP_S       = 300       # varredura a cada 5 min
 
 
@@ -165,6 +168,78 @@ async def _processar_turnos_zumbi() -> None:
         )
 
 
+async def _processar_vencimentos_despesas() -> None:
+    """Avisa motoristas sobre despesas fixas que vencem hoje ou amanhã.
+
+    Dispara no máximo uma notificação por (motorista, despesa, dia) —
+    controlado por chave Redis com TTL de 20 h.
+
+    Usa o dia corrente no fuso de Brasília para comparar com dia_vencimento.
+    """
+    _tz = pytz.timezone("America/Sao_Paulo")
+    hoje = datetime.now(_tz).date()
+    amanha = hoje + timedelta(days=1)
+    dias_alvo = {hoje.day, amanha.day}
+
+    try:
+        async with DatabaseService.get_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT dfm.id::text          AS despesa_id,
+                       dfm.nome,
+                       dfm.valor_mensal,
+                       dfm.dia_vencimento,
+                       m.id::text            AS motorista_id,
+                       m.telefone
+                FROM public.despesas_fixas_mensais dfm
+                JOIN public.motoristas m ON m.id = dfm.motorista_id
+                WHERE dfm.ativo = TRUE
+                  AND dfm.dia_vencimento = ANY($1::int[]);
+                """,
+                list(dias_alvo),
+            )
+    except Exception as e:
+        logger.error(f"[ReminderService] Erro ao buscar vencimentos: {e}")
+        return
+
+    for row in rows:
+        tenant_id   = row["telefone"]
+        dia_venc    = int(row["dia_vencimento"])
+        nome        = row["nome"]
+        valor       = float(row["valor_mensal"])
+        despesa_id  = row["despesa_id"]
+        remote_jid  = f"{tenant_id}@s.whatsapp.net"
+        redis_key   = f"reminder:venc:{tenant_id}:{despesa_id}:{hoje.isoformat()}"
+
+        client = await RedisFSMService.get_client()
+        if await client.exists(redis_key):
+            continue  # já notificado hoje
+
+        valor_fmt = f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        if dia_venc == hoje.day:
+            texto = (
+                f"📅  *Vencimento HOJE — {nome}*\n\n"
+                f"• Valor:  *{valor_fmt}*\n\n"
+                f"Se a caixinha já tem saldo suficiente, use:\n"
+                f"  👉  `!retirar caixa {nome} {valor:.2f}`\n\n"
+                f"_Para ver o saldo atual envie  *!caixas*_"
+            )
+        else:
+            texto = (
+                f"⏰  *Vencimento AMANHÃ — {nome}*\n\n"
+                f"• Valor:  *{valor_fmt}*\n\n"
+                f"Confira o saldo da caixinha antes do vencimento:\n"
+                f"  👉  `!caixas`"
+            )
+
+        await _enviar(remote_jid, texto)
+        await client.set(redis_key, "1", ex=_TTL_REMINDER_VENC_S)
+        logger.info(
+            f"[ReminderService] Lembrete VENCIMENTO enviado: motorista={row['motorista_id']} "
+            f"despesa={nome} dia_venc={dia_venc} hoje={hoje}"
+        )
+
+
 async def loop_lembretes() -> None:
     """
     Loop infinito de varredura. Deve ser iniciado como asyncio.Task no lifespan do FastAPI.
@@ -182,6 +257,7 @@ async def loop_lembretes() -> None:
         try:
             await _processar_pausas_prolongadas()
             await _processar_turnos_zumbi()
+            await _processar_vencimentos_despesas()
         except asyncio.CancelledError:
             logger.info("[ReminderService] Loop encerrado graciosamente.")
             raise

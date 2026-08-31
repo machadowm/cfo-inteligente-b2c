@@ -303,8 +303,9 @@ class ParametrosService:
                 "",
                 "📌  *Despesas Fixas Mensais (seguro, internet, manutenção...):*",
                 "  •  *!despesas fixas*               → Listar despesas cadastradas",
-                "  •  *!adicionar despesa <nome> <R$/mês> <dias>*",
-                "     _Ex: !adicionar despesa seguro 180 26_",
+                "  •  *!adicionar despesa <nome> <R$/mês> <dias> [dia venc]*",
+                "     _Ex: !adicionar despesa seguro 180 26 5_  _(vence todo dia 5)_",
+                "     _Ex: !adicionar despesa internet 120 26_  _(vence dia 1, padrão)_",
                 "  •  *!remover despesa <nome>*        → Desativar despesa pelo nome",
                 "",
                 "📦  *Caixas de Provisão (sinking fund):*",
@@ -332,15 +333,19 @@ class ParametrosService:
             return await ParametrosService._listar_despesas_fixas(motorista_id)
 
         match_add = re.match(
-            r"^!adicionar\s+despesa\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)\s+(\d+)$",
+            r"^!adicionar\s+despesa\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)\s+(\d+)(?:\s+(\d+))?\s*$",
             texto, re.IGNORECASE,
         )
         if match_add:
-            nome_desp  = match_add.group(1).strip()[:50]
-            valor_desp = Decimal(match_add.group(2).replace(",", "."))
-            dias_desp  = int(match_add.group(3))
+            nome_desp    = match_add.group(1).strip()[:50]
+            valor_desp   = Decimal(match_add.group(2).replace(",", "."))
+            dias_desp    = int(match_add.group(3))
+            dia_venc_raw = match_add.group(4)
+            dia_venc     = int(dia_venc_raw) if dia_venc_raw else 1
+            if not (1 <= dia_venc <= 31):
+                return "⚠ O dia de vencimento deve estar entre 1 e 31."
             return await ParametrosService._adicionar_despesa_fixa(
-                motorista_id, tenant_id, nome_desp, valor_desp, dias_desp
+                motorista_id, tenant_id, nome_desp, valor_desp, dias_desp, dia_venc
             )
 
         match_rem = re.match(r"^!remover\s+despesa\s+(.+)$", texto, re.IGNORECASE)
@@ -635,10 +640,11 @@ class ParametrosService:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 rows = await conn.fetch(
                     """
-                    SELECT nome, valor_mensal, dias_trabalho_previstos, valor_pro_rata_diario
+                    SELECT nome, valor_mensal, dias_trabalho_previstos,
+                           valor_pro_rata_diario, dia_vencimento
                     FROM public.despesas_fixas_mensais
                     WHERE motorista_id = $1::uuid AND ativo = TRUE
-                    ORDER BY valor_mensal DESC;
+                    ORDER BY dia_vencimento, valor_mensal DESC;
                     """,
                     motorista_id,
                 )
@@ -646,22 +652,28 @@ class ParametrosService:
                 return (
                     "📌  *Nenhuma despesa fixa cadastrada ainda.*\n\n"
                     "Para adicionar, envie:\n"
-                    "  *!adicionar despesa <nome> <R$/mês> <dias úteis>*\n"
-                    "_Ex: !adicionar despesa seguro 180 26_"
+                    "  *!adicionar despesa <nome> <R$/mês> <dias úteis> [dia venc]*\n"
+                    "_Ex: !adicionar despesa seguro 180 26 5_"
                 )
+            from datetime import date as _date
+            hoje_dia = _date.today().day
             total_pro_rata = sum(float(r["valor_pro_rata_diario"]) for r in rows)
             linhas = ["📌  *Despesas Fixas Mensais Ativas:*\n"]
             for r in rows:
-                nome   = r["nome"]
-                mensal = float(r["valor_mensal"])
-                diario = float(r["valor_pro_rata_diario"])
+                nome       = r["nome"]
+                mensal     = float(r["valor_mensal"])
+                diario     = float(r["valor_pro_rata_diario"])
+                dia_venc   = int(r["dia_vencimento"])
+                alerta     = "  ⚠️ *VENCE HOJE!*" if dia_venc == hoje_dia else (
+                             "  ⏰ _vence amanhã_" if dia_venc == hoje_dia + 1 else ""
+                )
                 linhas.append(
-                    f"• {nome}:  *R$ {mensal:.2f}/mês*  (≈ R$ {diario:.2f}/dia)"
+                    f"• {nome}:  *R$ {mensal:.2f}/mês*  (≈ R$ {diario:.2f}/dia)  📅 vence dia  *{dia_venc}*{alerta}"
                 )
             linhas.append(f"\n*Total pro-rata diário: R$ {total_pro_rata:.2f}*")
             linhas.append(
                 "\n_Para remover, envie:  *!remover despesa <nome>*_\n"
-                "_Para adicionar:  *!adicionar despesa <nome> <R$/mês> <dias>*_"
+                "_Para adicionar:  *!adicionar despesa <nome> <R$/mês> <dias> [dia venc]*_"
             )
             return "\n".join(linhas)
         except Exception as exc:
@@ -691,7 +703,8 @@ class ParametrosService:
 
     @staticmethod
     async def _adicionar_despesa_fixa(
-        motorista_id: str, tenant_id: str, nome: str, valor_mensal: Decimal, dias: int
+        motorista_id: str, tenant_id: str, nome: str, valor_mensal: Decimal, dias: int,
+        dia_vencimento: int = 1,
     ) -> str:
         """Insere ou reativa uma despesa fixa mensal e vincula à caixinha de provisão correspondente."""
         if valor_mensal <= 0:
@@ -711,9 +724,10 @@ class ParametrosService:
                 if existing:
                     await conn.execute(
                         "UPDATE public.despesas_fixas_mensais "
-                        "SET valor_mensal = $1, dias_trabalho_previstos = $2, ativo = TRUE, caixa_id = $3::uuid "
-                        "WHERE id = $4::uuid;",
-                        valor_mensal, dias, caixa_id, str(existing["id"]),
+                        "SET valor_mensal = $1, dias_trabalho_previstos = $2, ativo = TRUE, "
+                        "    caixa_id = $3::uuid, dia_vencimento = $4 "
+                        "WHERE id = $5::uuid;",
+                        valor_mensal, dias, caixa_id, dia_vencimento, str(existing["id"]),
                     )
                     acao = "reativada e atualizada"
                 else:
@@ -721,9 +735,9 @@ class ParametrosService:
                         """
                         INSERT INTO public.despesas_fixas_mensais
                             (motorista_id, nome, valor_mensal, dias_trabalho_previstos, dia_vencimento, caixa_id)
-                        VALUES ($1::uuid, $2, $3, $4, 1, $5::uuid);
+                        VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid);
                         """,
-                        motorista_id, nome, valor_mensal, dias, caixa_id,
+                        motorista_id, nome, valor_mensal, dias, dia_vencimento, caixa_id,
                     )
                     acao = "adicionada"
 
@@ -736,6 +750,7 @@ class ParametrosService:
                 f"• Nome:  *{nome}*\n"
                 f"• Valor mensal:  *R$ {float(valor_mensal):.2f}*\n"
                 f"• Pro-rata diário:  *R$ {pro_rata:.2f}*  (base: {dias} dias úteis)\n"
+                f"• Vencimento:  *todo dia  {dia_vencimento}*\n"
                 f"• Caixinha vinculada:  *{nome}*  _(aportes automáticos a cada fechamento)_\n\n"
                 f"_Esse custo será deduzido automaticamente em cada fechamento de turno._"
             )

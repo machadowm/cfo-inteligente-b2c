@@ -303,9 +303,9 @@ class ParametrosService:
                 "",
                 "📌  *Despesas Fixas Mensais (seguro, internet, manutenção...):*",
                 "  •  *!despesas fixas*               → Listar despesas cadastradas",
-                "  •  *!adicionar despesa <nome> <R$/mês> <dias> [dia venc]*",
-                "     _Ex: !adicionar despesa seguro 180 26 5_  _(vence todo dia 5)_",
-                "     _Ex: !adicionar despesa internet 120 26_  _(vence dia 1, padrão)_",
+                "  •  *!adicionar despesa <nome> <R$/mês> [dias] [dia venc]*",
+                "     _Ex: !adicionar despesa seguro 180_       _(usa seus dias úteis cadastrados)_",
+                "     _Ex: !adicionar despesa seguro 180 26 5_  _(26 dias, vence todo dia 5)_",
                 "  •  *!remover despesa <nome>*        → Desativar despesa pelo nome",
                 "",
                 "📦  *Caixas de Provisão (sinking fund):*",
@@ -322,7 +322,7 @@ class ParametrosService:
                 "  *!alterar meta mensal 12000*",
                 "  *!alterar tanque 50*",
                 "  *!alterar km excedente 0,75*",
-                "  *!adicionar despesa internet 120 26*",
+                "  *!adicionar despesa internet 120*",
                 "  *!caixas*",
                 "  *!retirar caixa internet 120*",
             ]
@@ -332,20 +332,38 @@ class ParametrosService:
         if re.match(r"^!despesas?\s+fix", texto, re.IGNORECASE):
             return await ParametrosService._listar_despesas_fixas(motorista_id)
 
+        # Formato completo:  !adicionar despesa <nome> <valor> <dias> [dia_venc]
+        # Formato curto:     !adicionar despesa <nome> <valor> [dia_venc]  ← dias = dias_uteis_mes do motorista
         match_add = re.match(
-            r"^!adicionar\s+despesa\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)\s+(\d+)(?:\s+(\d+))?\s*$",
+            r"^!adicionar\s+despesa\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)(?:\s+(\d+)(?:\s+(\d+))?)?\s*$",
             texto, re.IGNORECASE,
         )
         if match_add:
             nome_desp    = match_add.group(1).strip()[:50]
             valor_desp   = Decimal(match_add.group(2).replace(",", "."))
-            dias_desp    = int(match_add.group(3))
-            dia_venc_raw = match_add.group(4)
-            dia_venc     = int(dia_venc_raw) if dia_venc_raw else 1
+            g3           = match_add.group(3)   # pode ser dias ou dia_venc
+            g4           = match_add.group(4)   # dia_venc quando g3 = dias
+
+            # Decide se o grupo 3 é <dias> ou <dia_venc> baseado na presença do grupo 4:
+            # se g4 existe → g3=dias, g4=dia_venc; senão g3=dia_venc, dias=None
+            if g4 is not None:
+                dias_desp_raw = int(g3)
+                dia_venc      = int(g4)
+            elif g3 is not None:
+                # Ambíguo: pode ser dias ou dia_venc.  Assume dia_venc se <= 31 mas
+                # trata como dias quando o usuário claramente informou só um número.
+                # Para manter compatibilidade com a sintaxe original (!adicionar despesa X 120 26),
+                # interpretamos o único número como <dias> e dia_venc = 1 (padrão).
+                dias_desp_raw = int(g3)
+                dia_venc      = 1
+            else:
+                dias_desp_raw = None   # será substituído por dias_uteis_mes do motorista
+                dia_venc      = 1
+
             if not (1 <= dia_venc <= 31):
                 return "⚠ O dia de vencimento deve estar entre 1 e 31."
             return await ParametrosService._adicionar_despesa_fixa(
-                motorista_id, tenant_id, nome_desp, valor_desp, dias_desp, dia_venc
+                motorista_id, tenant_id, nome_desp, valor_desp, dias_desp_raw, dia_venc
             )
 
         match_rem = re.match(r"^!remover\s+despesa\s+(.+)$", texto, re.IGNORECASE)
@@ -412,7 +430,7 @@ class ParametrosService:
             return await ParametrosService._excluir_caixa(motorista_id, tenant_id, nome_cx)
 
         # Retirada sem valor — informa o formato correto com nome da caixa pré-preenchido
-        match_retirar_sem_valor = re.match(r"^!retirar\s+caixa\s+(\S.*)$", texto, re.IGNORECASE)
+        match_retirar_sem_valor = re.match(r"^!retirar\s+caixa\s+(.+)$", texto, re.IGNORECASE)
         if match_retirar_sem_valor:
             nome_cx = match_retirar_sem_valor.group(1).strip()[:60]
             return (
@@ -682,23 +700,39 @@ class ParametrosService:
             return "❌ Erro ao buscar despesas fixas. Tente novamente em instantes."
 
     @staticmethod
-    async def _obter_ou_criar_caixa(conn, motorista_id: str, nome_caixa: str) -> str:
-        """Retorna o UUID da caixa com o nome informado, criando-a se não existir."""
+    async def _obter_ou_criar_caixa(
+        conn, motorista_id: str, nome_caixa: str,
+        meta_valor: Optional[Decimal] = None,
+    ) -> str:
+        """Retorna o UUID da caixa com o nome informado, criando-a se não existir.
+
+        Se `meta_valor` for fornecida:
+          - Na criação: define a meta imediatamente.
+          - Na atualização: preenche `meta_valor` apenas se ainda estiver NULL
+            (preserva meta que o motorista tiver definido manualmente).
+        """
         row = await conn.fetchrow(
-            "SELECT id FROM public.caixas_provisao "
+            "SELECT id, meta_valor FROM public.caixas_provisao "
             "WHERE motorista_id = $1::uuid AND lower(nome_caixa) = lower($2);",
             motorista_id, nome_caixa,
         )
         if row:
+            # Caixa já existe — preenche meta somente se ainda não tiver nenhuma
+            if meta_valor is not None and row["meta_valor"] is None:
+                await conn.execute(
+                    "UPDATE public.caixas_provisao SET meta_valor = $1 WHERE id = $2::uuid;",
+                    meta_valor, str(row["id"]),
+                )
             return str(row["id"])
         new_id = await conn.fetchval(
             """
-            INSERT INTO public.caixas_provisao (motorista_id, nome_caixa, saldo_atual)
-            VALUES ($1::uuid, $2, 0.00)
-            ON CONFLICT (motorista_id, nome_caixa) DO UPDATE SET nome_caixa = EXCLUDED.nome_caixa
+            INSERT INTO public.caixas_provisao (motorista_id, nome_caixa, saldo_atual, meta_valor)
+            VALUES ($1::uuid, $2, 0.00, $3)
+            ON CONFLICT (motorista_id, nome_caixa) DO UPDATE
+                SET meta_valor = COALESCE(caixas_provisao.meta_valor, EXCLUDED.meta_valor)
             RETURNING id;
             """,
-            motorista_id, nome_caixa,
+            motorista_id, nome_caixa, meta_valor,
         )
         return str(new_id)
 
@@ -760,8 +794,8 @@ class ParametrosService:
                     motorista_id, nome_despesa,
                 )
 
-                # 2. Cria/atualiza a caixinha do contrato
-                caixa_id = await ParametrosService._obter_ou_criar_caixa(conn, motorista_id, nome_despesa)
+                # 2. Cria/atualiza a caixinha do contrato (meta = valor_mensal do contrato)
+                caixa_id = await ParametrosService._obter_ou_criar_caixa(conn, motorista_id, nome_despesa, meta_valor=valor_mensal)
 
                 # 3. Upsert da despesa fixa de contrato
                 existing = await conn.fetchrow(
@@ -776,6 +810,11 @@ class ParametrosService:
                         "    caixa_id = $3::uuid "
                         "WHERE id = $4::uuid;",
                         valor_mensal, dias_uteis, caixa_id, str(existing["id"]),
+                    )
+                    # Sincroniza meta da caixa com o novo valor_mensal do contrato
+                    await conn.execute(
+                        "UPDATE public.caixas_provisao SET meta_valor = $1 WHERE id = $2::uuid;",
+                        valor_mensal, caixa_id,
                     )
                 else:
                     await conn.execute(
@@ -827,18 +866,45 @@ class ParametrosService:
 
     @staticmethod
     async def _adicionar_despesa_fixa(
-        motorista_id: str, tenant_id: str, nome: str, valor_mensal: Decimal, dias: int,
+        motorista_id: str, tenant_id: str, nome: str, valor_mensal: Decimal,
+        dias: Optional[int],
         dia_vencimento: int = 1,
     ) -> str:
-        """Insere ou reativa uma despesa fixa mensal e vincula à caixinha de provisão correspondente."""
+        """Insere ou reativa uma despesa fixa mensal e vincula à caixinha de provisão correspondente.
+
+        `dias` é o número de dias úteis usado como denominador do pro-rata diário.
+        Se None, é preenchido automaticamente com dias_uteis_mes do motorista.
+        Se informado e diferente de dias_uteis_mes, salva mesmo assim mas inclui aviso.
+        """
         if valor_mensal <= 0:
             return "⚠ O valor mensal deve ser maior que zero."
-        if not (1 <= dias <= 31):
+        if dias is not None and not (1 <= dias <= 31):
             return "⚠ O número de dias úteis deve estar entre 1 e 31."
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
-                # Garante que existe uma caixa de provisão com o mesmo nome da despesa
-                caixa_id = await ParametrosService._obter_ou_criar_caixa(conn, motorista_id, nome)
+                # Busca dias_uteis_mes do motorista para validação e fallback
+                row_m = await conn.fetchrow(
+                    "SELECT dias_uteis_mes FROM public.motoristas WHERE id = $1::uuid;",
+                    motorista_id,
+                )
+                dias_uteis_mes: int = int(row_m["dias_uteis_mes"]) if row_m else 26
+
+                aviso_dias = ""
+                if dias is None:
+                    # Sem argumento explícito: usa o padrão do motorista
+                    dias = dias_uteis_mes
+                elif dias != dias_uteis_mes:
+                    # Informa divergência mas respeita a escolha do usuário
+                    pro_correto = float(valor_mensal / Decimal(str(dias_uteis_mes)))
+                    aviso_dias = (
+                        f"\n\n⚠  _Seus dias úteis cadastrados são  *{dias_uteis_mes}*  mas você informou  "
+                        f"*{dias}*  — o pro-rata fica  *R$ {pro_correto:.2f}/dia*  com {dias_uteis_mes} dias._\n"
+                        f"_Para corrigir: `!adicionar despesa {nome} {float(valor_mensal):.0f} {dias_uteis_mes}`_"
+                    )
+
+                # Garante que existe uma caixa de provisão com o mesmo nome da despesa.
+                # meta = valor_mensal: define o teto da caixa igual ao custo mensal.
+                caixa_id = await ParametrosService._obter_ou_criar_caixa(conn, motorista_id, nome, meta_valor=valor_mensal)
                 # Verifica se já existe (mesmo nome, case-insensitive) para reativar
                 existing = await conn.fetchrow(
                     "SELECT id, ativo FROM public.despesas_fixas_mensais "
@@ -852,6 +918,12 @@ class ParametrosService:
                         "    caixa_id = $3::uuid, dia_vencimento = $4 "
                         "WHERE id = $5::uuid;",
                         valor_mensal, dias, caixa_id, dia_vencimento, str(existing["id"]),
+                    )
+                    # Sincroniza meta da caixa com o novo valor_mensal (comportamento esperado:
+                    # meta da caixa = custo mensal da despesa vinculada)
+                    await conn.execute(
+                        "UPDATE public.caixas_provisao SET meta_valor = $1 WHERE id = $2::uuid;",
+                        valor_mensal, caixa_id,
                     )
                     acao = "reativada e atualizada"
                 else:
@@ -877,6 +949,7 @@ class ParametrosService:
                 f"• Vencimento:  *todo dia  {dia_vencimento}*\n"
                 f"• Caixinha vinculada:  *{nome}*  _(aportes automáticos a cada fechamento)_\n\n"
                 f"_Esse custo será deduzido automaticamente em cada fechamento de turno._"
+                f"{aviso_dias}"
             )
         except Exception as exc:
             logger.error(f"[ParametrosService] Erro ao adicionar despesa fixa (motorista={motorista_id}): {exc}")

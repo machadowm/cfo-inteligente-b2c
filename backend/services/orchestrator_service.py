@@ -1015,9 +1015,9 @@ class OrchestratorService:
                         linhas_v.append(
                             f"{tag}  {r['modelo']}  |  *{r['placa']}*\n"
                             f"   Combustível: {r['tipo_combustivel']}  ·  Contrato: {r['locadora'] or '—'}\n"
-                            f"   ID: `{str(r['id'])[:8]}…`"
                         )
                     linhas_v.append("\n_Para trocar de veículo:  *!selecionar <placa>*_")
+                    linhas_v.append("\n_Para adicionar veículo:  *!novo veiculo*_")
                     await enviar_whatsapp(remote_jid, "\n\n".join(linhas_v))
                 except Exception as _e:
                     logger.error(f"[!veiculos] {_e}")

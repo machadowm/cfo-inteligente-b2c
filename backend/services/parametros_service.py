@@ -321,6 +321,7 @@ class ParametrosService:
                 "",
                 "🚗  *Frota (múltiplos veículos):*",
                 "  •  *!veiculos*                            → Listar todos os veículos cadastrados",
+                "  •   !cadastrar veiculo                    → Cadastra um novo veículo  
                 "  •  *!selecionar <placa>*                  → Trocar o veículo ativo (fora do turno)",
                 "     _Ex: !selecionar ABC1234_",
                 "",

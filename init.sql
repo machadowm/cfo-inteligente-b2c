@@ -455,7 +455,8 @@ CREATE TABLE public.veiculos (
     is_flex boolean DEFAULT false,
     qtd_tanques integer DEFAULT 1,
     is_hibrido boolean DEFAULT false,
-    is_eletrico boolean DEFAULT false
+    is_eletrico boolean DEFAULT false,
+    selecionado boolean NOT NULL DEFAULT false
 );
 
 

@@ -794,22 +794,40 @@ class TurnoService:
                     custo_fixo_total, lucro_liquido_real, km_profissional, provisao_descontada_total
                 )
 
-                # Média histórica de faturamento diário (últimos 10 fechamentos,
-                # excluindo o atual que acabou de ser inserido acima — usa LIMIT 10 OFFSET 1).
-                # Usada na projeção mensal do DRE para base realista em vez de meta_diaria.
+                # Média de faturamento diário — mês atual (excluindo o turno recém-fechado
+                # via OFFSET 1 para não duplicar).  Fallback para últimos 10 sem filtro de
+                # mês quando o mês corrente tem < 3 fechamentos (início de mês).
                 hist_fat_row = await conn.fetchrow(
                     """
-                    SELECT COALESCE(AVG(NULLIF(faturamento_bruto, 0)), 0) AS media_fat
+                    SELECT COALESCE(AVG(NULLIF(faturamento_bruto, 0)), 0) AS media_fat,
+                           COUNT(*) AS qtd
                     FROM (
                         SELECT faturamento_bruto
                         FROM public.fechamento_diario
                         WHERE motorista_id = $1::uuid
+                          AND date_trunc('month', data_fechamento AT TIME ZONE 'America/Sao_Paulo')
+                              = date_trunc('month', CURRENT_DATE)
                         ORDER BY data_fechamento DESC
                         LIMIT 10 OFFSET 1
                     ) sub;
                     """,
                     motorista_id,
                 )
+                if int(hist_fat_row["qtd"] or 0) < 2:
+                    # Fallback: menos de 2 turnos no mês após excluir o atual — usa histórico geral
+                    hist_fat_row = await conn.fetchrow(
+                        """
+                        SELECT COALESCE(AVG(NULLIF(faturamento_bruto, 0)), 0) AS media_fat
+                        FROM (
+                            SELECT faturamento_bruto
+                            FROM public.fechamento_diario
+                            WHERE motorista_id = $1::uuid
+                            ORDER BY data_fechamento DESC
+                            LIMIT 10 OFFSET 1
+                        ) sub;
+                        """,
+                        motorista_id,
+                    )
                 media_fat_dia = float(hist_fat_row["media_fat"] or 0.0)
 
                 # FIX #1 — Acumulado de faturamento bruto do mês corrente (excluindo o turno

@@ -96,8 +96,10 @@ class ProfileService:
                     motorista_id,
                 )
 
-                # ── 4. Histórico dos últimos 10 fechamentos ────────────────────
-                # Inclui lucro e custo para calcular indicadores de eficiência real.
+                # ── 4. Histórico do mês atual (com fallback para todos os turnos) ────
+                # Restringe ao mês corrente para que as médias reflitam o momento atual.
+                # Fallback (sem filtro de mês) quando o mês tem < 3 fechamentos, para
+                # não deixar o perfil vazio no começo do mês.
                 hist = await conn.fetchrow(
                     """
                     SELECT
@@ -113,19 +115,49 @@ class ProfileService:
                                custo_variavel_direto, custo_fixo_rateado
                         FROM public.fechamento_diario
                         WHERE motorista_id = $1::uuid
+                          AND date_trunc('month', data_fechamento AT TIME ZONE 'America/Sao_Paulo')
+                              = date_trunc('month', CURRENT_DATE)
                         ORDER BY data_fechamento DESC
                         LIMIT 10
                     ) sub;
                     """,
                     motorista_id,
                 )
+                # Fallback: se o mês tem < 3 fechamentos, usa histórico geral (últimos 10)
+                _hist_is_mes = int(hist["qtd_turnos"] or 0) >= 3
+                if not _hist_is_mes:
+                    hist = await conn.fetchrow(
+                        """
+                        SELECT
+                            COALESCE(AVG(NULLIF(km_rodados, 0)), 0)          AS media_km,
+                            COALESCE(AVG(NULLIF(faturamento_bruto, 0)), 0)   AS media_fat,
+                            COALESCE(AVG(lucro_liquido_real), 0)             AS media_lucro,
+                            COALESCE(AVG(custo_variavel_direto
+                                         + custo_fixo_rateado), 0)           AS media_custo_total,
+                            COUNT(*)                                          AS qtd_turnos
+                        FROM (
+                            SELECT km_rodados, faturamento_bruto,
+                                   lucro_liquido_real,
+                                   custo_variavel_direto, custo_fixo_rateado
+                            FROM public.fechamento_diario
+                            WHERE motorista_id = $1::uuid
+                            ORDER BY data_fechamento DESC
+                            LIMIT 10
+                        ) sub;
+                        """,
+                        motorista_id,
+                    )
 
-                # ── 5. Últimos 3 fechamentos para alerta de ritmo ──────────────
+                # ── 5. Últimos 3 fechamentos do mês atual para alerta de ritmo ──
+                # Filtrado ao mês corrente: alertar com base em turnos de outro mês
+                # seria enganoso (condições de mercado mudam entre meses).
                 ultimos3 = await conn.fetch(
                     """
                     SELECT faturamento_bruto
                     FROM public.fechamento_diario
                     WHERE motorista_id = $1::uuid
+                      AND date_trunc('month', data_fechamento AT TIME ZONE 'America/Sao_Paulo')
+                          = date_trunc('month', CURRENT_DATE)
                     ORDER BY data_fechamento DESC
                     LIMIT 3;
                     """,
@@ -372,7 +404,9 @@ class ProfileService:
                 f"{despesas_fixas_str}\n\n"
                 f"📦  *CAIXAS DE PROVISÃO* \n"
                 f"{caixas_str}\n\n"
-                f"📈  *HISTÓRICO RECENTE*  (últimos {qtd_turnos if qtd_turnos else '—'} turnos)\n"
+                f"📈  *HISTÓRICO RECENTE*  "
+                f"({'mês atual — ' if _hist_is_mes else 'histórico geral — '}"
+                f"{qtd_turnos if qtd_turnos else '—'} turnos)\n"
                 f"{historico_str}\n"
                 + alerta_ritmo
                 + f"\n\n💡  _Quer ajustar algo?_\n"

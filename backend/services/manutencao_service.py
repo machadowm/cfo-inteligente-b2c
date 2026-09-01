@@ -33,15 +33,126 @@ logger = logging.getLogger(__name__)
 # Cada chave é a "âncora semântica" que deve aparecer no tipo_servico da regra.
 # O matching bate quando qualquer sinônimo é encontrado como palavra inteira
 # na descrição normalizada da transação.
+#
+# Critérios de inclusão:
+#   • Grafia canônica (sem acento, minúsculas)
+#   • Grafias fonéticas comuns de motoristas (ex: "oleu", "pastila", "amortecedor")
+#   • Abreviações urbanas de oficina (ex: "oleo", "past", "amor")
+#   • Termos de nota fiscal / orçamento de oficina
+#
+# NÃO incluir termos ambíguos que colidem com vocabulário cotidiano fora do contexto
+# de manutenção (ex: "cabo" pode ser cabo USB; "disco" pode ser disco de música).
+# Nesses casos, o motorista deve usar o comando manual !manutencao registrar.
 _SINONIMOS: Dict[str, List[str]] = {
-    "oleo":      ["oleo", "lubrificante", "filtro", "lubr"],
-    "pneu":      ["pneu", "borracharia", "alinhamento", "balanceamento", "geometria", "aro"],
-    "freio":     ["freio", "pastilha", "disco", "lona", "fluido", "abs"],
-    "suspensao": ["suspensao", "amortecedor", "mola", "pivo", "batente", "coifa", "bandeja"],
-    "correia":   ["correia", "dentada", "tensor", "alternador", "polia"],
-    "vela":      ["vela", "ignicao", "cabo", "bobina"],
-    "ar":        ["arcondicionado", "filtrocabine", "higienizacao", "cargagas"],
-    "mecanico":  ["mecanica", "oficina", "revisao", "diagnostico", "reparo"],
+    "oleo": [
+        # grafias canônicas
+        "oleo", "lubrificante", "lubrificacao",
+        # termos de nota fiscal / orçamento
+        "troca oleo", "troca de oleo", "filtro oleo", "filtro de oleo",
+        "oleo motor", "oleo cambio", "oleo diferencial",
+        # grafias fonéticas/erros comuns
+        "oleu", "olio", "olho motor",
+        # abreviações de oficina
+        "lub",
+    ],
+    "pneu": [
+        # grafias canônicas
+        "pneu", "pneus", "borracharia", "borracha",
+        # serviços associados
+        "alinhamento", "balanceamento", "geometria", "calibragem", "calibrar",
+        # componentes
+        "aro", "rodas", "estepe",
+        # grafias fonéticas/erros comuns
+        "pnei", "pneumatico",
+        # abreviações de nota fiscal
+        "balan",
+    ],
+    "freio": [
+        # grafias canônicas
+        "freio", "freios",
+        # componentes
+        "pastilha", "pastilhas", "disco freio", "disco de freio", "lona", "lonas",
+        "fluido freio", "fluido de freio", "fluido",
+        # sistemas
+        "abs",
+        # grafias fonéticas/erros comuns de motoristas
+        "pastila", "pastillas", "pastiha", "freo", "freeo",
+        # abreviações de nota fiscal
+        "past",
+    ],
+    "suspensao": [
+        # grafias canônicas
+        "suspensao", "suspenção",
+        # componentes
+        "amortecedor", "amortecedores", "mola", "molas", "pivo", "pivô",
+        "batente", "coifa", "bandeja", "bandejas", "cubo", "rolamento",
+        # grafias fonéticas/erros comuns
+        "amortecedô", "amorteçedor", "amor", "suspençao",
+    ],
+    "correia": [
+        # grafias canônicas
+        "correia", "correias",
+        # tipos
+        "correia dentada", "correia do alternador", "correia acessorios",
+        # componentes do kit
+        "tensor", "tensores", "polia", "polias", "bomba dagua", "bomba de agua",
+        # grafias fonéticas/erros comuns
+        "coria", "corea",
+        # abreviações de nota fiscal
+        "kit correia", "kit distribuicao",
+    ],
+    "vela": [
+        # grafias canônicas
+        "vela", "velas",
+        # componentes do sistema de ignição
+        "ignicao", "cabo vela", "cabo de vela", "cabos", "bobina", "bobinas",
+        # grafias fonéticas/erros comuns
+        "vella", "velas ignicao",
+    ],
+    "ar": [
+        # grafias canônicas sem espaço (após normalização remove pontuação mas mantém espaço)
+        "ar condicionado", "arcondicionado",
+        # serviços
+        "carga gas", "cargagas", "higienizacao ar", "higienizacao",
+        # componentes
+        "filtro cabine", "filtrocabine", "compressor ar",
+        # grafias fonéticas/erros comuns
+        "ar frio", "ar quente", "gelando", "refrigeracao",
+    ],
+    "mecanico": [
+        # grafias canônicas
+        "mecanico", "mecanica", "oficina",
+        # tipos de serviço
+        "revisao", "revisão", "diagnostico", "diagnóstico", "reparo", "reparos",
+        # contexto de nota fiscal
+        "mao de obra", "mao obra", "servico mecanico",
+        # grafias fonéticas/erros comuns
+        "mecanicu", "mekanico", "oficinia",
+    ],
+    "embreagem": [
+        # grafias canônicas
+        "embreagem",
+        # componentes do kit
+        "disco embreagem", "platô", "plato", "rolamento embreagem",
+        # grafias fonéticas/erros comuns
+        "imbreagem", "embraiagem", "embragem",
+    ],
+    "bateria": [
+        # grafias canônicas
+        "bateria", "baterias",
+        # contexto elétrico
+        "bateria carro", "carga bateria",
+        # grafias fonéticas/erros comuns
+        "batéria", "batira",
+    ],
+    "injecao": [
+        # grafias canônicas
+        "injecao", "injeção",
+        # componentes
+        "bicos injetores", "bico injetor", "limpeza injecao", "limpeza bicos",
+        # grafias fonéticas/erros comuns
+        "injeção eletronica", "injecao eletronica",
+    ],
 }
 
 
@@ -70,10 +181,20 @@ def _palavras_chave_para_tipo(tipo_servico: str) -> List[str]:
 
 def _contem_palavra(desc: str, palavra: str) -> bool:
     """
-    Verifica se `palavra` aparece como token inteiro em `desc`.
-    Usa \\b para evitar falsos positivos de substring (ex: 'oleo' em 'olhei').
+    Verifica se `palavra` aparece em `desc` sem ser substring de outra palavra.
+
+    • Token simples (sem espaço): usa \\b para evitar falsos positivos de substring
+      (ex: 'oleo' não bate em 'olhei').
+    • Frase com espaços (ex: 'troca oleo'): usa lookaround de word boundary nas
+      extremidades, permitindo que o espaço interno bata normalmente.
+      Isso garante que 'troca oleo' bate em 'fiz troca oleo hoje' mas não em
+      'trocaoleo' (sem espaço, seria grafia inválida de qualquer forma).
     """
-    return bool(re.search(r"\b" + re.escape(palavra) + r"\b", desc))
+    palavra_norm = _normalizar(palavra)
+    if not palavra_norm:
+        return False
+    pattern = r"\b" + re.escape(palavra_norm) + r"\b"
+    return bool(re.search(pattern, desc))
 
 
 class ManutencaoService:

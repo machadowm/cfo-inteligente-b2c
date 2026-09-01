@@ -216,9 +216,11 @@ class ProfileService:
             lucro_parcial = fat_bruto - desp_total
             progresso     = float(fat_bruto / meta_mensal * 100) if meta_mensal > 0 else 0.0
 
-            aluguel_sem  = float(v["custo_aluguel_semanal"] or 1020.85)
-            aluguel_dia  = aluguel_sem / 6.0
-            franquia_sem = float(v["franquia_km_semanal"] or 1505.0)
+            aluguel_sem   = float(v["custo_aluguel_semanal"] or 1020.85)
+            aluguel_dia   = aluguel_sem / 6.0
+            _locadora_v   = (v["locadora"] or "").lower()
+            _is_proprio_v = _locadora_v in ("proprietario", "quitado", "financiado")
+            franquia_sem  = float(v["franquia_km_semanal"] or 0.0) if not _is_proprio_v else 0.0
 
             media_km_dia    = float(hist["media_km"]         or 0)
             media_fat_dia   = float(hist["media_fat"]        or 0)
@@ -378,15 +380,20 @@ class ProfileService:
                 historico_str = "• Nenhum fechamento registrado ainda."
 
             # ── Montagem final da mensagem ─────────────────────────────────────
+            _linha_contrato_veiculo = (
+                f"• Custo (pro-rata diário):  *R$ {aluguel_dia:.2f}*\n\n"
+                if _is_proprio_v else
+                f"• Aluguel:  *R$ {aluguel_sem:.2f}/sem*  (≈  *R$ {aluguel_dia:.2f}/dia* )\n"
+                f"• Franquia:  *{franquia_sem:.0f} km/sem*  (≈  *{franquia_sem / 7:.0f} km/dia* )\n\n"
+            )
             return (
                 f"👤  *PARCEIRO DO PAINEL — {nome_exibicao.upper()}*  🛡\n"
                 f"──────────────────────────────\n\n"
                 f"🚗  *VEÍCULO ATIVO* \n"
                 f"• Modelo:  *{v['modelo']}*  ({v['placa']})\n"
                 f"• Contrato:  *{v['locadora'] or 'Não configurado'}* \n"
-                f"• Aluguel:  *R$ {aluguel_sem:.2f}/sem*  (≈  *R$ {aluguel_dia:.2f}/dia* )\n"
-                f"• Franquia:  *{franquia_sem:.0f} km/sem*  (≈  *{franquia_sem / 7:.0f} km/dia* )\n\n"
-                f"⛽  *ESTOQUE NO COFRE (Virtual)* \n"
+                + _linha_contrato_veiculo
+                + f"⛽  *ESTOQUE NO COFRE (Virtual)* \n"
                 f"{estoque_str}\n"
                 f"_(Usado para calcular o Lucro Real no fechamento do turno)_\n\n"
                 f"📊  *DESEMPENHO DO MÊS ATUAL* \n"

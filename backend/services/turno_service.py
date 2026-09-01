@@ -886,8 +886,15 @@ class TurnoService:
                 "locadora": turno["locadora"] or "Localiza Zarp",
                 "custo_aluguel_semanal": float(turno["custo_aluguel_semanal"] or 1020.85),
                 "escala_trabalho": turno["escala_trabalho"] or "De quarta a segunda (6 dias)",
-                "franquia_km_semanal": float(turno["franquia_km_semanal"] or 1505.0),
-                "valor_km_excedente": float(turno["valor_km_excedente"] or 0.75),
+                # Próprio/financiado: sem franquia contratual — fallback 0 em vez de valores de locadora
+                "franquia_km_semanal": float(turno["franquia_km_semanal"] or (
+                    0.0 if (turno["locadora"] or "").lower() in ("proprietario", "quitado", "financiado")
+                    else 1505.0
+                )),
+                "valor_km_excedente": float(turno["valor_km_excedente"] or (
+                    0.0 if (turno["locadora"] or "").lower() in ("proprietario", "quitado", "financiado")
+                    else 0.75
+                )),
                 "contrato_personalizado": bool(turno["contrato_personalizado"]),
                 "detalhe_queima": " | ".join(detalhe_queima),
                 "despesas_detalhadas": despesas_detalhadas,

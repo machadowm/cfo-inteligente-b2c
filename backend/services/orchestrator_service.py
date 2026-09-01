@@ -67,23 +67,38 @@ def converter_para_float(texto_valor: str) -> float:
 def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
     """Gera o status parcial do turno atualizado com as regras contratuais e do DRE."""
     aluguel_diario = info["custo_aluguel_semanal"] / 6.0
-    franquia_diaria = info["franquia_km_semanal"] / 7.0
     meta_diaria = info["meta_mensal"] / info["dias_uteis"]
     piso_km   = info.get("piso_ganho_km",   2.0)
     piso_hora = info.get("piso_ganho_hora", 30.0)
     piso_km_fmt   = f"{piso_km:.2f}".replace(".", ",")
     piso_hora_fmt = f"{piso_hora:.2f}".replace(".", ",")
+
+    locadora_lower = (info.get("locadora") or "").lower()
+    is_proprio = locadora_lower in ("proprietario", "quitado", "financiado")
+
+    if is_proprio:
+        # Próprio/financiado: não tem franquia nem km excedente contratual
+        linhas_contrato = (
+            f"• Escala:  *{info['escala_trabalho']}* \n"
+            f"• Custo Diário (pro-rata):  *R$ {aluguel_diario:.2f}*\n"
+        )
+    else:
+        franquia_diaria = info["franquia_km_semanal"] / 7.0
+        linhas_contrato = (
+            f"• Escala:  *{info['escala_trabalho']}* \n"
+            f"• Aluguel Diário:  *R$ {aluguel_diario:.2f}*  (semanal R$ {info['custo_aluguel_semanal']:.2f} / 6d)\n"
+            f"• Franquia Recomendada:  *{franquia_diaria:.0f} km/dia* \n"
+            f"• KM Excedente:  *R$ {info['valor_km_excedente']:.2f}/km* \n"
+        )
+
     return (
         f"📥  *DADOS PARCIAIS DO TURNO DE HOJE ({info['data_turno']})* \n\n"
         f"• Início:  *{info['data_inicio_hora']}* \n"
         f"• KM Inicial:  *{info['km_inicial']:,.1f} km* \n".replace(",", ".") +
         f"• Combustível Lançado:  *R$ {info['total_abastecido']:.2f}* \n\n"
         f"⚙  *CUSTOS DO CONTRATO ({info['locadora']})* \n\n"
-        f"• Escala:  *{info['escala_trabalho']}* \n"
-        f"• Aluguel Diário:  *R$ {aluguel_diario:.2f}*  (semanal R$ {info['custo_aluguel_semanal']:.2f} / 6d)\n"
-        f"• Franquia Recomendada:  *{franquia_diaria:.0f} km/dia* \n"
-        f"• KM Excedente:  *R$ {info['valor_km_excedente']:.2f}/km* \n\n"
-        f"🎯  *METAS DE HOJE* \n\n"
+        + linhas_contrato
+        + f"\n🎯  *METAS DE HOJE* \n\n"
         f"• Meta Diária:  *R$ {meta_diaria:.2f}* \n"
         f"• Piso Indicado:  *R$ {piso_km_fmt}/km*  |  *R$ {piso_hora_fmt}/h* \n\n"
         f"🔮 Para encerrar a sua jornada e emitir o DRE, envie:  *'fechar [KM final]'"
@@ -926,12 +941,14 @@ class OrchestratorService:
             try:
                 locadora = partes[2] if len(partes) > 2 else "Localiza Zarp"
                 aluguel_input = converter_para_float(partes[3]) if len(partes) > 3 else 1020.85
-                franquia = converter_para_float(partes[4]) if len(partes) > 4 else 1505.00
-                
-                if locadora.lower() in ["proprietario", "quitado", "financiado"]:
+                _locadora_lower = locadora.lower()
+                if _locadora_lower in ["proprietario", "quitado", "financiado"]:
+                    # Próprio/financiado: sem franquia — força 0 independente do que foi digitado
                     aluguel_semanal = aluguel_input * 6.0
+                    franquia = 0.0
                 else:
                     aluguel_semanal = aluguel_input
+                    franquia = converter_para_float(partes[4]) if len(partes) > 4 else 1505.00
                     
                 async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                     await conn.execute(
@@ -997,8 +1014,14 @@ class OrchestratorService:
                             "km_inicial": float(turno_ativo["km_inicial"]),
                             "locadora": turno_ativo["locadora"] or "Localiza Zarp",
                             "custo_aluguel_semanal": float(turno_ativo["custo_aluguel_semanal"] or 1020.85),
-                            "franquia_km_semanal": float(turno_ativo["franquia_km_semanal"] or 1505.0),
-                            "valor_km_excedente": float(turno_ativo["valor_km_excedente"] or 0.75),
+                            "franquia_km_semanal": float(turno_ativo["franquia_km_semanal"] or (
+                                0.0 if (turno_ativo["locadora"] or "").lower() in ("proprietario", "quitado", "financiado")
+                                else 1505.0
+                            )),
+                            "valor_km_excedente": float(turno_ativo["valor_km_excedente"] or (
+                                0.0 if (turno_ativo["locadora"] or "").lower() in ("proprietario", "quitado", "financiado")
+                                else 0.75
+                            )),
                             "escala_trabalho": turno_ativo["escala_trabalho"] or "De quarta a segunda (6 dias)",
                             "meta_mensal": float(turno_ativo["meta_mensal_faturamento"] or 12000.0),
                             "dias_uteis": int(turno_ativo["dias_uteis_mes"] or 26),

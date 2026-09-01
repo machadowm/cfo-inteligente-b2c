@@ -1,0 +1,279 @@
+
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Auditoria — Parceiro do Painel</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    font-size: 14px; line-height: 1.6;
+    background: #ffffff; color: #1f2328;
+    padding: 32px 16px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { color: #57606a; font-size: 13px; margin-bottom: 28px; }
+  h2 { font-size: 15px; font-weight: 700; margin: 24px 0 10px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
+  h3 { font-size: 13px; font-weight: 700; margin: 16px 0 6px; color: #1f2328; }
+  p  { margin-bottom: 8px; }
+  code { font-family: "Cascadia Code", "Fira Code", monospace; font-size: 12px; background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 3px; padding: 0 4px; }
+  pre { background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 4px; padding: 10px 12px; font-size: 12px; margin: 8px 0 12px; overflow-x: auto; white-space: pre-wrap; }
+  .tag {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    border-radius: 3px; padding: 1px 7px; margin-right: 6px;
+    vertical-align: middle; white-space: nowrap;
+  }
+  .bug     { background: #fef2f2; color: #b91c1c; border: 1px solid #fca5a5; }
+  .risk    { background: #fff7ed; color: #c2410c; border: 1px solid #fdba74; }
+  .minor   { background: #fefce8; color: #854d0e; border: 1px solid #fde047; }
+  .ok      { background: #f0fdf4; color: #15803d; border: 1px solid #86efac; }
+  .info    { background: #eff6ff; color: #1d4ed8; border: 1px solid #93c5fd; }
+  .item { border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px 14px; margin-bottom: 10px; }
+  .item-title { font-weight: 600; font-size: 13.5px; margin-bottom: 4px; }
+  .file { color: #57606a; font-size: 12px; }
+  .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 24px; }
+  .summary-card { border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; text-align: center; background: #f7f8fa; }
+  .summary-num { font-size: 26px; font-weight: 700; }
+  .summary-label { font-size: 11px; color: #57606a; margin-top: 2px; }
+  .sn-bug { color: #b91c1c; }
+  .sn-risk { color: #c2410c; }
+  .sn-minor { color: #854d0e; }
+  .sn-ok { color: #15803d; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 10px 0 16px; }
+  th { background: #f7f8fa; border: 1px solid #e5e7eb; padding: 7px 10px; font-weight: 600; text-align: left; }
+  td { border: 1px solid #e5e7eb; padding: 7px 10px; vertical-align: top; }
+  ul { padding-left: 18px; }
+  li { margin-bottom: 4px; }
+  .footer { border-top: 1px solid #e5e7eb; margin-top: 40px; padding-top: 12px; text-align: center; color: #57606a; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Auditoria de Sistema — Parceiro do Painel</h1>
+<p class="subtitle">Revisão completa de todos os serviços do backend · 9 arquivos · gerado em 01/09/2026</p>
+
+<div class="summary-grid">
+  <div class="summary-card"><div class="summary-num sn-bug">4</div><div class="summary-label">Bugs Críticos</div></div>
+  <div class="summary-card"><div class="summary-num sn-risk">8</div><div class="summary-label">Riscos Médios</div></div>
+  <div class="summary-card"><div class="summary-num sn-minor">9</div><div class="summary-label">Melhorias Menores</div></div>
+  <div class="summary-card"><div class="summary-num sn-ok">27</div><div class="summary-label">Pontos Corretos</div></div>
+</div>
+
+
+<h2>🔴 Bugs Críticos (produção afetada)</h2>
+
+<div class="item">
+  <div class="item-title"><span class="tag bug">BUG</span>Projeção mensal ainda usa <code>fat</code> do turno atual, não <code>fat_bruto</code> acumulado no mês</div>
+  <div class="file">orchestrator_service.py · formatar_relatorio_fechamento_dre · linha 305</div>
+  <p>A variável <code>fat</code> é o faturamento bruto <strong>do turno fechado</strong>. A projeção deveria ser <code>fat_bruto_mes_acumulado + (media_fat_dia × dias_restantes)</code>. Como está, se o motorista fechou R$ 200 num dia no fim do mês, a projeção mostra R$ 200 + (histórico × dias), ignorando os R$ 8.000 que ele já faturou este mês.</p>
+  <pre>projecao_mensal = fat + (media_fat_dia * dias_uteis_restantes)
+# fat = faturamento DO TURNO, não do mês
+# Deveria ser: fat_bruto_mes + (media_fat_dia * dias_uteis_restantes)</pre>
+  <p><strong>Impacto:</strong> projeção sempre subestimada; "Faturamento/dia necessário para a meta" inflado.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag bug">BUG</span><code>deficit_meta</code> também usa <code>fat</code> do turno, não o acumulado mensal</div>
+  <div class="file">orchestrator_service.py · linha 306</div>
+  <p><code>deficit_meta = max(0.0, meta_mensal - fat)</code> — subtrai a meta do faturamento de um turno, não do acumulado do mês. O "faturamento/dia necessário" é completamente equivocado.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag bug">BUG</span>Formatação de mensagem quebrada em <code>_excluir_caixa</code> e <code>_criar_caixa</code></div>
+  <div class="file">parametros_service.py · linha 1008, 871</div>
+  <p>Os f-strings aninhados com <code>*{nome}*</code> estão errados — há um asterisco extra que quebra a negrito:</p>
+  <pre># Linha 1008:
+f"🗑  *Caixa  *{nome}*  excluída com sucesso.*\n"
+# Deve ser:
+f"🗑  *Caixa {nome} excluída com sucesso!* \n"
+
+# Linha 871:
+f"✅  *Caixa  *{nome}*  criada!*\n"
+# Deve ser:
+f"✅  *Caixa {nome} criada!* \n"</pre>
+  <p><strong>Impacto:</strong> formatação visível ao motorista quebrada em toda exclusão e criação de caixa.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag bug">BUG</span>Double-close do cliente Redis no shutdown (<code>aclose</code> chamado duas vezes)</div>
+  <div class="file">main.py · linha 39-42</div>
+  <p>No <code>lifespan</code>, o teardown faz:</p>
+  <pre>redis_client = await RedisFSMService.get_client()
+await redis_client.aclose()</pre>
+  <p>Mas <code>RedisFSMService.get_client()</code> retorna a instância singleton, e o pool já tem <code>max_inactive_connection_lifetime</code>. O <code>aclose</code> direto fecha o socket mas <strong>não</strong> chama <code>pool.disconnect()</code>. O correto seria chamar <code>RedisFSMService.close_client()</code> que existe e reseta o singleton, ou fechar via <code>await cls._client.connection_pool.disconnect()</code>. Como está, o <code>_client</code> singleton não é resetado para <code>None</code>, mas o socket subjacente foi fechado — uma futura chamada no mesmo processo usaria um socket fechado.</p>
+</div>
+
+
+<h2>🟠 Riscos Médios</h2>
+
+<div class="item">
+  <div class="item-title"><span class="tag risk">RISCO</span>Onboarding: estado FSM usa <code>|</code> como separador mas o nome do veículo pode conter <code>|</code></div>
+  <div class="file">orchestrator_service.py · linhas 560, 571, 598</div>
+  <p>O estado é serializado como <code>AGUARDANDO_VEICULO|name:João|veiculo:Honda CG|160</code>. Se o motorista digitar um nome com <code>|</code> (raro, mas possível), os <code>split("|")</code> posteriores desalinham todos os campos. Não há sanitização.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag risk">RISCO</span>Race condition silenciosa: dois fechamentos simultâneos do mesmo turno</div>
+  <div class="file">turno_service.py · fechar_turno_com_dre</div>
+  <p>O <code>UPDATE turnos SET status = 'concluido'</code> não usa <code>WHERE status IN ('em_andamento', 'em_pausa')</code>. Se dois requests chegarem em paralelo (ex: debouncing falhar ou reenvio WhatsApp), o segundo UPDATE tenta fechar um turno já concluído, prossegue silenciosamente (nenhum <code>RETURNING</code> verifica se a linha foi atualizada), e gera um segundo lançamento em <code>fechamento_diario</code> — duplicando o snapshot contábil.</p>
+  <pre># Vulnerável:
+await conn.execute("UPDATE public.turnos SET km_final=$1, status='concluido' WHERE id=$2::uuid", ...)
+# Seguro:
+row = await conn.fetchrow("UPDATE ... WHERE id=$1 AND status != 'concluido' RETURNING id", ...)
+if not row: return {"sucesso": False, "tipo_erro": "TURNO_JA_CONCLUIDO"}</pre>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag risk">RISCO</span>Consulta de lembretes sem isolamento RLS — usa <code>get_connection()</code>, não <code>get_tenant_connection()</code></div>
+  <div class="file">reminder_service.py · _processar_pausas_prolongadas, _processar_turnos_zumbi, _processar_vencimentos_despesas</div>
+  <p>Todas as queries do ReminderService usam <code>get_connection()</code> (sem RLS). Isso é <strong>intencional</strong> (varredura de todos os motoristas), mas <strong>sem</strong> <code>WHERE ativo = TRUE</code> na tabela motoristas. Se um motorista for desativado/deletado no futuro, lembretes continuarão sendo enviados para o telefone dele.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag risk">RISCO</span>Pausa retroativa usa <code>meio_jornada</code> fixo — pode gerar <code>inicio_pausa &gt; fim_pausa</code></div>
+  <div class="file">orchestrator_service.py · linha 1222-1228</div>
+  <p>A pausa retroativa é posicionada no meio da jornada com <code>meio_jornada + timedelta(minutes=minutos_declarados)</code>. Se a pausa for maior que a metade restante (ex: jornada de 3h, pausa de 2h30), <code>fim_pausa</code> pode ultrapassar <code>datetime.now()</code>. O clamp existente (linha 1212) limita os minutos a <code>duração - 5</code>, mas não garante que <code>meio_jornada + duração &lt;= now()</code>.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag risk">RISCO</span>Fallback do odômetro via argumento de comparação na recalibração Full-to-Full é duplamente contado</div>
+  <div class="file">transacao_service.py · _recalibrar_rendimento_full_to_full · linha 558-559</div>
+  <p>A query SQL soma litros com <code>data_transacao &gt; anterior AND odometro &lt;= atual</code>. Depois, o código adiciona manualmente <code>litros_abastecidos_atual</code> novamente. Se o INSERT do abastecimento atual já estiver no banco (o método é chamado <strong>depois</strong> do INSERT), os litros serão contados duas vezes na soma do intervalo.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag risk">RISCO</span>Faturamento parcial do turno ativo somado no <code>fat_bruto</code> do Raio-X mensal</div>
+  <div class="file">profile_service.py · linha 75-86</div>
+  <p>A query de acumulado mensal soma <strong>todas</strong> as transações do mês, incluindo as do turno ainda aberto. Isso significa que o motorista vê o faturamento do turno em andamento misturado ao histórico fechado, gerando uma projeção dupla ao fechar o turno depois.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag risk">RISCO</span>Cache de perfil do motorista nunca invalidado após <code>atualizar contrato</code></div>
+  <div class="file">orchestrator_service.py · linha 903-910</div>
+  <p>O comando <code>atualizar contrato</code> faz UPDATE no banco mas não chama <code>RedisFSMService.limpar_buffer(f"profile:{tenant_id}")</code>. O próximo <code>perfil</code> retornará os dados de contrato stale do cache por até 1h.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag risk">RISCO</span><code>km_pessoal_intra</code> não inclui o gap do abastecimento durante a pausa sem km registrado</div>
+  <div class="file">turno_service.py · linha 392-402</div>
+  <p>Se o motorista pausar sem km, abastecer durante a pausa, e retomar sem km, o gap de uso pessoal intra-turno fica zerado. O cofre virtual será debitado na retomada (se km fornecido), mas <code>km_pessoal_intra</code> na agregação de pausas ficará zerado mesmo assim porque depende de <code>km_fim - km_inicio</code>. Não é um bug de conta — é uma limitação documentada — mas pode gerar surpresa no DRE.</p>
+</div>
+
+
+<h2>🟡 Melhorias Menores / Inconsistências</h2>
+
+<div class="item">
+  <div class="item-title"><span class="tag minor">MENOR</span>Label "Projeção ao ritmo da meta" é enganoso quando usa <code>media_fat_dia</code></div>
+  <div class="file">orchestrator_service.py · linha 314</div>
+  <p>Após a correção que trocou <code>meta_diaria</code> por <code>media_fat_dia</code>, o texto ficou "Projeção ao ritmo <strong>da meta</strong>". Deveria ser "Projeção ao ritmo <strong>atual</strong> (média histórica)".</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag minor">MENOR</span><code>amanha_dia = hoje_dia + 1</code> quebra no último dia do mês</div>
+  <div class="file">orchestrator_service.py · linha 330</div>
+  <p>No dia 31, <code>amanha_dia = 32</code>, que nunca casa com <code>dia_vencimento</code> (1–31). Despesas que vencem no dia 1 do próximo mês não terão o aviso "vence amanhã" no dia 31. Correção: usar <code>(hoje + timedelta(1)).day</code>.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag minor">MENOR</span>Mesmo problema de fim de mês existe no <code>_listar_despesas_fixas</code></div>
+  <div class="file">parametros_service.py · linha 668</div>
+  <p><code>"  ⏰ _vence amanhã_" if dia_venc == hoje_dia + 1 else ""</code> — idêntico ao bug anterior.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag minor">MENOR</span>Cálculo de <code>dias_uteis_restantes</code> usa divisão linear simples (não calendário real)</div>
+  <div class="file">orchestrator_service.py e profile_service.py · linhas 302 e 194</div>
+  <p><code>round(dias_uteis * (1 - hoje.day / 30))</code> assume todos os meses com 30 dias e não distingue fins de semana. Em fevereiro (28 dias) ou no dia 31 de janeiro, o cálculo fica errado. Para um app de finanças pessoais isso é aceitável, mas deveria ser documentado como estimativa.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag minor">MENOR</span>Abastecimento fast-path ignora <code>comb_detectado</code> já no estado ABASTECIMENTO_PRECO com valor embutido</div>
+  <div class="file">orchestrator_service.py · linha 1583-1593</div>
+  <p>Quando o motorista manda "abasteci 150 gasolina" (sem preço), o sistema entra no estado <code>ABASTECIMENTO_PRECO</code> com <code>comb:gasolina</code> corretamente. Porém, quando a mensagem tem valor mas não tem preço e <strong>não</strong> detecta combustível, <code>comb_abt</code> fica vazio — e se o próximo estado detectar combustível no texto do preço, o <code>params.get("comb")</code> ficará errado.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag minor">MENOR</span><code>total_unidades_queimadas</code> não soma GNV (<code>total_unidades_queimadas_gnv</code> nunca entra)</div>
+  <div class="file">turno_service.py · linha 675</div>
+  <p><code>total_unidades_queimadas = total_unidades_queimadas_liq + total_unidades_queimadas_ele</code> — o GNV não é incluído. Para veículos GNV puros, <code>km_por_unidade</code> sempre será 0, gerando "Rendimento: 0,00 km/L" no DRE.</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag minor">MENOR</span>Fallback de aluguel hardcoded como "Localiza Zarp" em vários pontos</div>
+  <div class="file">turno_service.py · linha 835 e orchestrator_service.py · várias linhas</div>
+  <p>O fallback <code>turno["locadora"] or "Localiza Zarp"</code> pode confundir motoristas que trabalham com outras locadoras ou são proprietários. Deveria ser um genérico como "Contrato Padrão".</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag minor">MENOR</span>O <code>is_hibrido</code> na Fase 4 fallback de <code>_processar_uso_pessoal</code> usa R$ 0,48/km (combustão), correto para o motor a combustão do híbrido, mas pode ser enganoso se bateria estivesse carregada</div>
+  <div class="file">turno_service.py · linha 122-125</div>
+  <p>Quando há fallback (sem estoque e sem abastecimento), veículos híbridos usam R$ 0,48/km. Se o híbrido teve uso elétrico, o fallback é impreciso. Baixa severidade por ser Fase 4 (rara).</p>
+</div>
+
+<div class="item">
+  <div class="item-title"><span class="tag minor">MENOR</span>Mensagem de catch-all para <code>!retirar caixa &lt;nome&gt;</code> nunca é alcançada</div>
+  <div class="file">parametros_service.py · linha 415</div>
+  <p>O regex <code>match_excluir</code> (linha 409) usa <code>r"^!excluir\s+caixa\s+(\S.*)$"</code> e o regex <code>match_retirar_sem_valor</code> usa <code>r"^!retirar\s+caixa\s+(\S.*)$"</code>. Como o <code>match_excluir</code> vem antes e usa <code>\S.*</code>, ele nunca conflita — mas a ordem do processamento está correta. Porém, <strong>se o motorista escreve <code>!retirar caixa Amortização de IPVA/Seguro</code></strong> (com espaço no nome), o <code>match_retirar</code> com valor falha (sem número ao final) e o <code>match_retirar_sem_valor</code> captura o nome com espaços corretamente. Isso é o comportamento que disparou a mensagem do usuário no início da conversa — e está correto.</p>
+</div>
+
+
+<h2>✅ Pontos Auditados e Corretos</h2>
+
+<table>
+  <thead><tr><th>Área</th><th>Verificação</th></tr></thead>
+  <tbody>
+    <tr><td>main.py</td><td>Strip de Unicode invisível (U+200B, U+FEFF) correto antes do roteamento</td></tr>
+    <tr><td>main.py</td><td>Background task corretamente desacopla o Event Loop do FastAPI</td></tr>
+    <tr><td>database_service.py</td><td>RLS via <code>set_config('app.current_driver_id', ...)</code> atômico por transação + RESET ALL no finally</td></tr>
+    <tr><td>database_service.py</td><td>UPSERT de onboarding idempotente — ON CONFLICT (telefone) e ON CONFLICT (placa)</td></tr>
+    <tr><td>database_service.py</td><td>Telefone comparado pelos últimos 11 dígitos — evita colisão cross-tenant</td></tr>
+    <tr><td>redis_fsm.py</td><td>Singleton thread-safe com double-checked locking via asyncio.Lock</td></tr>
+    <tr><td>redis_fsm.py</td><td>ConnectionPool com health_check_interval=30 (fix aplicado)</td></tr>
+    <tr><td>redis_fsm.py</td><td>Pipeline transacional para limpar_buffer (DELETE state + buffer em uma operação)</td></tr>
+    <tr><td>turno_service.py</td><td>FOR UPDATE separado no fechamento — captura abastecimentos inter-turnos corretamente</td></tr>
+    <tr><td>turno_service.py</td><td>Pausa aberta fechada antes da agregação (fix anti-divergência tempo/km)</td></tr>
+    <tr><td>turno_service.py</td><td>Fallback elétrico R$ 0,12/km vs combustão R$ 0,48/km corrigido</td></tr>
+    <tr><td>turno_service.py</td><td>custo_fixo_contrato separado de provisao_descontada no dict de retorno</td></tr>
+    <tr><td>turno_service.py</td><td>media_fat_dia via OFFSET 1 — exclui o turno recém-inserido do histórico</td></tr>
+    <tr><td>turno_service.py</td><td>Gap de odômetro &gt; 500 km pede confirmação antes de debitar cofre</td></tr>
+    <tr><td>turno_service.py</td><td>Trava de faturamento zero conta apenas RECEITAS (não despesas)</td></tr>
+    <tr><td>transacao_service.py</td><td>FOR UPDATE na escrita de estoque — serializa abastecimentos concorrentes</td></tr>
+    <tr><td>transacao_service.py</td><td>Underflow guard: clamp de litros negativos antes de qualquer operação de mix</td></tr>
+    <tr><td>transacao_service.py</td><td>Tanque-cheio self-heal ancora o cofre à capacidade nominal do tanque</td></tr>
+    <tr><td>transacao_service.py</td><td>ON CONFLICT (wpp_msg_id) garante idempotência de lançamentos duplicados</td></tr>
+    <tr><td>transacao_service.py</td><td>Recarga gratuita (solar/casa) aceita valor zero sem erro de validação</td></tr>
+    <tr><td>orchestrator_service.py</td><td>Debouncing de rajadas via Redis buffer — processa apenas a última mensagem</td></tr>
+    <tr><td>orchestrator_service.py</td><td>Auto-resume ao registrar receita com turno em pausa</td></tr>
+    <tr><td>orchestrator_service.py</td><td>Pausa declarativa para jornadas ≥ 6h sem pausa — com clamp de sanidade</td></tr>
+    <tr><td>parametros_service.py</td><td>PARAM_MAP whitelist — nomes de coluna nunca vêm do usuário (SQL injection impossível)</td></tr>
+    <tr><td>parametros_service.py</td><td>Cache de perfil invalidado após !alterar, !ajustar estoque e !excluir caixa</td></tr>
+    <tr><td>reminder_service.py</td><td>Idempotência de lembretes via chave Redis com TTL por (motorista, tipo, data)</td></tr>
+    <tr><td>reminder_service.py</td><td>Loop de lembretes nunca morre por erro pontual (except Exception com re-raise CancelledError)</td></tr>
+  </tbody>
+</table>
+
+
+<h2>📋 Backlog Priorizado de Correções</h2>
+<table>
+  <thead><tr><th>#</th><th>Item</th><th>Severidade</th><th>Arquivo</th><th>Esforço</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Projeção mensal: usar fat_bruto acumulado do mês (query em fechamento_diario ou transacoes)</td><td><span class="tag bug">BUG</span></td><td>orchestrator_service.py</td><td>Médio — precisa passar o acumulado via turno_service ou nova query no orchestrator</td></tr>
+    <tr><td>2</td><td>Fechamento idempotente: WHERE status != 'concluido' + RETURNING id</td><td><span class="tag risk">RISCO</span></td><td>turno_service.py</td><td>Pequeno</td></tr>
+    <tr><td>3</td><td>Corrigir f-string de excluir_caixa e criar_caixa (asterisco duplo)</td><td><span class="tag bug">BUG</span></td><td>parametros_service.py</td><td>Trivial</td></tr>
+    <tr><td>4</td><td>main.py teardown: chamar RedisFSMService.close_client() em vez de aclose direto</td><td><span class="tag bug">BUG</span></td><td>main.py</td><td>Trivial</td></tr>
+    <tr><td>5</td><td>Invalidar cache de perfil após atualizar contrato</td><td><span class="tag risk">RISCO</span></td><td>orchestrator_service.py</td><td>Trivial</td></tr>
+    <tr><td>6</td><td>amanha_dia = (date.today() + timedelta(1)).day (fix fim de mês)</td><td><span class="tag minor">MENOR</span></td><td>orchestrator_service.py + parametros_service.py</td><td>Trivial</td></tr>
+    <tr><td>7</td><td>GNV: incluir total_unidades_queimadas_gnv no km_por_unidade</td><td><span class="tag minor">MENOR</span></td><td>turno_service.py</td><td>Trivial</td></tr>
+    <tr><td>8</td><td>Full-to-Full: verificar se abastecimento atual já foi contado na query SQL antes de somar novamente</td><td><span class="tag risk">RISCO</span></td><td>transacao_service.py</td><td>Pequeno</td></tr>
+    <tr><td>9</td><td>Label "Projeção ao ritmo da meta" → "Projeção ao ritmo atual (média histórica)"</td><td><span class="tag minor">MENOR</span></td><td>orchestrator_service.py</td><td>Trivial</td></tr>
+    <tr><td>10</td><td>Raio-X mensal: excluir transações de turno em aberto do acumulado mensal</td><td><span class="tag risk">RISCO</span></td><td>profile_service.py</td><td>Pequeno</td></tr>
+  </tbody>
+</table>
+
+<div class="footer">Made with IBM Bob</div>
+</div>
+</body>
+</html>

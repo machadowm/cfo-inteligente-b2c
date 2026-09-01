@@ -297,21 +297,28 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     meta_diaria  = meta_mensal / dias_uteis if dias_uteis > 0 else meta_mensal
     perc_meta    = (fat / meta_diaria * 100.0) if meta_diaria > 0 else 0.0
 
+    # FIX #1 — usa o acumulado mensal real (não o faturamento do turno isolado).
+    # fat_bruto_mes vem do turno_service e soma todas as receitas do mês corrente.
+    # Fallback para fat quando a chave ainda não existe (compatibilidade).
+    fat_bruto_mes = res.get("fat_bruto_mes", fat)
+
     hoje = _date.today()
+    from datetime import timedelta as _td
     # Dias úteis restantes no mês: escala linear sobre dias corridos
     dias_uteis_restantes = max(0, round(dias_uteis * (1 - hoje.day / 30)))
-    # Projeção usa média histórica de faturamento × dias restantes (não fat de hoje — pode ser atípico)
+    # Projeção usa média histórica de faturamento × dias restantes
     media_fat_dia         = res.get("media_fat_dia", meta_diaria)  # fallback: meta_diaria se sem histórico
-    projecao_mensal       = fat + (media_fat_dia * dias_uteis_restantes)
-    deficit_meta          = max(0.0, meta_mensal - fat)
+    projecao_mensal       = fat_bruto_mes + (media_fat_dia * dias_uteis_restantes)
+    deficit_meta          = max(0.0, meta_mensal - fat_bruto_mes)
     fat_diario_necessario = deficit_meta / dias_uteis_restantes if dias_uteis_restantes > 0 else 0.0
 
-    if fat > 0 and dias_uteis_restantes > 0:
+    if fat_bruto_mes > 0 and dias_uteis_restantes > 0:
         secao_projecao = (
             f"📅  *4. PROJEÇÃO MENSAL* \n"
             f"• Meta Mensal:  *R$ {meta_mensal:,.2f}* \n".replace(",", ".") +
+            f"• Faturamento Acumulado (mês):  *R$ {fat_bruto_mes:,.2f}* \n".replace(",", ".") +
             f"• Dias Úteis Restantes (est.):  *{dias_uteis_restantes} dias* \n"
-            f"• Projeção ao ritmo da meta:  *R$ {projecao_mensal:,.2f}* \n".replace(",", ".") +
+            f"• Projeção ao ritmo atual:  *R$ {projecao_mensal:,.2f}* \n".replace(",", ".") +
             (
                 f"• Faturamento/dia necessário para a meta:  *R$ {fat_diario_necessario:.2f}* \n"
                 if fat_diario_necessario > 0 else
@@ -326,8 +333,8 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     aportes_caixas      = res.get("aportes_caixas", [])
     secao_caixas = ""
     if aportes_caixas:
-        hoje_dia  = hoje.day
-        amanha_dia = hoje_dia + 1  # simplicidade; edge-case fim de mês não gera falso positivo
+        hoje_dia   = hoje.day
+        amanha_dia = (hoje + _td(days=1)).day  # FIX #6 — correto no último dia do mês
         linhas_aportes = ""
         for ap in aportes_caixas:
             # Detecta vencimento próximo via campo 'dia_vencimento' (adicionado nas despesas fixas)
@@ -907,6 +914,8 @@ class OrchestratorService:
                         WHERE motorista_id = $4::uuid AND ativo = TRUE;
                         """, locadora, aluguel_semanal, franquia, motorista_id
                     )
+                # FIX #5 — invalida cache de perfil para que o próximo 'perfil' reflita o novo contrato
+                await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
                 await enviar_whatsapp(remote_jid, f"✅ Contrato atualizado com sucesso para  *{locadora}*! Aluguel rateado recalculado e cofre adaptado. 🛡")
             except Exception as e:
                 logger.error(f"Erro ao atualizar contrato: {e}")

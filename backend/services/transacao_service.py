@@ -536,7 +536,10 @@ class TransacaoService:
                 )
                 return None
 
-            # Soma todos os litros abastecidos (tanque cheio ou não) entre os dois checkpoints
+            # Soma todos os litros abastecidos (tanque cheio ou não) entre os dois checkpoints.
+            # FIX #8 — o INSERT do abastecimento atual já está no banco (este método é chamado
+            # após o INSERT com RETURNING). Para não contar duas vezes, a query usa
+            # odometro_abastecimento < $3 (exclusivo) e somamos o atual manualmente abaixo.
             litros_intervalo_row = await conn.fetchval(
                 """
                 SELECT COALESCE(SUM(litros_abastecidos), 0)
@@ -546,7 +549,7 @@ class TransacaoService:
                   AND estornado = FALSE
                   AND litros_abastecidos IS NOT NULL
                   AND data_transacao > $2
-                  AND odometro_abastecimento <= $3;
+                  AND odometro_abastecimento < $3;
                 """,
                 veiculo_id,
                 anterior["data_transacao"],
@@ -554,7 +557,7 @@ class TransacaoService:
             )
             litros_intervalo = Decimal(str(litros_intervalo_row or "0"))
 
-            # Inclui os litros do abastecimento atual se não foram contados acima
+            # Adiciona os litros do abastecimento atual (com odometro_atual — não coberto pela query)
             if litros_abastecidos_atual and litros_abastecidos_atual > 0:
                 litros_intervalo += Decimal(str(litros_abastecidos_atual))
 

@@ -655,8 +655,9 @@ class ParametrosService:
                     "  *!adicionar despesa <nome> <R$/mês> <dias úteis> [dia venc]*\n"
                     "_Ex: !adicionar despesa seguro 180 26 5_"
                 )
-            from datetime import date as _date
-            hoje_dia = _date.today().day
+            from datetime import date as _date, timedelta as _timedelta
+            hoje_dia   = _date.today().day
+            amanha_dia = (_date.today() + _timedelta(days=1)).day  # FIX #6 — correto no último dia do mês
             total_pro_rata = sum(float(r["valor_pro_rata_diario"]) for r in rows)
             linhas = ["📌  *Despesas Fixas Mensais Ativas:*\n"]
             for r in rows:
@@ -665,7 +666,7 @@ class ParametrosService:
                 diario     = float(r["valor_pro_rata_diario"])
                 dia_venc   = int(r["dia_vencimento"])
                 alerta     = "  ⚠️ *VENCE HOJE!*" if dia_venc == hoje_dia else (
-                             "  ⏰ _vence amanhã_" if dia_venc == hoje_dia + 1 else ""
+                             "  ⏰ _vence amanhã_" if dia_venc == amanha_dia else ""
                 )
                 linhas.append(
                     f"• {nome}:  *R$ {mensal:.2f}/mês*  (≈ R$ {diario:.2f}/dia)  📅 vence dia  *{dia_venc}*{alerta}"
@@ -867,7 +868,7 @@ class ParametrosService:
             )
             meta_txt = f"Meta:  *R$ {float(meta):.2f}*  — aportes param ao atingir." if meta else "Sem meta — acumulação livre."
             return (
-                f"✅  *Caixa  *{nome}*  criada!*\n"
+                f"✅  *Caixa {nome} criada!* \n"
                 f"• {meta_txt}\n\n"
                 f"_Para vincular a uma despesa fixa:_\n"
                 f"  *!adicionar despesa {nome} <R$/mês> <dias>*"
@@ -1006,7 +1007,7 @@ class ParametrosService:
             )
             await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
             return (
-                f"🗑  *Caixa  *{nome}*  excluída com sucesso.*\n"
+                f"🗑  *Caixa {nome} excluída com sucesso!* \n"
                 f"_Despesas fixas vinculadas foram desvinculadas mas não removidas._"
             )
         except Exception as exc:

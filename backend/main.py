@@ -35,9 +35,10 @@ async def lifespan(app: FastAPI):
         pass
     logger.info("Draining connections graciosamente...")
     await DatabaseService.close_pool()
+    # FIX #4 — usa close_client() que fecha o socket E reseta o singleton para None,
+    # evitando que chamadas subsequentes no mesmo processo usem um socket já fechado.
     try:
-        redis_client = await RedisFSMService.get_client()
-        await redis_client.aclose()
+        await RedisFSMService.close_client()
     except Exception as e:
         logger.error(f"Falha ao fechar conexão com Redis: {e}")
 

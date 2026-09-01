@@ -357,11 +357,21 @@ class TurnoService:
                 km_rodados = km_final_decimal - km_inicial_decimal
                 hora_fim_real = agora_brasil()
 
-                # Encerra temporalmente o turno
-                await conn.execute(
-                    "UPDATE public.turnos SET km_final = $1, data_fim = $2, status = 'concluido' WHERE id = $3::uuid;",
+                # FIX #2 — UPDATE idempotente: a cláusula AND status != 'concluido' garante que
+                # um segundo request paralelo (debouncing falhou ou reenvio WhatsApp) não insira
+                # um segundo snapshot em fechamento_diario. RETURNING id detecta a colisão.
+                updated = await conn.fetchval(
+                    "UPDATE public.turnos SET km_final = $1, data_fim = $2, status = 'concluido' "
+                    "WHERE id = $3::uuid AND status != 'concluido' "
+                    "RETURNING id;",
                     km_final_decimal, hora_fim_real, turno_id
                 )
+                if not updated:
+                    return {
+                        "sucesso": False,
+                        "erro": "⚠️ Este turno já foi encerrado. Verifique com  *status*  se o DRE já foi gerado.",
+                        "tipo_erro": "TURNO_JA_CONCLUIDO",
+                    }
 
                 # FIX #3 — Fechar com pausa aberta: se houver uma pausa sem fim_pausa,
                 # fecha-a agora com o timestamp de fechamento do turno.
@@ -662,7 +672,7 @@ class TurnoService:
                 lucro_liquido_real = faturamento_bruto - custo_variavel_total - custo_fixo_total
 
                 # Indicadores de eficiência e produtividade
-                ganho_por_km = (faturamento_bruto / km_rodados) if km_rodados > 0 else Decimal("0.00")
+                ganho_por_km  = (faturamento_bruto / km_rodados)   if km_rodados    > 0 else Decimal("0.00")
                 custo_por_km = (custo_variavel_total + custo_fixo_total) / km_rodados if km_rodados > 0 else Decimal("0.00")
                 lucro_por_km = (lucro_liquido_real / km_rodados) if km_rodados > 0 else Decimal("0.00")
                 ganho_por_hora = (faturamento_bruto / horas_trabalhadas) if horas_trabalhadas > 0 else Decimal("0.00")
@@ -672,7 +682,12 @@ class TurnoService:
 
                 # Rendimento contábil final de Km por Litro / kWh do turno (Ponderado se híbrido)
                 # Usa km_profissional para não inflar o rendimento com km de uso pessoal.
-                total_unidades_queimadas = total_unidades_queimadas_liq + total_unidades_queimadas_ele
+                # FIX #7 — inclui GNV para que km_por_unidade seja correto em veículos GNV
+                total_unidades_queimadas = (
+                    total_unidades_queimadas_liq
+                    + total_unidades_queimadas_ele
+                    + total_unidades_queimadas_gnv
+                )
                 km_por_unidade = (km_profissional / total_unidades_queimadas) if total_unidades_queimadas > 0 else Decimal("0.00")
 
                 # 5.1. APORTE AUTOMÁTICO NAS CAIXAS DE PROVISÃO
@@ -779,7 +794,7 @@ class TurnoService:
                     custo_fixo_total, lucro_liquido_real, km_profissional, provisao_descontada_total
                 )
 
-                # FIX #6 — Média histórica de faturamento diário (últimos 10 fechamentos,
+                # Média histórica de faturamento diário (últimos 10 fechamentos,
                 # excluindo o atual que acabou de ser inserido acima — usa LIMIT 10 OFFSET 1).
                 # Usada na projeção mensal do DRE para base realista em vez de meta_diaria.
                 hist_fat_row = await conn.fetchrow(
@@ -796,6 +811,24 @@ class TurnoService:
                     motorista_id,
                 )
                 media_fat_dia = float(hist_fat_row["media_fat"] or 0.0)
+
+                # FIX #1 — Acumulado de faturamento bruto do mês corrente (excluindo o turno
+                # que acabou de ser fechado, para não duplicar — usa transacoes do mês).
+                # Necessário para que a projeção mensal e o déficit de meta no DRE usem
+                # o faturamento real acumulado, não o faturamento de apenas um turno.
+                fat_mes_row = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(SUM(valor), 0) AS fat_mes
+                    FROM public.transacoes
+                    WHERE motorista_id = $1::uuid
+                      AND tipo_movimentacao = 'receita'
+                      AND estornado = FALSE
+                      AND date_trunc('month', data_transacao AT TIME ZONE 'America/Sao_Paulo')
+                          = date_trunc('month', CURRENT_DATE);
+                    """,
+                    motorista_id,
+                )
+                fat_bruto_mes = float(fat_mes_row["fat_mes"] or 0.0)
 
             return {
                 "sucesso": True,
@@ -842,7 +875,8 @@ class TurnoService:
                 "despesas_detalhadas": despesas_detalhadas,
                 "aportes_caixas": aportes_caixas,
                 "provisao_descontada": float(provisao_descontada_total),
-                "media_fat_dia": media_fat_dia,  # FIX #6 — histórico real para projeção mensal
+                "media_fat_dia": media_fat_dia,
+                "fat_bruto_mes": fat_bruto_mes,  # FIX #1 — acumulado mensal para projeção correta
             }
 
         except Exception as e:

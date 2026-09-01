@@ -72,15 +72,26 @@ class ProfileService:
                 )
 
                 # ── 3. Acumulado do mês corrente (receitas e despesas) ─────────
+                # FIX #10 — exclui transações do turno atualmente em aberto para evitar
+                # que o faturamento parcial seja contabilizado duas vezes quando o motorista
+                # fechar o turno (o DRE também incluirá as mesmas transações).
                 fat_row = await conn.fetchrow(
                     """
                     SELECT
                         COALESCE(SUM(valor) FILTER (WHERE tipo_movimentacao = 'receita'), 0) AS fat_bruto,
                         COALESCE(SUM(valor) FILTER (WHERE tipo_movimentacao = 'despesa'), 0) AS desp_total
-                    FROM public.transacoes
-                    WHERE motorista_id = $1::uuid
-                      AND estornado = FALSE
-                      AND date_trunc('month', data_transacao) = date_trunc('month', CURRENT_DATE);
+                    FROM public.transacoes t
+                    WHERE t.motorista_id = $1::uuid
+                      AND t.estornado = FALSE
+                      AND date_trunc('month', t.data_transacao) = date_trunc('month', CURRENT_DATE)
+                      AND (
+                          t.turno_id IS NULL
+                          OR t.turno_id NOT IN (
+                              SELECT id FROM public.turnos
+                              WHERE motorista_id = $1::uuid
+                                AND status IN ('em_andamento', 'em_pausa', 'ABERTO')
+                          )
+                      );
                     """,
                     motorista_id,
                 )

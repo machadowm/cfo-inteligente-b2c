@@ -323,7 +323,9 @@ class TurnoService:
                            v.is_hibrido, v.is_eletrico, v.is_flex,
                            v.capacidade_bateria,
                            v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal, v.valor_km_excedente,
-                           v.escala_trabalho, v.contrato_personalizado, m.meta_mensal_faturamento, m.dias_uteis_mes,
+                           v.escala_trabalho, v.contrato_personalizado,
+                           COALESCE(v.dias_trabalho_semana, 6) AS dias_trabalho_semana,
+                           m.meta_mensal_faturamento, m.dias_uteis_mes,
                            COALESCE(m.piso_ganho_km, 2.0) AS piso_ganho_km,
                            COALESCE(m.piso_ganho_hora, 30.0) AS piso_ganho_hora
                     FROM public.turnos t
@@ -649,16 +651,17 @@ class TurnoService:
                         "valor": float(d["valor"])
                     })
 
-                # 4. ENGENHARIA DE CUSTO FIXO CONTRATUAL PRO-RATA (Localiza Zarp fallback)
+                # 4. ENGENHARIA DE CUSTO FIXO CONTRATUAL PRO-RATA
                 custo_aluguel_semanal = Decimal(str(turno["custo_aluguel_semanal"] or "1020.85"))
-                # Custo de aluguel/contrato: rateado por 6 dias de escala semanal
-                custo_fixo_contrato = (custo_aluguel_semanal / Decimal("6.00")).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
+                dias_semana = int(turno["dias_trabalho_semana"] or 6)
+                # Custo diário = aluguel semanal ÷ dias trabalhados por semana
+                custo_fixo_contrato = (custo_aluguel_semanal / Decimal(str(dias_semana))).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
 
                 # Pro-rata de despesas fixas cadastradas — provisão diária para cada conta
                 # Busca também caixa_id e dia_vencimento para aporte e DRE
                 despesas_fixas_rows = await conn.fetch(
                     """
-                    SELECT nome, valor_pro_rata_diario, caixa_id, dia_vencimento
+                    SELECT nome, valor_pro_rata_diario, caixa_id, dias_vencimento
                     FROM public.despesas_fixas_mensais
                     WHERE motorista_id = $1::uuid AND ativo = TRUE;
                     """,
@@ -735,7 +738,7 @@ class TurnoService:
                                     "saldo_novo": float(saldo_cx + aporte_real),
                                     "meta_atingida": meta_atingida,
                                     "origem": df_row["nome"],
-                                    "dia_vencimento": int(df_row["dia_vencimento"]) if df_row["dia_vencimento"] else None,
+                                    "dias_vencimento": list(df_row["dias_vencimento"] or []),
                                 })
                             else:
                                 # Caixa cheia — registra no DRE mas sem novo depósito
@@ -746,7 +749,7 @@ class TurnoService:
                                     "saldo_novo": float(saldo_cx),
                                     "meta_atingida": True,
                                     "origem": df_row["nome"],
-                                    "dia_vencimento": int(df_row["dia_vencimento"]) if df_row["dia_vencimento"] else None,
+                                    "dias_vencimento": list(df_row["dias_vencimento"] or []),
                                 })
                     else:
                         # Despesa sem caixa vinculada: tenta match pelo nome da despesa
@@ -780,7 +783,7 @@ class TurnoService:
                                 "saldo_novo": float(saldo_cx + aporte_real),
                                 "meta_atingida": meta_atingida,
                                 "origem": df_row["nome"],
-                                "dia_vencimento": int(df_row["dia_vencimento"]) if df_row["dia_vencimento"] else None,
+                                "dias_vencimento": list(df_row["dias_vencimento"] or []),
                             })
 
                 # Persiste o snapshot contábil na tabela fechamento_diario
@@ -885,6 +888,7 @@ class TurnoService:
                 "piso_ganho_hora": float(turno["piso_ganho_hora"]),
                 "locadora": turno["locadora"] or "Localiza Zarp",
                 "custo_aluguel_semanal": float(turno["custo_aluguel_semanal"] or 1020.85),
+                "dias_trabalho_semana": dias_semana,
                 "escala_trabalho": turno["escala_trabalho"] or "De quarta a segunda (6 dias)",
                 # Próprio/financiado: sem franquia contratual — fallback 0 em vez de valores de locadora
                 "franquia_km_semanal": float(turno["franquia_km_semanal"] or (

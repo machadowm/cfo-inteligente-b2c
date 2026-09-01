@@ -77,16 +77,17 @@ class HelpService:
             "Envie  *!parametros*  para ver todos os parâmetros ajustáveis. 🚀"
         ),
         "contrato": (
-            "⚙️  *Ajuda com Atualização de Contrato (Localiza Zarp, etc.)* \n\n"
-            "Se você trocou de carro, mudou de locadora ou o valor do aluguel foi reajustado, você pode atualizar os parâmetros do sistema digitando uma única frase livre:\n\n"
-            "👉  *Comando:*  _atualizar contrato [Locadora] [Valor Semanal] [Franquia Semanal]_\n"
-            "👉  *Exemplo:*  _atualizar contrato Zarp 1050 1500_\n\n"
-            "O sistema processará as regras contratuais da seguinte forma:\n"
-            "•  *Custo Fixo Rateado:*  Dividirá o valor semanal por 6 (escala padrão de trabalho) para deduzir o aluguel pro-rata diário no seu DRE.\n"
-            "•  *Franquia de KM Diária:*  Dividirá os 1.500 km por 7 dias (214 km/dia) para alertar se você está na média segura de rodagem.\n\n"
-            "Se o seu carro for  *Próprio*  ou  *Financiado* , você pode parametrizar a amortização diária (ex: R$ 15,00/dia para custos de depreciação):\n"
-            "👉  *Exemplo:*  _atualizar contrato Proprietario 90 0_\n"
-            "_(R$ 90,00 divididos pela escala de 6 dias úteis resultará em R$ 15,00/dia no DRE)_"
+            "⚙️  *Ajuda com Atualização de Contrato* \n\n"
+            "Se você trocou de carro, mudou de locadora ou o valor do aluguel foi reajustado, atualize com:\n\n"
+            "👉  *Formato:*  _atualizar contrato [Locadora] [Aluguel Semanal] [Franquia KM] [Dias/Semana]_\n\n"
+            "🚗  *Carro Alugado* (Zarp, Movida, Mottu...):\n"
+            "  _atualizar contrato Zarp 1050 1500_       ← 6 dias/sem (padrão)\n"
+            "  _atualizar contrato Movida 900 1200 5_    ← 5 dias/sem\n\n"
+            "•  *Custo Diário:*  Aluguel semanal ÷ dias/semana — deduzido no DRE a cada fechamento.\n"
+            "•  *Franquia Diária:*  Franquia semanal ÷ 7 dias — referência de km seguro.\n\n"
+            "🏠  *Carro Próprio / Financiado:*  informe o custo diário de depreciação/parcela:\n"
+            "  _atualizar contrato Proprietario 90_      ← R$ 90/dia de custo\n"
+            "  _atualizar contrato Financiado 150_       ← R$ 150/dia de parcela\n"
         ),
         "perfil": (
             "👤  *Ajuda — Raio-X do Motorista (Perfil Completo)* \n\n"

@@ -63,6 +63,7 @@ class ProfileService:
                     SELECT modelo, placa, tipo_combustivel,
                            estoque_financeiro,
                            locadora, custo_aluguel_semanal, franquia_km_semanal,
+                           COALESCE(dias_trabalho_semana, 6) AS dias_trabalho_semana,
                            is_hibrido, is_eletrico
                     FROM public.veiculos
                     WHERE motorista_id = $1::uuid AND ativo = TRUE
@@ -216,11 +217,12 @@ class ProfileService:
             lucro_parcial = fat_bruto - desp_total
             progresso     = float(fat_bruto / meta_mensal * 100) if meta_mensal > 0 else 0.0
 
-            aluguel_sem   = float(v["custo_aluguel_semanal"] or 1020.85)
-            aluguel_dia   = aluguel_sem / 6.0
-            _locadora_v   = (v["locadora"] or "").lower()
-            _is_proprio_v = _locadora_v in ("proprietario", "quitado", "financiado")
-            franquia_sem  = float(v["franquia_km_semanal"] or 0.0) if not _is_proprio_v else 0.0
+            aluguel_sem       = float(v["custo_aluguel_semanal"] or 1020.85)
+            _dias_sem_perfil  = int(v["dias_trabalho_semana"] or 6)
+            aluguel_dia       = aluguel_sem / _dias_sem_perfil
+            _locadora_v       = (v["locadora"] or "").lower()
+            _is_proprio_v     = _locadora_v in ("proprietario", "quitado", "financiado")
+            franquia_sem      = float(v["franquia_km_semanal"] or 0.0) if not _is_proprio_v else 0.0
 
             media_km_dia    = float(hist["media_km"]         or 0)
             media_fat_dia   = float(hist["media_fat"]        or 0)
@@ -383,7 +385,7 @@ class ProfileService:
             _linha_contrato_veiculo = (
                 f"• Custo (pro-rata diário):  *R$ {aluguel_dia:.2f}*\n\n"
                 if _is_proprio_v else
-                f"• Aluguel:  *R$ {aluguel_sem:.2f}/sem*  (≈  *R$ {aluguel_dia:.2f}/dia* )\n"
+                f"• Aluguel:  *R$ {aluguel_sem:.2f}/sem*  (≈  *R$ {aluguel_dia:.2f}/dia*  · {_dias_sem_perfil}d/sem)\n"
                 f"• Franquia:  *{franquia_sem:.0f} km/sem*  (≈  *{franquia_sem / 7:.0f} km/dia* )\n\n"
             )
             return (

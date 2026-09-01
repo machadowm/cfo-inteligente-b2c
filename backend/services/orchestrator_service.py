@@ -66,7 +66,8 @@ def converter_para_float(texto_valor: str) -> float:
 
 def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
     """Gera o status parcial do turno atualizado com as regras contratuais e do DRE."""
-    aluguel_diario = info["custo_aluguel_semanal"] / 6.0
+    dias_semana   = int(info.get("dias_trabalho_semana") or 6)
+    aluguel_diario = info["custo_aluguel_semanal"] / dias_semana
     meta_diaria = info["meta_mensal"] / info["dias_uteis"]
     piso_km   = info.get("piso_ganho_km",   2.0)
     piso_hora = info.get("piso_ganho_hora", 30.0)
@@ -86,7 +87,7 @@ def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
         franquia_diaria = info["franquia_km_semanal"] / 7.0
         linhas_contrato = (
             f"• Escala:  *{info['escala_trabalho']}* \n"
-            f"• Aluguel Diário:  *R$ {aluguel_diario:.2f}*  (semanal R$ {info['custo_aluguel_semanal']:.2f} / 6d)\n"
+            f"• Aluguel Diário:  *R$ {aluguel_diario:.2f}*  (semanal R$ {info['custo_aluguel_semanal']:.2f} / {dias_semana}d)\n"
             f"• Franquia Recomendada:  *{franquia_diaria:.0f} km/dia* \n"
             f"• KM Excedente:  *R$ {info['valor_km_excedente']:.2f}/km* \n"
         )
@@ -352,17 +353,16 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     secao_caixas = ""
     if aportes_caixas:
         hoje_dia   = hoje.day
-        amanha_dia = (hoje + _td(days=1)).day  # FIX #6 — correto no último dia do mês
+        amanha_dia = (hoje + _td(days=1)).day
         linhas_aportes = ""
         for ap in aportes_caixas:
-            # Detecta vencimento próximo via campo 'dia_vencimento' (adicionado nas despesas fixas)
-            dia_venc = ap.get("dia_vencimento")
+            # Detecta vencimento próximo — dias_vencimento é array (suporta múltiplos)
+            dias_venc = ap.get("dias_vencimento") or []
             tag_venc = ""
-            if dia_venc is not None:
-                if dia_venc == hoje_dia:
-                    tag_venc = "  📅 *VENCE HOJE*"
-                elif dia_venc == amanha_dia:
-                    tag_venc = "  ⏰ _vence amanhã_"
+            if hoje_dia in dias_venc:
+                tag_venc = "  📅 *VENCE HOJE*"
+            elif amanha_dia in dias_venc:
+                tag_venc = "  ⏰ _vence amanhã_"
 
             if ap.get("meta_atingida") and ap["aporte"] == 0.0:
                 linhas_aportes += f" -  *{ap['caixa']}* :  ✅ Meta atingida! (R$ {ap['saldo_novo']:.2f}){tag_venc}\n"
@@ -388,17 +388,21 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     # ── Rodapé de configuração de contrato ────────────────────────────────────
     rodape_sugestao = ""
     if not res.get("contrato_personalizado", False):
-        aluguel_diario_real = res.get("custo_aluguel_semanal", 1020.85) / 6.0
+        _dias_sem_rodape = int(res.get("dias_trabalho_semana") or 6)
+        aluguel_diario_real = res.get("custo_aluguel_semanal", 1020.85) / _dias_sem_rodape
         rodape_sugestao = (
             f"\n\n_{nome_motorista}, este cálculo usou o custo padrão "
             f"(R$ {aluguel_diario_real:.2f}/dia). Para precisão total, configure seu contrato:_\n\n"
             "1⃣  *Alugado*  (Zarp, Movida, Mottu...):\n"
             "👉  *atualizar contrato [Locadora] [Aluguel Semanal] [Franquia KM]*\n"
-            "_Ex: atualizar contrato Zarp 1020 1500_\n\n"
+            "_Ex: atualizar contrato Zarp 1020 1500_  _(6 dias/sem, padrão)_\n"
+            "_Ex: atualizar contrato Movida 900 1200 5_  _(5 dias/sem)_\n\n"
             "2⃣  *Próprio Quitado* :\n"
-            "👉  *atualizar contrato Proprietario [Manutenção/dia] 0*\n\n"
+            "👉  *atualizar contrato Proprietario [Custo/dia]*\n"
+            "_Ex: atualizar contrato Proprietario 90_\n\n"
             "3⃣  *Financiado* :\n"
-            "👉  *atualizar contrato Financiado [Pro-Rata/dia] 0*"
+            "👉  *atualizar contrato Financiado [Parcela/dia]*\n"
+            "_Ex: atualizar contrato Financiado 150_"
         )
 
     return (
@@ -943,19 +947,27 @@ class OrchestratorService:
                 aluguel_input = converter_para_float(partes[3]) if len(partes) > 3 else 1020.85
                 _locadora_lower = locadora.lower()
                 if _locadora_lower in ["proprietario", "quitado", "financiado"]:
-                    # Próprio/financiado: sem franquia — força 0 independente do que foi digitado
-                    aluguel_semanal = aluguel_input * 6.0
+                    # Próprio/financiado: motorista informa custo/dia, sem franquia.
+                    # Guarda como semanal usando a escala padrão de 6 dias para consistência.
+                    dias_semana_novo = 6
+                    aluguel_semanal = aluguel_input * dias_semana_novo
                     franquia = 0.0
                 else:
+                    # Locadora alugada: motorista informa valor semanal.
+                    # Aceita parâmetro opcional de dias/semana (5ª posição); default 6 (Zarp).
+                    dias_semana_novo = int(converter_para_float(partes[5])) if len(partes) > 5 else 6
+                    dias_semana_novo = max(1, min(7, dias_semana_novo))  # clamp 1–7
                     aluguel_semanal = aluguel_input
                     franquia = converter_para_float(partes[4]) if len(partes) > 4 else 1505.00
-                    
+
                 async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                     await conn.execute(
                         """
-                        UPDATE public.veiculos SET locadora = $1, custo_aluguel_semanal = $2, franquia_km_semanal = $3, contrato_personalizado = TRUE
-                        WHERE motorista_id = $4::uuid AND ativo = TRUE;
-                        """, locadora, aluguel_semanal, franquia, motorista_id
+                        UPDATE public.veiculos
+                        SET locadora = $1, custo_aluguel_semanal = $2, franquia_km_semanal = $3,
+                            dias_trabalho_semana = $4, contrato_personalizado = TRUE
+                        WHERE motorista_id = $5::uuid AND ativo = TRUE;
+                        """, locadora, aluguel_semanal, franquia, dias_semana_novo, motorista_id
                     )
                 # Invalida cache de perfil para que o próximo 'perfil' reflita o novo contrato
                 await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
@@ -991,11 +1003,17 @@ class OrchestratorService:
                 async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                     turno_ativo = await conn.fetchrow(
                         """
-                        SELECT t.id, t.km_inicial, t.data_inicio, v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal, v.valor_km_excedente, v.escala_trabalho, m.meta_mensal_faturamento, m.dias_uteis_mes, COALESCE(m.piso_ganho_km, 2.0) AS piso_ganho_km, COALESCE(m.piso_ganho_hora, 30.0) AS piso_ganho_hora
-                        FROM public.turnos t 
-                        JOIN public.veiculos v ON v.id = t.veiculo_id 
-                        JOIN public.motoristas m ON m.id = t.motorista_id 
-                        WHERE t.motorista_id = $1::uuid AND t.status IN ('ABERTO', 'em_andamento', 'em_pausa') 
+                        SELECT t.id, t.km_inicial, t.data_inicio,
+                               v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal,
+                               v.valor_km_excedente, v.escala_trabalho,
+                               COALESCE(v.dias_trabalho_semana, 6) AS dias_trabalho_semana,
+                               m.meta_mensal_faturamento, m.dias_uteis_mes,
+                               COALESCE(m.piso_ganho_km, 2.0) AS piso_ganho_km,
+                               COALESCE(m.piso_ganho_hora, 30.0) AS piso_ganho_hora
+                        FROM public.turnos t
+                        JOIN public.veiculos v ON v.id = t.veiculo_id
+                        JOIN public.motoristas m ON m.id = t.motorista_id
+                        WHERE t.motorista_id = $1::uuid AND t.status IN ('ABERTO', 'em_andamento', 'em_pausa')
                         ORDER BY t.data_inicio DESC LIMIT 1;
                         """, motorista_id
                     )
@@ -1014,6 +1032,7 @@ class OrchestratorService:
                             "km_inicial": float(turno_ativo["km_inicial"]),
                             "locadora": turno_ativo["locadora"] or "Localiza Zarp",
                             "custo_aluguel_semanal": float(turno_ativo["custo_aluguel_semanal"] or 1020.85),
+                            "dias_trabalho_semana": int(turno_ativo["dias_trabalho_semana"] or 6),
                             "franquia_km_semanal": float(turno_ativo["franquia_km_semanal"] or (
                                 0.0 if (turno_ativo["locadora"] or "").lower() in ("proprietario", "quitado", "financiado")
                                 else 1505.0

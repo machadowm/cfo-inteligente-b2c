@@ -172,31 +172,37 @@ async def _processar_turnos_zumbi() -> None:
 async def _processar_vencimentos_despesas() -> None:
     """Avisa motoristas sobre despesas fixas que vencem hoje ou amanhã.
 
-    Dispara no máximo uma notificação por (motorista, despesa, dia) —
-    controlado por chave Redis com TTL de 20 h.
-
-    Usa o dia corrente no fuso de Brasília para comparar com dia_vencimento.
+    Suporta múltiplos vencimentos por despesa (dias_vencimento INTEGER[]).
+    Cada elemento do array gera uma notificação independente, controlada por
+    chave Redis com TTL de 20 h: reminder:venc:{tenant}:{despesa_id}:{dia}:{data}.
     """
     _tz = pytz.timezone("America/Sao_Paulo")
     hoje = datetime.now(_tz).date()
     amanha = hoje + timedelta(days=1)
-    dias_alvo = {hoje.day, amanha.day}
+    ultimo_dia_mes = (hoje.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    dias_alvo = {
+        min(hoje.day, ultimo_dia_mes.day),
+        min(amanha.day, ultimo_dia_mes.day),
+    }
 
     try:
         async with DatabaseService.get_connection() as conn:
+            # UNNEST expande o array — cada vencimento vira uma linha independente
             rows = await conn.fetch(
                 """
                 SELECT dfm.id::text          AS despesa_id,
                        dfm.nome,
                        dfm.valor_mensal,
-                       dfm.dia_vencimento,
-                       m.id::text            AS motorista_id,
+                       venc.dia             AS dia_vencimento,
+                       m.id::text           AS motorista_id,
                        m.telefone
                 FROM public.despesas_fixas_mensais dfm
                 JOIN public.motoristas m ON m.id = dfm.motorista_id
+                -- expande cada elemento do array em linha separada
+                JOIN LATERAL UNNEST(dfm.dias_vencimento) AS venc(dia) ON TRUE
                 WHERE dfm.ativo = TRUE
                   AND LEAST(
-                        dfm.dia_vencimento,
+                        venc.dia,
                         DATE_PART('day',
                             DATE_TRUNC('month', CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo')
                             + INTERVAL '1 month'
@@ -210,6 +216,7 @@ async def _processar_vencimentos_despesas() -> None:
         logger.error(f"[ReminderService] Erro ao buscar vencimentos: {e}")
         return
 
+    client = await RedisFSMService.get_client()
     for row in rows:
         tenant_id   = row["telefone"]
         dia_venc    = int(row["dia_vencimento"])
@@ -217,14 +224,14 @@ async def _processar_vencimentos_despesas() -> None:
         valor       = float(row["valor_mensal"])
         despesa_id  = row["despesa_id"]
         remote_jid  = f"{tenant_id}@s.whatsapp.net"
-        redis_key   = f"reminder:venc:{tenant_id}:{despesa_id}:{hoje.isoformat()}"
+        # Chave inclui dia_vencimento para disparar independentemente por vencimento
+        redis_key   = f"reminder:venc:{tenant_id}:{despesa_id}:{dia_venc}:{hoje.isoformat()}"
 
-        client = await RedisFSMService.get_client()
         if await client.exists(redis_key):
-            continue  # já notificado hoje
+            continue  # já notificado hoje para este vencimento
 
         valor_fmt = f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        if dia_venc == hoje.day:
+        if dia_venc == hoje.day or (hoje.day == ultimo_dia_mes.day and dia_venc > ultimo_dia_mes.day):
             texto = (
                 f"📅  *Vencimento HOJE — {nome}*\n\n"
                 f"• Valor:  *{valor_fmt}*\n\n"
@@ -251,22 +258,19 @@ async def _processar_vencimentos_despesas() -> None:
 async def _processar_baixas_automaticas() -> None:
     """Executa a baixa automática nas caixas de provisão 1 dia após o vencimento.
 
-    Para cada despesa fixa ativa cuja caixinha tem saldo e que venceu ontem:
-      • Retira o mínimo entre saldo disponível e valor_mensal da caixa.
-      • Notifica o motorista via WhatsApp com o resultado (quitado / parcial / caixa vazia).
-      • Grava chave Redis de idempotência com TTL de ~32 dias para não repetir no mesmo mês.
+    Suporta múltiplos vencimentos por despesa (dias_vencimento INTEGER[]).
+    Cada elemento do array é processado independentemente — uma despesa com
+    vencimentos nos dias 5 e 20 gera duas baixas por mês.
 
-    Edge-cases tratados:
-      • Dia 1 do mês: vencimento do dia 31 (mês anterior) também é processado.
-      • Saldo zero: notifica mas não tenta UPDATE desnecessário.
-      • Despesas sem caixa vinculada (caixa_id IS NULL) são ignoradas — sem caixinha, sem baixa.
+    A chave de idempotência inclui o dia do vencimento:
+      baixa_auto:{motorista}:{despesa}:{dia_venc}:{ano-mês}
     """
     from decimal import Decimal, ROUND_HALF_UP
 
     _tz = pytz.timezone("America/Sao_Paulo")
     hoje = datetime.now(_tz).date()
     ontem = hoje - timedelta(days=1)
-    # Ano-mês de referência para a chave de idempotência (usa o mês do vencimento)
+    # Ano-mês de referência para a chave de idempotência (usa o mês de ontem)
     ano_mes_ref = ontem.strftime("%Y-%m")
 
     try:
@@ -276,7 +280,7 @@ async def _processar_baixas_automaticas() -> None:
                 SELECT dfm.id::text          AS despesa_id,
                        dfm.nome,
                        dfm.valor_mensal,
-                       dfm.dia_vencimento,
+                       venc.dia             AS dia_vencimento,
                        dfm.caixa_id::text    AS caixa_id,
                        cp.saldo_atual,
                        m.id::text            AS motorista_id,
@@ -284,11 +288,12 @@ async def _processar_baixas_automaticas() -> None:
                 FROM public.despesas_fixas_mensais dfm
                 JOIN public.motoristas m ON m.id = dfm.motorista_id
                 JOIN public.caixas_provisao cp ON cp.id = dfm.caixa_id
+                JOIN LATERAL UNNEST(dfm.dias_vencimento) AS venc(dia) ON TRUE
                 WHERE dfm.ativo = TRUE
                   AND dfm.caixa_id IS NOT NULL
                   AND cp.saldo_atual > 0
                   AND LEAST(
-                        dfm.dia_vencimento,
+                        venc.dia,
                         DATE_PART('day',
                             DATE_TRUNC('month', $1::date AT TIME ZONE 'America/Sao_Paulo')
                             + INTERVAL '1 month'
@@ -296,8 +301,6 @@ async def _processar_baixas_automaticas() -> None:
                         )::int
                   ) = DATE_PART('day', $1::date)::int;
                 """,
-                # $1 = data de ontem — o LEAST mapeia dia_vencimento ao último dia do mês
-                # quando o mês é mais curto que o dia cadastrado (ex: vence 31, mês tem 28).
                 str(ontem),
             )
     except Exception as e:
@@ -307,19 +310,21 @@ async def _processar_baixas_automaticas() -> None:
     client = await RedisFSMService.get_client()
 
     for row in rows:
-        tenant_id   = row["telefone"]
+        tenant_id    = row["telefone"]
         motorista_id = row["motorista_id"]
-        despesa_id  = row["despesa_id"]
-        caixa_id    = row["caixa_id"]
-        nome        = row["nome"]
+        despesa_id   = row["despesa_id"]
+        dia_venc     = int(row["dia_vencimento"])
+        caixa_id     = row["caixa_id"]
+        nome         = row["nome"]
         valor_mensal = Decimal(str(row["valor_mensal"]))
         saldo_atual  = Decimal(str(row["saldo_atual"]))
-        remote_jid  = f"{tenant_id}@s.whatsapp.net"
+        remote_jid   = f"{tenant_id}@s.whatsapp.net"
 
-        # Chave de idempotência: 1 baixa por (motorista, despesa, ano-mês)
-        redis_key = f"baixa_auto:{motorista_id}:{despesa_id}:{ano_mes_ref}"
+        # Chave de idempotência: 1 baixa por (motorista, despesa, dia_vencimento, ano-mês)
+        # Inclui o dia para que vencimentos múltiplos da mesma despesa sejam independentes
+        redis_key = f"baixa_auto:{motorista_id}:{despesa_id}:{dia_venc}:{ano_mes_ref}"
         if await client.exists(redis_key):
-            continue  # já executado neste mês
+            continue  # já executado neste mês para este vencimento
 
         # Quanto retirar: mínimo entre saldo disponível e valor da despesa
         retirada = min(saldo_atual, valor_mensal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)

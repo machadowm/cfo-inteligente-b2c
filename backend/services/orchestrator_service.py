@@ -228,6 +228,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     c_fixo_contrato  = res.get("custo_fixo_contrato", res["custo_fixo_rateado"])  # aluguel + despesas fixas (sem provisão)
     provisao         = res.get("provisao_descontada", 0.0)
     lucro            = res["lucro_liquido_real"]
+    turno_adicional  = res.get("turno_adicional_dia", False)  # FIX #8 — segundo turno no mesmo dia
 
     margem_contribuicao = fat - c_var
     # Margem líquida sobre o que sobra após todos os custos (excluindo provisão — é reserva, não perda)
@@ -425,7 +426,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
         + f"   *Subtotal Variável: R$ {c_var:.2f}* \n"
         + f"• (=) Margem de Contribuição:  *R$ {margem_contribuicao:.2f}* \n"
         + f"• (-) Custo Fixo Contratual:  *R$ {c_fixo_contrato:.2f}*"
-        + f"  _({res.get('locadora', 'contrato')})_\n"
+        + (f"  _(já cobrado no 1º turno do dia)_\n" if turno_adicional else f"  _({res.get('locadora', 'contrato')})_\n")
         + linha_provisao
         + f"──────────────────────────────\n"
         + linha_resultado

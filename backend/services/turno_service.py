@@ -671,6 +671,26 @@ class TurnoService:
                 # custo_fixo_total inclui ambos para o cálculo contábil do lucro
                 custo_fixo_total = custo_fixo_contrato + df_extra
 
+                # FIX #8 — DUPLO TURNO NO MESMO DIA: custo fixo já foi cobrado no primeiro
+                # fechamento do dia. Cobrar novamente inflaria o prejuízo de forma indevida.
+                # Se já existe um fechamento_diario para motorista + CURRENT_DATE (excluindo o
+                # turno atual, que acaba de ser inserido), zeramos custo_fixo_total e pulamos
+                # os aportes nas caixas de provisão para este turno.
+                ja_fechou_hoje = await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM public.fechamento_diario
+                        WHERE motorista_id = $1::uuid
+                          AND turno_id != $2::uuid
+                          AND data_fechamento = CURRENT_DATE
+                    );
+                    """,
+                    motorista_id, turno_id,
+                )
+                if ja_fechou_hoje:
+                    custo_fixo_contrato = Decimal("0.00")
+                    custo_fixo_total    = Decimal("0.00")
+
                 # 5. DRE COMPLETO E LÓGICA DE PROVISÃO
                 lucro_liquido_real = faturamento_bruto - custo_variavel_total - custo_fixo_total
 
@@ -697,10 +717,13 @@ class TurnoService:
                 # Para cada despesa fixa com caixa vinculada, credita o pro-rata na caixinha.
                 # Usa INSERT ... ON CONFLICT para criar a caixa se ainda não existir.
                 # Retorna lista de aportes para exibição no DRE.
+                # FIX #8 — em turno adicional do mesmo dia os aportes são suprimidos porque
+                # o custo fixo já foi zerado acima; não faz sentido creditar nas caixas de
+                # provisão um pro-rata que não foi cobrado no DRE.
                 aportes_caixas: list[dict] = []
                 provisao_descontada_total = Decimal("0.00")
 
-                for df_row in despesas_fixas_rows:
+                for df_row in ([] if ja_fechou_hoje else despesas_fixas_rows):
                     pro_rata = Decimal(str(df_row["valor_pro_rata_diario"]))
                     provisao_descontada_total += pro_rata
                     caixa_id_row = df_row["caixa_id"]
@@ -906,6 +929,7 @@ class TurnoService:
                 "provisao_descontada": float(provisao_descontada_total),
                 "media_fat_dia": media_fat_dia,
                 "fat_bruto_mes": fat_bruto_mes,  # FIX #1 — acumulado mensal para projeção correta
+                "turno_adicional_dia": bool(ja_fechou_hoje),  # FIX #8 — sinaliza turno extra (custo fixo zerado)
             }
 
         except Exception as e:

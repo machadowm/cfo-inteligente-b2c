@@ -36,6 +36,7 @@ _BYPASS_INTERACAO_MIN   = 15        # ignora lembrete se motorista interagiu nes
 _TTL_REMINDER_PAUSA_S   = 60 * 60   # reenvio mínimo: 1 h
 _TTL_REMINDER_ZUMBI_S   = 60 * 120  # reenvio mínimo: 2 h
 _TTL_REMINDER_VENC_S    = 60 * 60 * 20  # vencimento: reenvio mínimo 20 h (1× por dia)
+_TTL_BAIXA_AUTO_S       = 60 * 60 * 24 * 32  # baixa automática: idempotência de ~1 mês
 _INTERVALO_LOOP_S       = 300       # varredura a cada 5 min
 
 
@@ -194,7 +195,14 @@ async def _processar_vencimentos_despesas() -> None:
                 FROM public.despesas_fixas_mensais dfm
                 JOIN public.motoristas m ON m.id = dfm.motorista_id
                 WHERE dfm.ativo = TRUE
-                  AND dfm.dia_vencimento = ANY($1::int[]);
+                  AND LEAST(
+                        dfm.dia_vencimento,
+                        DATE_PART('day',
+                            DATE_TRUNC('month', CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo')
+                            + INTERVAL '1 month'
+                            - INTERVAL '1 day'
+                        )::int
+                  ) = ANY($1::int[]);
                 """,
                 list(dias_alvo),
             )
@@ -240,6 +248,148 @@ async def _processar_vencimentos_despesas() -> None:
         )
 
 
+async def _processar_baixas_automaticas() -> None:
+    """Executa a baixa automática nas caixas de provisão 1 dia após o vencimento.
+
+    Para cada despesa fixa ativa cuja caixinha tem saldo e que venceu ontem:
+      • Retira o mínimo entre saldo disponível e valor_mensal da caixa.
+      • Notifica o motorista via WhatsApp com o resultado (quitado / parcial / caixa vazia).
+      • Grava chave Redis de idempotência com TTL de ~32 dias para não repetir no mesmo mês.
+
+    Edge-cases tratados:
+      • Dia 1 do mês: vencimento do dia 31 (mês anterior) também é processado.
+      • Saldo zero: notifica mas não tenta UPDATE desnecessário.
+      • Despesas sem caixa vinculada (caixa_id IS NULL) são ignoradas — sem caixinha, sem baixa.
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+
+    _tz = pytz.timezone("America/Sao_Paulo")
+    hoje = datetime.now(_tz).date()
+    ontem = hoje - timedelta(days=1)
+    # Ano-mês de referência para a chave de idempotência (usa o mês do vencimento)
+    ano_mes_ref = ontem.strftime("%Y-%m")
+
+    try:
+        async with DatabaseService.get_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT dfm.id::text          AS despesa_id,
+                       dfm.nome,
+                       dfm.valor_mensal,
+                       dfm.dia_vencimento,
+                       dfm.caixa_id::text    AS caixa_id,
+                       cp.saldo_atual,
+                       m.id::text            AS motorista_id,
+                       m.telefone
+                FROM public.despesas_fixas_mensais dfm
+                JOIN public.motoristas m ON m.id = dfm.motorista_id
+                JOIN public.caixas_provisao cp ON cp.id = dfm.caixa_id
+                WHERE dfm.ativo = TRUE
+                  AND dfm.caixa_id IS NOT NULL
+                  AND cp.saldo_atual > 0
+                  AND LEAST(
+                        dfm.dia_vencimento,
+                        DATE_PART('day',
+                            DATE_TRUNC('month', $1::date AT TIME ZONE 'America/Sao_Paulo')
+                            + INTERVAL '1 month'
+                            - INTERVAL '1 day'
+                        )::int
+                  ) = DATE_PART('day', $1::date)::int;
+                """,
+                # $1 = data de ontem — o LEAST mapeia dia_vencimento ao último dia do mês
+                # quando o mês é mais curto que o dia cadastrado (ex: vence 31, mês tem 28).
+                str(ontem),
+            )
+    except Exception as e:
+        logger.error(f"[ReminderService] Erro ao buscar baixas automáticas: {e}")
+        return
+
+    client = await RedisFSMService.get_client()
+
+    for row in rows:
+        tenant_id   = row["telefone"]
+        motorista_id = row["motorista_id"]
+        despesa_id  = row["despesa_id"]
+        caixa_id    = row["caixa_id"]
+        nome        = row["nome"]
+        valor_mensal = Decimal(str(row["valor_mensal"]))
+        saldo_atual  = Decimal(str(row["saldo_atual"]))
+        remote_jid  = f"{tenant_id}@s.whatsapp.net"
+
+        # Chave de idempotência: 1 baixa por (motorista, despesa, ano-mês)
+        redis_key = f"baixa_auto:{motorista_id}:{despesa_id}:{ano_mes_ref}"
+        if await client.exists(redis_key):
+            continue  # já executado neste mês
+
+        # Quanto retirar: mínimo entre saldo disponível e valor da despesa
+        retirada = min(saldo_atual, valor_mensal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                # Baixa atômica com checagem de saldo (guarda contra race condition)
+                novo_saldo_row = await conn.fetchrow(
+                    """
+                    UPDATE public.caixas_provisao
+                    SET saldo_atual = saldo_atual - $1
+                    WHERE id = $2::uuid
+                      AND motorista_id = $3::uuid
+                      AND saldo_atual >= $1
+                    RETURNING saldo_atual;
+                    """,
+                    retirada, caixa_id, motorista_id,
+                )
+                if not novo_saldo_row:
+                    # Race condition: saldo mudou entre o SELECT e o UPDATE — ignora
+                    logger.warning(
+                        f"[ReminderService] Baixa automática abortada (saldo insuficiente no momento do UPDATE): "
+                        f"motorista={motorista_id} despesa={nome}"
+                    )
+                    continue
+                novo_saldo = Decimal(str(novo_saldo_row["saldo_atual"]))
+        except Exception as e:
+            logger.error(
+                f"[ReminderService] Erro ao executar baixa automática: "
+                f"motorista={motorista_id} despesa={nome}: {e}"
+            )
+            continue
+
+        # Marca idempotência antes de enviar (mesmo que o envio falhe, não repete a baixa)
+        await client.set(redis_key, "1", ex=_TTL_BAIXA_AUTO_S)
+
+        # Monta notificação
+        valor_fmt   = f"R$ {float(valor_mensal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        retirada_fmt = f"R$ {float(retirada):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        novo_saldo_fmt = f"R$ {float(novo_saldo):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        faltou = (valor_mensal - retirada).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        if faltou <= Decimal("0.01"):
+            # Saldo cobriu 100% — quitado
+            texto = (
+                f"✅  *Baixa automática — {nome}*\n\n"
+                f"• Valor da despesa:  *{valor_fmt}*\n"
+                f"• Retirado da caixinha:  *{retirada_fmt}*\n"
+                f"• Saldo restante:  *{novo_saldo_fmt}*\n\n"
+                f"_Despesa quitada automaticamente. Cofre atualizado!_ 🛡"
+            )
+        else:
+            # Saldo parcial — informa o que falta
+            faltou_fmt = f"R$ {float(faltou):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            texto = (
+                f"⚠  *Baixa parcial — {nome}*\n\n"
+                f"• Valor da despesa:  *{valor_fmt}*\n"
+                f"• Retirado (saldo disponível):  *{retirada_fmt}*\n"
+                f"• Ainda falta:  *{faltou_fmt}*\n\n"
+                f"_A caixinha não tinha saldo suficiente. "
+                f"Verifique e complete o pagamento manualmente._"
+            )
+
+        await _enviar(remote_jid, texto)
+        logger.info(
+            f"[ReminderService] Baixa automática executada: motorista={motorista_id} "
+            f"despesa={nome!r} retirada=R${float(retirada):.2f} novo_saldo=R${float(novo_saldo):.2f}"
+        )
+
+
 async def loop_lembretes() -> None:
     """
     Loop infinito de varredura. Deve ser iniciado como asyncio.Task no lifespan do FastAPI.
@@ -258,6 +408,7 @@ async def loop_lembretes() -> None:
             await _processar_pausas_prolongadas()
             await _processar_turnos_zumbi()
             await _processar_vencimentos_despesas()
+            await _processar_baixas_automaticas()
         except asyncio.CancelledError:
             logger.info("[ReminderService] Loop encerrado graciosamente.")
             raise

@@ -162,15 +162,13 @@ class DatabaseService:
                     '{"meta": {"tipo_veiculo": "gasolina", "is_flex": false, "is_hibrido": false, "is_eletrico": false, "capacidade_tanque_l": 50.0, "capacidade_bateria_kwh": 0.0, "qtd_tanques": 1}, "liquido": {"litros": 0.0, "custo_total": 0.0, "gasolina_litros": 0.0, "etanol_litros": 0.0, "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0, "km_l_gasolina": 12.0, "km_l_etanol": 8.5}, "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5}, "gnv": {"m3": 0.0, "custo_total": 0.0, "km_m3": 14.0}}'
                 )
 
-                # Cria as caixas de provisão padrão idempotentemente.
-                # ON CONFLICT (motorista_id, nome_caixa) requer UNIQUE (motorista_id, nome_caixa)
-                # definido no schema (caixas_provisao_motorista_nome_key).
+                # Cria a caixa de manutenção padrão (universal — vale para qualquer tipo de contrato).
+                # A caixa "Amortização de IPVA/Seguro" é criada pelo sincronizar_despesa_contrato
+                # apenas para carros próprios/financiados — não faz sentido em carros alugados.
                 await conn.execute(
                     """
                     INSERT INTO public.caixas_provisao (motorista_id, nome_caixa, saldo_atual)
-                    VALUES
-                        ($1::uuid, 'Manutenção Corretiva (Pneus/Freios)', 0.00),
-                        ($1::uuid, 'Amortização de IPVA/Seguro', 0.00)
+                    VALUES ($1::uuid, 'Manutenção Corretiva (Pneus/Freios)', 0.00)
                     ON CONFLICT (motorista_id, nome_caixa) DO NOTHING;
                     """,
                     motorista_id

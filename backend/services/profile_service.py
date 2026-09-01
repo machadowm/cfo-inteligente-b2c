@@ -200,9 +200,11 @@ class ProfileService:
             barra = "█" * blocos_cheios + "░" * (10 - blocos_cheios)
 
             # ── Projeção mensal ────────────────────────────────────────────────
+            import calendar as _cal
             hoje = _date.today()
             dias_corridos        = hoje.day
-            dias_uteis_restantes = max(0, round(dias_uteis * (1 - dias_corridos / 30)))
+            _dias_no_mes         = _cal.monthrange(hoje.year, hoje.month)[1]
+            dias_uteis_restantes = max(0, round(dias_uteis * (1 - dias_corridos / _dias_no_mes)))
             projecao_mensal      = float(fat_bruto) + (media_fat_dia * dias_uteis_restantes) if media_fat_dia > 0 and dias_uteis_restantes > 0 else float(fat_bruto)
             deficit_meta         = max(0.0, float(meta_mensal) - float(fat_bruto))
             fat_necessario_dia   = (deficit_meta / dias_uteis_restantes) if dias_uteis_restantes > 0 else 0.0

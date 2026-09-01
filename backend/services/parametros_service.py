@@ -703,6 +703,129 @@ class ParametrosService:
         return str(new_id)
 
     @staticmethod
+    async def sincronizar_despesa_contrato(
+        motorista_id: str,
+        tenant_id: str,
+        locadora: str,
+        aluguel_semanal: float,
+        dias_uteis: int = 26,
+    ) -> None:
+        """Cria ou atualiza automaticamente a despesa fixa e a caixinha do contrato veicular.
+
+        Chamado sempre que o contrato é configurado ou alterado — no onboarding e no
+        comando 'atualizar contrato'.  Garante que:
+
+          • Existe uma despesa fixa "Aluguel <Locadora>" (ou "Parcela Financiamento" /
+            "Custo Veículo Próprio") com o pro-rata correto, vinculada a uma caixinha.
+          • Qualquer despesa de contrato anterior com nome diferente é desativada,
+            evitando que o motorista acumule duplicatas ao trocar de locadora.
+          • Para carro alugado, a caixa "Amortização de IPVA/Seguro" é removida se
+            estiver vazia (IPVA não faz sentido para veículo alugado).
+          • Para carro próprio/financiado, a caixa "Amortização de IPVA/Seguro" é
+            criada/mantida.
+
+        Falhas são logadas mas nunca propagadas — o contrato já foi salvo no banco e
+        esta função é um efeito colateral de enriquecimento do perfil.
+        """
+        try:
+            locadora_lower = locadora.strip().lower()
+            is_proprio = locadora_lower in ("proprietario", "quitado", "financiado")
+
+            # Nome canônico da despesa de contrato
+            if locadora_lower == "financiado":
+                nome_despesa = "Parcela Financiamento"
+            elif locadora_lower in ("proprietario", "quitado"):
+                nome_despesa = "Custo Veículo Próprio"
+            else:
+                # Locadora real: "Aluguel Zarp", "Aluguel Movida", etc.
+                nome_despesa = f"Aluguel {locadora.strip().title()}"
+
+            # Pro-rata mensal = aluguel semanal × (dias_uteis / 7)
+            # Ex: R$ 1020,85/sem × (26/7) = R$ 3791,58/mês ÷ 26 dias = R$ 145,83/dia
+            valor_mensal = Decimal(str(aluguel_semanal)) * Decimal(str(dias_uteis)) / Decimal("7")
+            valor_mensal = valor_mensal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                # 1. Desativa despesas de contrato anteriores com nome diferente
+                #    (evita duplicatas ao trocar de "Aluguel Zarp" para "Aluguel Movida")
+                await conn.execute(
+                    """
+                    UPDATE public.despesas_fixas_mensais
+                    SET ativo = FALSE
+                    WHERE motorista_id = $1::uuid
+                      AND ativo = TRUE
+                      AND lower(nome) LIKE ANY(ARRAY['aluguel %', 'parcela financiamento', 'custo veículo próprio', 'custo veiculo proprio'])
+                      AND lower(nome) != lower($2);
+                    """,
+                    motorista_id, nome_despesa,
+                )
+
+                # 2. Cria/atualiza a caixinha do contrato
+                caixa_id = await ParametrosService._obter_ou_criar_caixa(conn, motorista_id, nome_despesa)
+
+                # 3. Upsert da despesa fixa de contrato
+                existing = await conn.fetchrow(
+                    "SELECT id FROM public.despesas_fixas_mensais "
+                    "WHERE motorista_id = $1::uuid AND lower(nome) = lower($2);",
+                    motorista_id, nome_despesa,
+                )
+                if existing:
+                    await conn.execute(
+                        "UPDATE public.despesas_fixas_mensais "
+                        "SET valor_mensal = $1, dias_trabalho_previstos = $2, ativo = TRUE, "
+                        "    caixa_id = $3::uuid "
+                        "WHERE id = $4::uuid;",
+                        valor_mensal, dias_uteis, caixa_id, str(existing["id"]),
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO public.despesas_fixas_mensais
+                            (motorista_id, nome, valor_mensal, dias_trabalho_previstos, dia_vencimento, caixa_id)
+                        VALUES ($1::uuid, $2, $3, $4, 1, $5::uuid);
+                        """,
+                        motorista_id, nome_despesa, valor_mensal, dias_uteis, caixa_id,
+                    )
+
+                # 4. Para carro alugado: remove caixa "Amortização de IPVA/Seguro" se estiver
+                #    vazia (IPVA não é responsabilidade do motorista em carro alugado).
+                if not is_proprio:
+                    await conn.execute(
+                        """
+                        DELETE FROM public.caixas_provisao
+                        WHERE motorista_id = $1::uuid
+                          AND lower(nome_caixa) = 'amortização de ipva/seguro'
+                          AND saldo_atual = 0;
+                        """,
+                        motorista_id,
+                    )
+
+                # 5. Para carro próprio/financiado: garante que a caixa de IPVA/Seguro existe
+                if is_proprio:
+                    await conn.execute(
+                        """
+                        INSERT INTO public.caixas_provisao (motorista_id, nome_caixa, saldo_atual)
+                        VALUES ($1::uuid, 'Amortização de IPVA/Seguro', 0.00)
+                        ON CONFLICT (motorista_id, nome_caixa) DO NOTHING;
+                        """,
+                        motorista_id,
+                    )
+
+            await ParametrosService._registrar_auditoria(
+                tenant_id, motorista_id,
+                f"contrato_{nome_despesa}", "valor_mensal", valor_mensal,
+            )
+            logger.info(
+                f"[ParametrosService] Despesa de contrato sincronizada: motorista={motorista_id} "
+                f"nome={nome_despesa!r} valor_mensal=R${float(valor_mensal):.2f} dias={dias_uteis}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"[ParametrosService] Erro ao sincronizar despesa de contrato "
+                f"(motorista={motorista_id}): {exc}"
+            )
+
+    @staticmethod
     async def _adicionar_despesa_fixa(
         motorista_id: str, tenant_id: str, nome: str, valor_mensal: Decimal, dias: int,
         dia_vencimento: int = 1,

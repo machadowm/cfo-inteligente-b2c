@@ -304,8 +304,11 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
 
     hoje = _date.today()
     from datetime import timedelta as _td
-    # Dias úteis restantes no mês: escala linear sobre dias corridos
-    dias_uteis_restantes = max(0, round(dias_uteis * (1 - hoje.day / 30)))
+    import calendar as _cal
+    # Dias úteis restantes no mês: escala proporcional sobre dias reais do mês
+    # (não sobre 30 fixo — Fevereiro com 28 dias daria saldo positivo no último dia)
+    _dias_no_mes = _cal.monthrange(hoje.year, hoje.month)[1]
+    dias_uteis_restantes = max(0, round(dias_uteis * (1 - hoje.day / _dias_no_mes)))
     # Projeção usa média histórica de faturamento × dias restantes
     media_fat_dia         = res.get("media_fat_dia", meta_diaria)  # fallback: meta_diaria se sem histórico
     projecao_mensal       = fat_bruto_mes + (media_fat_dia * dias_uteis_restantes)
@@ -729,12 +732,24 @@ class OrchestratorService:
                                 """, json.dumps(estoque_dict), motorista_uuid
                             )
                         await RedisFSMService.limpar_buffer(fsm_key)
+                        # Cria despesa fixa + caixinha para o contrato padrão (Localiza Zarp)
+                        # O motorista pode alterar depois com 'atualizar contrato'
+                        await ParametrosService.sincronizar_despesa_contrato(
+                            motorista_uuid, tenant_id,
+                            locadora="Localiza Zarp",
+                            aluguel_semanal=1020.85,
+                            dias_uteis=26,
+                        )
                         await enviar_whatsapp(
                             remote_jid,
                             f"Tudo pronto,  *{nome}* ! 🎉\n\n"
                             f"Seu cofre está ativo para o  *{veiculo}*  ({placa}).\n\n"
                             "Sempre que iniciar seu dia, manda  *iniciar*  com o km do painel.\n"
-                            "Ex:  *iniciar 45230*"
+                            "Ex:  *iniciar 45230*\n\n"
+                            "⚙  _Para ajustar o contrato:_\n"
+                            "_atualizar contrato Zarp 1020 1500_\n"
+                            "_atualizar contrato Proprietario 90 0_\n"
+                            "_atualizar contrato Financiado 150 0_"
                         )
                     except Exception as e:
                         logger.error(f"Falha ao salvar onboarding no banco: {e}")
@@ -803,12 +818,23 @@ class OrchestratorService:
                             """, json.dumps(estoque_dict), motorista_uuid
                         )
                     await RedisFSMService.limpar_buffer(fsm_key)
+                    # Cria despesa fixa + caixinha para o contrato padrão (Localiza Zarp)
+                    await ParametrosService.sincronizar_despesa_contrato(
+                        motorista_uuid, tenant_id,
+                        locadora="Localiza Zarp",
+                        aluguel_semanal=1020.85,
+                        dias_uteis=26,
+                    )
                     await enviar_whatsapp(
                         remote_jid,
                         f"Tudo pronto,  *{nome}* ! 🎉\n\n"
                         f"Seu cofre está ativo para o  *{veiculo}*  ({placa}).\n\n"
                         "Sempre que iniciar seu dia, manda  *iniciar*  com o km do painel.\n"
-                        "Ex:  *iniciar 45230*"
+                        "Ex:  *iniciar 45230*\n\n"
+                        "⚙  _Para ajustar o contrato:_\n"
+                        "_atualizar contrato Zarp 1020 1500_\n"
+                        "_atualizar contrato Proprietario 90 0_\n"
+                        "_atualizar contrato Financiado 150 0_"
                     )
                 except Exception as e:
                     logger.error(f"Falha ao salvar onboarding híbrido no banco: {e}")
@@ -914,9 +940,20 @@ class OrchestratorService:
                         WHERE motorista_id = $4::uuid AND ativo = TRUE;
                         """, locadora, aluguel_semanal, franquia, motorista_id
                     )
-                # FIX #5 — invalida cache de perfil para que o próximo 'perfil' reflita o novo contrato
+                # Invalida cache de perfil para que o próximo 'perfil' reflita o novo contrato
                 await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
-                await enviar_whatsapp(remote_jid, f"✅ Contrato atualizado com sucesso para  *{locadora}*! Aluguel rateado recalculado e cofre adaptado. 🛡")
+                # Sincroniza despesa fixa + caixinha do contrato automaticamente
+                dias_uteis_motorista = int(motorista.get("dias_uteis_mes") or 26)
+                await ParametrosService.sincronizar_despesa_contrato(
+                    motorista_id, tenant_id, locadora, aluguel_semanal, dias_uteis_motorista
+                )
+                locadora_lower = locadora.strip().lower()
+                is_proprio = locadora_lower in ("proprietario", "quitado", "financiado")
+                if is_proprio:
+                    nota_despesa = f"\n\n📌 _Caixinha  *Custo Veículo Próprio*  ou  *Parcela Financiamento*  criada e vinculada — aportes automáticos a cada fechamento de turno._"
+                else:
+                    nota_despesa = f"\n\n📌 _Caixinha  *Aluguel {locadora.strip().title()}*  criada e vinculada — aportes automáticos a cada fechamento de turno._"
+                await enviar_whatsapp(remote_jid, f"✅ Contrato atualizado com sucesso para  *{locadora}*! Aluguel rateado recalculado e cofre adaptado. 🛡{nota_despesa}")
             except Exception as e:
                 logger.error(f"Erro ao atualizar contrato: {e}")
                 await enviar_whatsapp(remote_jid, "⚠ Formato inválido. Use ex: *'atualizar contrato Zarp 1020.85 1505' *")

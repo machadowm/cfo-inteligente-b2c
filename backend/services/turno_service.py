@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 import pytz
 import asyncpg
 from services.database_service import DatabaseService
+from services.manutencao_service import ManutencaoService
 
 logger = logging.getLogger(__name__)
 
@@ -844,6 +845,14 @@ class TurnoService:
                     custo_fixo_total, lucro_liquido_real, km_profissional, provisao_descontada_total
                 )
 
+                # Alertas de manutenção preventiva — usa km_final como odômetro atual.
+                # Roda dentro da mesma conexão; falha silenciosa (obter_alertas retorna []).
+                alertas_manutencao = await ManutencaoService.obter_alertas(
+                    conn=conn,
+                    motorista_id=motorista_id,
+                    km_atual=km_final_decimal,
+                )
+
                 # Média de faturamento diário — mês atual (excluindo o turno recém-fechado
                 # via OFFSET 1 para não duplicar).  Fallback para últimos 10 sem filtro de
                 # mês quando o mês corrente tem < 3 fechamentos (início de mês).
@@ -980,7 +989,8 @@ class TurnoService:
                 "provisao_descontada": float(provisao_descontada_total),
                 "media_fat_dia": media_fat_dia,
                 "fat_bruto_mes": fat_bruto_mes,  # FIX #1 — acumulado mensal para projeção correta
-                "turno_adicional_dia": bool(ja_fechou_hoje),  # FIX #8 — sinaliza turno extra (custo fixo zerado)
+                "alertas_manutencao": alertas_manutencao,      # lista de dicts ATRASADA/ALERTA
+                "turno_adicional_dia": bool(ja_fechou_hoje),   # FIX #8 — sinaliza turno extra (custo fixo zerado)
                 "totais_dia": totais_dia,                      # FIX #8 — total consolidado do dia (None no 1º turno)
                 # FIX #9 — lista com valor_pro_rata_diario nominal para o orchestrator
                 # calcular a nota de corte proporcional no DRE sem precisar rebuscar o BD.

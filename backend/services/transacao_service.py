@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, Any, Optional
 import asyncpg
 from services.database_service import DatabaseService
+from services.manutencao_service import ManutencaoService
 
 # Configuração do Logger de Observabilidade para Rastreabilidade SRE
 logger = logging.getLogger(__name__)
@@ -455,10 +456,23 @@ class TransacaoService:
                 if row is None:
                     logger.warning(f"Lançamento duplicado ignorado: {wpp_msg_id}")
                     return {
-                        "status": "duplicate", 
+                        "status": "duplicate",
                         "message": "⚠ Esse lançamento já foi guardado anteriormente no cofre contábil.",
                         "error_code": "DUPLICADA"
                     }
+
+                # Trigger lógico de manutenção: se categoria = 'manutencao', tenta
+                # vincular automaticamente ao histórico de manutenção do veículo.
+                # Roda dentro da mesma conexão/transação — falha silenciosa.
+                if categoria == "manutencao":
+                    km_manut = Decimal(str(odo_dec)) if odo_dec is not None else Decimal("0.00")
+                    await ManutencaoService.detectar_e_registrar_automatica(
+                        conn=conn,
+                        motorista_id=motorista_id,
+                        transacao_id=str(row["id"]),
+                        descricao=descricao or "",
+                        km_execucao=km_manut,
+                    )
 
                 valor_fmt = f"R$ {float(valor_decimal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 return {

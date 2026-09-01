@@ -15,6 +15,7 @@ from services.help_service import HelpService
 from services.parametros_service import ParametrosService
 from services.profile_service import ProfileService
 from services.reminder_service import registrar_interacao
+from services.manutencao_service import ManutencaoService, formatar_alertas_manutencao
 
 # Configuração de Logger
 logger = logging.getLogger(__name__)
@@ -505,6 +506,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
         + secao_caixas
         + _nota_qualidade_dados(km_por_unidade, res.get("detalhe_queima", ""))
         + _secao_total_dia(totais_dia)
+        + formatar_alertas_manutencao(res.get("alertas_manutencao", []))
         + f"🛡  *Cofre Contábil Atualizado! Bom descanso, {nome_motorista}!*"
         + rodape_sugestao
     )
@@ -935,6 +937,61 @@ class OrchestratorService:
         # aos ajustes de parâmetro.  Exemplos: !alterar meta mensal 12000
         # =========================================================================
         if texto_bruto.strip().startswith("!"):
+            # ── Comando !manutencao ────────────────────────────────────────────
+            _partes_cmd = texto_bruto.strip().split()
+            _cmd_base = _partes_cmd[0].lower()  # ex: "!manutencao"
+            if _cmd_base in ("!manutencao", "!manutençao", "!manutencoes"):
+                _sub = _partes_cmd[1].lower() if len(_partes_cmd) > 1 else "ver"
+
+                if _sub == "criar" and len(_partes_cmd) >= 4:
+                    # !manutencao criar <tipo_servico> <intervalo_km> [aviso_km]
+                    tipo_sv   = _partes_cmd[2]
+                    try:
+                        intv_km = int(_partes_cmd[3])
+                        aviso_km = int(_partes_cmd[4]) if len(_partes_cmd) > 4 else 500
+                    except (ValueError, IndexError):
+                        await enviar_whatsapp(remote_jid, "❌ Formato: *!manutencao criar <serviço> <km_intervalo> [km_aviso]*\n_Ex: !manutencao criar troca_oleo 10000 500_")
+                        return
+                    res_cr = await ManutencaoService.criar_regra(motorista_id, tipo_sv, intv_km, aviso_km)
+                    if res_cr["sucesso"]:
+                        await enviar_whatsapp(remote_jid,
+                            f"✅  Regra  *{tipo_sv}*  criada para o {res_cr['veiculo_modelo']} "
+                            f"({res_cr['veiculo_placa']})!\n"
+                            f"• Intervalo: *{intv_km:,} km*\n".replace(",", ".") +
+                            f"• Aviso prévio: *{aviso_km:,} km* antes.\n\n".replace(",", ".") +
+                            "_Quando lançar um gasto deste tipo no chat, vinculo automaticamente!_"
+                        )
+                    else:
+                        await enviar_whatsapp(remote_jid, f"❌ {res_cr['erro']}")
+                    return
+
+                elif _sub == "remover" and len(_partes_cmd) >= 3:
+                    # !manutencao remover <regra_id>
+                    res_rm = await ManutencaoService.remover_regra(motorista_id, _partes_cmd[2])
+                    if res_rm["sucesso"]:
+                        await enviar_whatsapp(remote_jid, "✅ Regra desativada com sucesso.")
+                    else:
+                        await enviar_whatsapp(remote_jid, f"❌ {res_rm['erro']}")
+                    return
+
+                else:
+                    # !manutencao [ver] — relatório completo; precisa de odômetro atual
+                    # Busca km_final do último turno concluído como proxy do odômetro atual
+                    try:
+                        async with DatabaseService.get_tenant_connection(motorista_id) as _conn:
+                            _km_row = await _conn.fetchrow(
+                                "SELECT km_final FROM public.turnos "
+                                "WHERE motorista_id = $1::uuid AND km_final IS NOT NULL "
+                                "ORDER BY data_fim DESC LIMIT 1;",
+                                motorista_id,
+                            )
+                        km_ref = float(_km_row["km_final"]) if _km_row else 0.0
+                    except Exception:
+                        km_ref = 0.0
+                    resposta_mnt = await ManutencaoService.formatar_relatorio(motorista_id, km_ref)
+                    await enviar_whatsapp(remote_jid, resposta_mnt)
+                    return
+
             resposta_param = await ParametrosService.processar(motorista_id, tenant_id, texto_bruto)
             if resposta_param is not None:
                 await enviar_whatsapp(remote_jid, resposta_param)

@@ -92,12 +92,28 @@ def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
             f"• KM Excedente:  *R$ {info['valor_km_excedente']:.2f}/km* \n"
         )
 
+    # ── Bloco de turnos anteriores do mesmo dia (duplo turno) ────────────────
+    turnos_anteriores = info.get("turnos_anteriores_dia")
+    secao_turnos_anteriores = ""
+    if turnos_anteriores and turnos_anteriores.get("qtd", 0) > 0:
+        t = turnos_anteriores
+        lucro_ant = t["fat"] - t["c_var"] - t["c_fixo"]
+        sinal = "💰" if lucro_ant >= 0 else "🔴"
+        secao_turnos_anteriores = (
+            f"📋  *TURNOS ANTERIORES HOJE ({t['qtd']}x)* \n"
+            f"• Faturamento:  *R$ {t['fat']:.2f}* \n"
+            f"• Custos Variáveis:  *R$ {t['c_var']:.2f}* \n"
+            f"• Custo Fixo (cobrado no 1º turno):  *R$ {t['c_fixo']:.2f}* \n"
+            f"{sinal}  Lucro Acumulado:  *R$ {lucro_ant:.2f}* \n\n"
+        )
+
     return (
         f"📥  *DADOS PARCIAIS DO TURNO DE HOJE ({info['data_turno']})* \n\n"
         f"• Início:  *{info['data_inicio_hora']}* \n"
         f"• KM Inicial:  *{info['km_inicial']:,.1f} km* \n".replace(",", ".") +
         f"• Combustível Lançado:  *R$ {info['total_abastecido']:.2f}* \n\n"
-        f"⚙  *CUSTOS DO CONTRATO ({info['locadora']})* \n\n"
+        + secao_turnos_anteriores
+        + f"⚙  *CUSTOS DO CONTRATO ({info['locadora']})* \n\n"
         + linhas_contrato
         + f"\n🎯  *METAS DE HOJE* \n\n"
         f"• Meta Diária:  *R$ {meta_diaria:.2f}* \n"
@@ -173,6 +189,32 @@ def _nota_qualidade_dados(km_por_unidade: float, detalhe_queima: str) -> str:
     return ""
 
 
+def _secao_total_dia(totais_dia: dict | None) -> str:
+    """Retorna o bloco '📊 Total do Dia' quando há 2+ turnos no mesmo dia.
+
+    Recebe o dict totais_dia produzido por fechar_turno_com_dre (None no 1º turno).
+    Exibe faturamento, custos e lucro consolidados de todos os turnos do dia,
+    deixando claro que o custo fixo só foi cobrado uma vez.
+    """
+    if not totais_dia:
+        return ""
+    t = totais_dia
+    lucro = t["lucro_dia"]
+    sinal = "💰" if lucro >= 0 else "🔴"
+    label_lucro = "LUCRO TOTAL DO DIA" if lucro >= 0 else "RESULTADO DO DIA"
+    margem = (lucro / t["fat_dia"] * 100.0) if t["fat_dia"] > 0 else 0.0
+    return (
+        f"──────────────────────────────\n"
+        f"📊  *{t['qtd_turnos']} TURNOS — TOTAL DO DIA* \n"
+        f"• (+) Faturamento:  *R$ {t['fat_dia']:.2f}* \n"
+        f"• (-) Custos Variáveis:  *R$ {t['c_var_dia']:.2f}* \n"
+        f"• (-) Custo Fixo (1× cobrado):  *R$ {t['c_fixo_dia']:.2f}* \n"
+        f"• KM Total:  *{t['km_dia']:.1f} km* \n"
+        f"──────────────────────────────\n"
+        f"{sinal}  *{label_lucro}: R$ {lucro:.2f}*  (margem  *{margem:.1f}%* )\n\n"
+    )
+
+
 def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     """Formata o DRE Executivo Diário consolidando tempo operacional e indicadores.
 
@@ -229,6 +271,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     provisao         = res.get("provisao_descontada", 0.0)
     lucro            = res["lucro_liquido_real"]
     turno_adicional  = res.get("turno_adicional_dia", False)  # FIX #8 — segundo turno no mesmo dia
+    totais_dia       = res.get("totais_dia")                  # FIX #8 — consolidado do dia (None no 1º turno)
 
     margem_contribuicao = fat - c_var
     # Margem líquida sobre o que sobra após todos os custos (excluindo provisão — é reserva, não perda)
@@ -378,10 +421,28 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
             else:
                 linhas_aportes += f" -  *{ap['caixa']}* :  +R$ {ap['aporte']:.2f}{tag_venc}\n"
 
+        # FIX #9 — nota de corte proporcional: exibida quando o lucro não cobriu o
+        # pro-rata completo (provisao < soma nominal das despesas fixas) ou quando
+        # o turno foi negativo (provisao = 0 mas há aportes zerados na lista).
+        _provisao_nominal = sum(
+            float(r.get("valor_pro_rata_diario", 0))
+            for r in res.get("_despesas_fixas_nominais", [])
+        )
+        nota_corte = ""
+        if lucro < 0:
+            nota_corte = f"⚠  _Turno negativo — aportes suspensos para não criar saldo fictício._\n"
+        elif provisao > 0 and _provisao_nominal > 0 and provisao < _provisao_nominal - 0.01:
+            nota_corte = (
+                f"⚠  _Lucro insuficiente para o pro-rata completo — "
+                f"aportes reduzidos proporcionalmente "
+                f"(R$ {provisao:.2f} de R$ {_provisao_nominal:.2f})._\n"
+            )
+
         secao_caixas = (
             f"📦  *5. CAIXAS DE PROVISÃO* \n"
             f"• Aportes deste turno:\n"
             + linhas_aportes
+            + nota_corte
             + f"• Total provisionado hoje:  *R$ {provisao:.2f}*\n"
             f"_(Envie  *!caixas*  para ver saldos completos)_\n\n"
         )
@@ -443,6 +504,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
         + secao_projecao
         + secao_caixas
         + _nota_qualidade_dados(km_por_unidade, res.get("detalhe_queima", ""))
+        + _secao_total_dia(totais_dia)
         + f"🛡  *Cofre Contábil Atualizado! Bom descanso, {nome_motorista}!*"
         + rodape_sugestao
     )
@@ -1023,10 +1085,31 @@ class OrchestratorService:
                         dt_inicio = turno_ativo["data_inicio"]
                         tx = await conn.fetchrow(
                             """
-                            SELECT COALESCE(SUM(valor), 0.00) as abastecido FROM public.transacoes 
+                            SELECT COALESCE(SUM(valor), 0.00) as abastecido FROM public.transacoes
                             WHERE motorista_id = $1::uuid AND turno_id = $2::uuid AND categoria = 'combustivel' AND estornado = FALSE;
                             """, motorista_id, turno_id
                         )
+                        # FIX #8 — agrega fechamentos anteriores do mesmo dia (duplo turno)
+                        ant = await conn.fetchrow(
+                            """
+                            SELECT COUNT(*)                              AS qtd,
+                                   COALESCE(SUM(faturamento_bruto), 0)  AS fat,
+                                   COALESCE(SUM(custo_variavel_direto), 0) AS c_var,
+                                   COALESCE(SUM(custo_fixo_rateado), 0) AS c_fixo
+                            FROM public.fechamento_diario
+                            WHERE motorista_id = $1::uuid
+                              AND turno_id != $2::uuid
+                              AND data_fechamento = CURRENT_DATE;
+                            """, motorista_id, turno_id
+                        )
+                        turnos_anteriores_dia = None
+                        if ant and int(ant["qtd"] or 0) > 0:
+                            turnos_anteriores_dia = {
+                                "qtd":   int(ant["qtd"]),
+                                "fat":   float(ant["fat"]),
+                                "c_var": float(ant["c_var"]),
+                                "c_fixo": float(ant["c_fixo"]),
+                            }
                         info_turno = {
                             "data_turno": dt_inicio.strftime('%d/%m/%Y'),
                             "data_inicio_hora": dt_inicio.strftime('%H:%M'),
@@ -1047,7 +1130,8 @@ class OrchestratorService:
                             "dias_uteis": int(turno_ativo["dias_uteis_mes"] or 26),
                             "piso_ganho_km":   float(turno_ativo["piso_ganho_km"]),
                             "piso_ganho_hora": float(turno_ativo["piso_ganho_hora"]),
-                            "total_abastecido": float(tx["abastecido"])
+                            "total_abastecido": float(tx["abastecido"]),
+                            "turnos_anteriores_dia": turnos_anteriores_dia,
                         }
                         resposta = formatar_relatorio_parcial(motorista["nome"], info_turno)
                     else:

@@ -715,16 +715,40 @@ class TurnoService:
 
                 # 5.1. APORTE AUTOMÁTICO NAS CAIXAS DE PROVISÃO
                 # Para cada despesa fixa com caixa vinculada, credita o pro-rata na caixinha.
-                # Usa INSERT ... ON CONFLICT para criar a caixa se ainda não existir.
                 # Retorna lista de aportes para exibição no DRE.
+                #
                 # FIX #8 — em turno adicional do mesmo dia os aportes são suprimidos porque
                 # o custo fixo já foi zerado acima; não faz sentido creditar nas caixas de
                 # provisão um pro-rata que não foi cobrado no DRE.
+                #
+                # FIX #9 — APORTE LIMITADO AO LUCRO DISPONÍVEL:
+                # O pro-rata já foi deduzido do lucro como custo fixo. Se o turno fechou
+                # negativo (lucro_liquido_real <= 0), não há margem real para provisionar —
+                # creditar a caixa criaria saldo fictício. Se o lucro cobrir apenas parte
+                # do pro-rata total, cada caixa recebe proporcionalmente (fator de corte).
                 aportes_caixas: list[dict] = []
                 provisao_descontada_total = Decimal("0.00")
 
+                # Fator proporcional: quanto do pro-rata total o lucro real comporta.
+                # Exemplos:
+                #   lucro=50, df_extra=30 → fator=1.00 (lucro sobra, aporte integral)
+                #   lucro=15, df_extra=30 → fator=0.50 (aporte pela metade)
+                #   lucro≤0              → fator=0.00 (nenhum aporte)
+                if lucro_liquido_real <= Decimal("0.00") or df_extra <= Decimal("0.00"):
+                    _fator_provisao = Decimal("0.00")
+                elif lucro_liquido_real >= df_extra:
+                    _fator_provisao = Decimal("1.00")
+                else:
+                    _fator_provisao = (lucro_liquido_real / df_extra).quantize(
+                        Decimal("0.0001"), rounding=ROUND_HALF_UP
+                    )
+
                 for df_row in ([] if ja_fechou_hoje else despesas_fixas_rows):
-                    pro_rata = Decimal(str(df_row["valor_pro_rata_diario"]))
+                    pro_rata_nominal = Decimal(str(df_row["valor_pro_rata_diario"]))
+                    # Pro-rata efetivo: limitado ao lucro proporcional disponível
+                    pro_rata = (pro_rata_nominal * _fator_provisao).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
                     provisao_descontada_total += pro_rata
                     caixa_id_row = df_row["caixa_id"]
 
@@ -739,8 +763,8 @@ class TurnoService:
                             saldo_cx   = Decimal(str(cx["saldo_atual"] or "0"))
                             meta_cx    = Decimal(str(cx["meta_valor"])) if cx["meta_valor"] is not None else None
                             # Calcula quanto pode depositar: limitado pelo que falta para a meta
-                            if meta_cx is not None and saldo_cx >= meta_cx:
-                                aporte_real = Decimal("0.00")  # caixa já cheia — pula
+                            if pro_rata <= Decimal("0.00") or (meta_cx is not None and saldo_cx >= meta_cx):
+                                aporte_real = Decimal("0.00")
                             elif meta_cx is not None:
                                 aporte_real = min(pro_rata, meta_cx - saldo_cx)
                             else:
@@ -764,13 +788,13 @@ class TurnoService:
                                     "dias_vencimento": list(df_row["dias_vencimento"] or []),
                                 })
                             else:
-                                # Caixa cheia — registra no DRE mas sem novo depósito
+                                # Caixa cheia ou turno negativo — registra no DRE sem depósito
                                 aportes_caixas.append({
                                     "caixa": cx["nome_caixa"],
                                     "aporte": 0.0,
                                     "meta": float(meta_cx) if meta_cx else None,
                                     "saldo_novo": float(saldo_cx),
-                                    "meta_atingida": True,
+                                    "meta_atingida": meta_cx is not None and saldo_cx >= meta_cx,
                                     "origem": df_row["nome"],
                                     "dias_vencimento": list(df_row["dias_vencimento"] or []),
                                 })
@@ -786,7 +810,7 @@ class TurnoService:
                         if cx_leg:
                             saldo_cx   = Decimal(str(cx_leg["saldo_atual"] or "0"))
                             meta_cx    = Decimal(str(cx_leg["meta_valor"])) if cx_leg["meta_valor"] is not None else None
-                            if meta_cx is not None and saldo_cx >= meta_cx:
+                            if pro_rata <= Decimal("0.00") or (meta_cx is not None and saldo_cx >= meta_cx):
                                 aporte_real = Decimal("0.00")
                             elif meta_cx is not None:
                                 aporte_real = min(pro_rata, meta_cx - saldo_cx)
@@ -874,6 +898,33 @@ class TurnoService:
                 )
                 fat_bruto_mes = float(fat_mes_row["fat_mes"] or 0.0)
 
+                # FIX #8 — Total consolidado do dia (todos os turnos incluindo o atual,
+                # que já foi inserido em fechamento_diario acima).
+                totais_dia_row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*)                                 AS qtd_turnos,
+                           COALESCE(SUM(faturamento_bruto), 0)     AS fat_dia,
+                           COALESCE(SUM(custo_variavel_direto), 0) AS c_var_dia,
+                           COALESCE(SUM(custo_fixo_rateado), 0)    AS c_fixo_dia,
+                           COALESCE(SUM(lucro_liquido_real), 0)    AS lucro_dia,
+                           COALESCE(SUM(km_rodados), 0)            AS km_dia
+                    FROM public.fechamento_diario
+                    WHERE motorista_id = $1::uuid
+                      AND data_fechamento = CURRENT_DATE;
+                    """,
+                    motorista_id,
+                )
+                totais_dia = None
+                if totais_dia_row and int(totais_dia_row["qtd_turnos"] or 0) > 1:
+                    totais_dia = {
+                        "qtd_turnos": int(totais_dia_row["qtd_turnos"]),
+                        "fat_dia":    float(totais_dia_row["fat_dia"]),
+                        "c_var_dia":  float(totais_dia_row["c_var_dia"]),
+                        "c_fixo_dia": float(totais_dia_row["c_fixo_dia"]),
+                        "lucro_dia":  float(totais_dia_row["lucro_dia"]),
+                        "km_dia":     float(totais_dia_row["km_dia"]),
+                    }
+
             return {
                 "sucesso": True,
                 "turno_id": turno_id,
@@ -930,6 +981,13 @@ class TurnoService:
                 "media_fat_dia": media_fat_dia,
                 "fat_bruto_mes": fat_bruto_mes,  # FIX #1 — acumulado mensal para projeção correta
                 "turno_adicional_dia": bool(ja_fechou_hoje),  # FIX #8 — sinaliza turno extra (custo fixo zerado)
+                "totais_dia": totais_dia,                      # FIX #8 — total consolidado do dia (None no 1º turno)
+                # FIX #9 — lista com valor_pro_rata_diario nominal para o orchestrator
+                # calcular a nota de corte proporcional no DRE sem precisar rebuscar o BD.
+                "_despesas_fixas_nominais": [
+                    {"valor_pro_rata_diario": float(r["valor_pro_rata_diario"])}
+                    for r in despesas_fixas_rows
+                ],
             }
 
         except Exception as e:

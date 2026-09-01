@@ -113,10 +113,11 @@ class DatabaseService:
                 SELECT id, placa, modelo, tipo_combustivel, estoque_financeiro,
                        locadora, custo_aluguel_semanal, franquia_km_semanal,
                        valor_km_excedente, escala_trabalho, contrato_personalizado,
-                       is_hibrido, is_eletrico, is_flex, capacidade_bateria
+                       is_hibrido, is_eletrico, is_flex, capacidade_bateria,
+                       selecionado
                 FROM public.veiculos
                 WHERE motorista_id = $1::uuid AND ativo = TRUE
-                ORDER BY created_at DESC LIMIT 1;
+                ORDER BY selecionado DESC, created_at DESC LIMIT 1;
                 """,
                 motorista_id
             )
@@ -150,12 +151,12 @@ class DatabaseService:
                 motorista_id = str(row_motorista["id"])
 
                 # Cria o veículo inicial. ON CONFLICT (placa) para onboarding idempotente.
-                # O estoque_financeiro.meta carregará as capacidades e flags logo após,
-                # no UPDATE do webhook de onboarding — por ora usa defaults neutros.
+                # selecionado=TRUE: primeiro veículo sempre é o ativo selecionado.
+                # O índice único parcial idx_veiculo_selecionado_unico garante exclusividade.
                 await conn.execute(
                     """
-                    INSERT INTO public.veiculos (motorista_id, modelo, placa, tipo_combustivel, estoque_financeiro)
-                    VALUES ($1::uuid, $2, $3, $4, $5::jsonb)
+                    INSERT INTO public.veiculos (motorista_id, modelo, placa, tipo_combustivel, estoque_financeiro, selecionado)
+                    VALUES ($1::uuid, $2, $3, $4, $5::jsonb, TRUE)
                     ON CONFLICT (placa) DO NOTHING;
                     """,
                     motorista_id, veiculo_modelo, placa, combustivel,
@@ -174,3 +175,62 @@ class DatabaseService:
                     motorista_id
                 )
                 return motorista_id
+
+    @classmethod
+    async def cadastrar_veiculo_adicional(
+        cls,
+        motorista_id: str,
+        modelo: str,
+        placa: str,
+        combustivel: str,
+        estoque_jsonb: str,
+    ) -> str:
+        """
+        Cadastra um veículo adicional para um motorista já existente.
+
+        Operação atômica (transação única):
+          1. Verifica que não há turno aberto (proteção de integridade).
+          2. Desseleciona todos os veículos ativos do motorista.
+          3. Insere o novo veículo com selecionado=TRUE e ativo=TRUE.
+             ON CONFLICT (placa) atualiza estoque e reativa, tornando-o o selecionado.
+          4. O índice único parcial idx_veiculo_selecionado_unico garante exclusividade.
+
+        Retorna o UUID do novo veículo como string.
+        Lança ValueError se houver turno aberto.
+        """
+        async with cls.get_tenant_connection(motorista_id) as conn:
+            # Proteção: não cadastra com turno em aberto
+            turno_aberto = await conn.fetchval(
+                "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid "
+                "AND status IN ('em_andamento', 'em_pausa', 'ABERTO') LIMIT 1;",
+                motorista_id,
+            )
+            if turno_aberto:
+                raise ValueError("Há um turno em aberto. Feche o turno antes de cadastrar um novo veículo.")
+
+            # Desseleciona todos (dois passos para evitar violação transitória do índice único)
+            await conn.execute(
+                "UPDATE public.veiculos SET selecionado = FALSE "
+                "WHERE motorista_id = $1::uuid AND ativo = TRUE;",
+                motorista_id,
+            )
+
+            # Insere ou reativa veículo existente por placa
+            veiculo_id = await conn.fetchval(
+                """
+                INSERT INTO public.veiculos
+                    (motorista_id, modelo, placa, tipo_combustivel, estoque_financeiro, ativo, selecionado)
+                VALUES ($1::uuid, $2, $3, $4, $5::jsonb, TRUE, TRUE)
+                ON CONFLICT (placa) DO UPDATE
+                    SET motorista_id       = EXCLUDED.motorista_id,
+                        modelo             = EXCLUDED.modelo,
+                        tipo_combustivel   = EXCLUDED.tipo_combustivel,
+                        estoque_financeiro = EXCLUDED.estoque_financeiro,
+                        ativo              = TRUE,
+                        selecionado        = TRUE
+                RETURNING id;
+                """,
+                motorista_id, modelo, placa, combustivel, estoque_jsonb,
+            )
+            return str(veiculo_id)
+

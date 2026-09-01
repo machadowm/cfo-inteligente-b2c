@@ -220,7 +220,7 @@ class ManutencaoService:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 veiculo = await conn.fetchrow(
                     "SELECT id, modelo, placa FROM public.veiculos "
-                    "WHERE motorista_id = $1::uuid AND ativo = TRUE LIMIT 1;",
+                    "WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY created_at DESC LIMIT 1;",
                     motorista_id,
                 )
                 if not veiculo:
@@ -292,7 +292,7 @@ class ManutencaoService:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 veiculo = await conn.fetchrow(
                     "SELECT id FROM public.veiculos "
-                    "WHERE motorista_id = $1::uuid AND ativo = TRUE LIMIT 1;",
+                    "WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY created_at DESC LIMIT 1;",
                     motorista_id,
                 )
                 if not veiculo:
@@ -490,7 +490,7 @@ class ManutencaoService:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 veiculo = await conn.fetchrow(
                     "SELECT modelo, placa FROM public.veiculos "
-                    "WHERE motorista_id = $1::uuid AND ativo = TRUE LIMIT 1;",
+                    "WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY created_at DESC LIMIT 1;",
                     motorista_id,
                 )
                 if not veiculo:
@@ -505,7 +505,7 @@ class ManutencaoService:
                     FROM public.regras_manutencao rm
                     WHERE rm.veiculo_id = (
                         SELECT id FROM public.veiculos
-                        WHERE motorista_id = $1::uuid AND ativo = TRUE LIMIT 1
+                        WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY created_at DESC LIMIT 1
                     ) AND rm.ativo = TRUE
                     ORDER BY rm.intervalo_km ASC;
                     """,

@@ -992,6 +992,117 @@ class OrchestratorService:
                     await enviar_whatsapp(remote_jid, resposta_mnt)
                     return
 
+            # ── Comando !veiculos ─────────────────────────────────────────────
+            if _cmd_base in ("!veiculos", "!veiculo", "!frota"):
+                try:
+                    async with DatabaseService.get_tenant_connection(motorista_id) as _conn:
+                        _rows = await _conn.fetch(
+                            """
+                            SELECT id, modelo, placa, tipo_combustivel, locadora,
+                                   custo_aluguel_semanal, ativo, selecionado, created_at
+                            FROM public.veiculos
+                            WHERE motorista_id = $1::uuid
+                            ORDER BY selecionado DESC, ativo DESC, created_at DESC;
+                            """,
+                            motorista_id,
+                        )
+                    if not _rows:
+                        await enviar_whatsapp(remote_jid, "Nenhum veículo cadastrado. Faça o onboarding primeiro.")
+                        return
+                    linhas_v = ["🚗  *SEUS VEÍCULOS*\n"]
+                    for r in _rows:
+                        tag = "✅ *ATIVO*" if r["selecionado"] and r["ativo"] else ("💤 _inativo_" if not r["ativo"] else "⚪ _não selecionado_")
+                        linhas_v.append(
+                            f"{tag}  {r['modelo']}  |  *{r['placa']}*\n"
+                            f"   Combustível: {r['tipo_combustivel']}  ·  Contrato: {r['locadora'] or '—'}\n"
+                            f"   ID: `{str(r['id'])[:8]}…`"
+                        )
+                    linhas_v.append("\n_Para trocar de veículo:  *!selecionar <placa>*_")
+                    await enviar_whatsapp(remote_jid, "\n\n".join(linhas_v))
+                except Exception as _e:
+                    logger.error(f"[!veiculos] {_e}")
+                    await enviar_whatsapp(remote_jid, "❌ Erro ao listar veículos.")
+                return
+
+            # ── Comando !selecionar <placa> ───────────────────────────────────
+            if _cmd_base == "!selecionar" and len(_partes_cmd) >= 2:
+                _placa_alvo = _partes_cmd[1].upper().strip()
+                try:
+                    async with DatabaseService.get_tenant_connection(motorista_id) as _conn:
+                        # Verifica se há turno aberto — não permite trocar com turno ativo
+                        _turno_aberto = await _conn.fetchval(
+                            "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid "
+                            "AND status IN ('em_andamento', 'em_pausa', 'ABERTO') LIMIT 1;",
+                            motorista_id,
+                        )
+                        if _turno_aberto:
+                            await enviar_whatsapp(remote_jid,
+                                "⚠  Você tem um turno aberto. Feche o turno antes de trocar de veículo."
+                            )
+                            return
+
+                        _alvo = await _conn.fetchrow(
+                            "SELECT id, modelo FROM public.veiculos "
+                            "WHERE motorista_id = $1::uuid AND UPPER(placa) = $2 AND ativo = TRUE;",
+                            motorista_id, _placa_alvo,
+                        )
+                        if not _alvo:
+                            await enviar_whatsapp(remote_jid,
+                                f"❌ Placa  *{_placa_alvo}*  não encontrada ou inativa.\n"
+                                "_Use  *!veiculos*  para ver sua frota._"
+                            )
+                            return
+
+                        # Desseleciona todos os veículos ativos do motorista, depois seleciona o alvo.
+                        # Duas operações separadas para contornar o índice único parcial:
+                        # se fizéssemos UPDATE ... SET selecionado = (id = $alvo) em um único
+                        # comando, o banco poderia validar a unicidade antes de desselecionar
+                        # o anterior, causando violação transitória.
+                        await _conn.execute(
+                            "UPDATE public.veiculos SET selecionado = FALSE "
+                            "WHERE motorista_id = $1::uuid AND ativo = TRUE;",
+                            motorista_id,
+                        )
+                        await _conn.execute(
+                            "UPDATE public.veiculos SET selecionado = TRUE WHERE id = $1::uuid;",
+                            str(_alvo["id"]),
+                        )
+                    await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
+                    await enviar_whatsapp(remote_jid,
+                        f"✅  *{_alvo['modelo']}*  ({_placa_alvo}) selecionado como veículo ativo!\n"
+                        "_Todos os próximos turnos, abastecimentos e manutenções serão registrados neste veículo._"
+                    )
+                except Exception as _e:
+                    logger.error(f"[!selecionar] {_e}")
+                    await enviar_whatsapp(remote_jid, "❌ Erro ao selecionar veículo.")
+                return
+
+            # ── Comando !cadastrar veiculo ────────────────────────────────────
+            # Inicia a FSM de cadastro de veículo adicional.
+            # Aceita "!cadastrar veiculo", "!novo veiculo", "!adicionar veiculo"
+            if _cmd_base in ("!cadastrar", "!novo", "!adicionar") and len(_partes_cmd) > 1 and "veiculo" in " ".join(_partes_cmd[1:]).lower():
+                _cad_key = f"cad_veiculo:{tenant_id}"
+                # Proteção: não inicia com turno aberto
+                try:
+                    async with DatabaseService.get_tenant_connection(motorista_id) as _conn:
+                        _turno_aberto_cad = await _conn.fetchval(
+                            "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid "
+                            "AND status IN ('em_andamento', 'em_pausa', 'ABERTO') LIMIT 1;",
+                            motorista_id,
+                        )
+                    if _turno_aberto_cad:
+                        await enviar_whatsapp(remote_jid, "⚠  Você tem um turno aberto. Feche o turno antes de cadastrar um novo veículo.")
+                        return
+                except Exception:
+                    pass
+                await RedisFSMService.definir_estado(_cad_key, "CAD_VEICULO_MODELO", ex_seconds=600)
+                await enviar_whatsapp(remote_jid,
+                    "🚗  *Cadastro de Novo Veículo*\n\n"
+                    "Qual é o modelo do veículo?\n"
+                    "_(Ex:  *Honda CG 160* ,  *HB20* ,  *Corolla 2.0* )_"
+                )
+                return
+
             resposta_param = await ParametrosService.processar(motorista_id, tenant_id, texto_bruto)
             if resposta_param is not None:
                 await enviar_whatsapp(remote_jid, resposta_param)
@@ -1086,7 +1197,7 @@ class OrchestratorService:
                         UPDATE public.veiculos
                         SET locadora = $1, custo_aluguel_semanal = $2, franquia_km_semanal = $3,
                             dias_trabalho_semana = $4, contrato_personalizado = TRUE
-                        WHERE motorista_id = $5::uuid AND ativo = TRUE;
+                        WHERE motorista_id = $5::uuid AND ativo = TRUE AND selecionado = TRUE;
                         """, locadora, aluguel_semanal, franquia, dias_semana_novo, motorista_id
                     )
                 # Invalida cache de perfil para que o próximo 'perfil' reflita o novo contrato
@@ -1217,6 +1328,157 @@ class OrchestratorService:
         # Usado para suprimir o aviso de descarte em falsos positivos de texto genérico,
         # evitando poluição visual quando o número foi capturado de frase longa.
         _km_intencao_explicita = len(_candidatos_km) == 1
+
+        # =========================================================================
+        # 3. INTERCEPÇÃO DA FSM DE CADASTRO DE VEÍCULO ADICIONAL
+        # =========================================================================
+        # Chave: cad_veiculo:{tenant_id}  TTL: 600 s (abandono limpo)
+        # Estados: CAD_VEICULO_MODELO → CAD_VEICULO_CATEGORIA → CAD_VEICULO_COMBUSTIVEL
+        #        → CAD_VEICULO_PLACA → CAD_VEICULO_TANQUE → [CAD_VEICULO_BATERIA] → salva
+        _cad_key = f"cad_veiculo:{tenant_id}"
+        _cad_estado = await RedisFSMService.obter_estado(_cad_key)
+        _CAD_TTL = 600
+
+        if _cad_estado and _cad_estado.startswith("CAD_VEICULO_"):
+            _cp = _cad_estado.split("|")
+            _cad_passo = _cp[0]
+
+            def _cad_get(chave: str, default: str = "") -> str:
+                return next((p.split(f"{chave}:")[1] for p in _cp if p.startswith(f"{chave}:")), default)
+
+            if _cad_passo == "CAD_VEICULO_MODELO":
+                if len(texto_bruto.strip()) < 2:
+                    await registrar_erro_e_verificar_escape(remote_jid, tenant_id, _cad_key, "Nome muito curto. 😅 Me manda o modelo do veículo:")
+                    return
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                await RedisFSMService.definir_estado(_cad_key, f"CAD_VEICULO_CATEGORIA|modelo:{texto_bruto.strip()}", ex_seconds=_CAD_TTL)
+                await enviar_whatsapp(remote_jid,
+                    f"*{texto_bruto.strip()}* anotado! 🚗🏍\n\n"
+                    "É um  *Carro*  ou uma  *Moto* ?"
+                )
+                return
+
+            elif _cad_passo == "CAD_VEICULO_CATEGORIA":
+                _modelo = _cad_get("modelo")
+                _cat_in = texto_bruto.lower().strip()
+                if any(w in _cat_in for w in ["carro", "automovel", "auto", "sedan", "hatch", "suv", "van", "pickup"]):
+                    _cat = "carro"
+                elif any(w in _cat_in for w in ["moto", "motocicleta", "bike", "scooter"]):
+                    _cat = "moto"
+                else:
+                    await registrar_erro_e_verificar_escape(remote_jid, tenant_id, _cad_key, "Responda  *Carro*  ou  *Moto* :")
+                    return
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                await RedisFSMService.definir_estado(_cad_key, f"CAD_VEICULO_COMBUSTIVEL|modelo:{_modelo}|categoria:{_cat}", ex_seconds=_CAD_TTL)
+                await enviar_whatsapp(remote_jid,
+                    f"⛽ Qual é o combustível do  *{_modelo}* ?\n\n"
+                    "👉  *Gasolina*\n👉  *Etanol*\n👉  *Flex*\n👉  *Hibrido*\n👉  *Eletrico*\n👉  *GNV*"
+                )
+                return
+
+            elif _cad_passo == "CAD_VEICULO_COMBUSTIVEL":
+                _modelo = _cad_get("modelo")
+                _cat = _cad_get("categoria", "carro")
+                _comb_in = texto_bruto.lower().replace("é", "e").replace("í", "i").strip()
+                _combs = ["gasolina", "etanol", "flex", "hibrido", "eletrico", "gnv"]
+                if _comb_in not in _combs:
+                    await registrar_erro_e_verificar_escape(remote_jid, tenant_id, _cad_key,
+                        "Combustível não reconhecido. 😅 Escolha:\n*Gasolina, Etanol, Flex, Hibrido, Eletrico* ou *GNV*")
+                    return
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                await RedisFSMService.definir_estado(_cad_key, f"CAD_VEICULO_PLACA|modelo:{_modelo}|categoria:{_cat}|combustivel:{_comb_in}", ex_seconds=_CAD_TTL)
+                await enviar_whatsapp(remote_jid, "🔡 Qual é a  *placa*  do veículo?\n_(Ex: ABC1234 ou ABC1D23)_")
+                return
+
+            elif _cad_passo == "CAD_VEICULO_PLACA":
+                _modelo = _cad_get("modelo")
+                _cat = _cad_get("categoria", "carro")
+                _comb = _cad_get("combustivel", "gasolina")
+                _placa_cad = re.sub(r'[^A-Za-z0-9]', '', texto_bruto).upper()
+                if len(_placa_cad) != 7:
+                    await registrar_erro_e_verificar_escape(remote_jid, tenant_id, _cad_key, "Placa precisa ter 7 caracteres (ex:  *ABC1234* ). Tenta de novo:")
+                    return
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                await RedisFSMService.definir_estado(_cad_key, f"CAD_VEICULO_TANQUE|modelo:{_modelo}|categoria:{_cat}|combustivel:{_comb}|placa:{_placa_cad}", ex_seconds=_CAD_TTL)
+                await enviar_whatsapp(remote_jid, "⛽ Qual a  *capacidade do tanque*  em litros?\n_(Se elétrico puro, manda  *0* )_")
+                return
+
+            elif _cad_passo == "CAD_VEICULO_TANQUE":
+                _modelo = _cad_get("modelo")
+                _cat = _cad_get("categoria", "carro")
+                _comb = _cad_get("combustivel", "gasolina")
+                _placa_cad = _cad_get("placa")
+                _tanque = converter_para_float(texto_bruto)
+                if _tanque < 0:
+                    await registrar_erro_e_verificar_escape(remote_jid, tenant_id, _cad_key, "Valor negativo não funciona. 😅 Manda a capacidade em litros:")
+                    return
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                if _comb in ["hibrido", "eletrico"]:
+                    await RedisFSMService.definir_estado(_cad_key, f"CAD_VEICULO_BATERIA|modelo:{_modelo}|categoria:{_cat}|combustivel:{_comb}|placa:{_placa_cad}|tanque:{_tanque}", ex_seconds=_CAD_TTL)
+                    await enviar_whatsapp(remote_jid, "🔋 Qual a capacidade da bateria em  *kWh* ? (Ex:  *30* )")
+                    return
+                # Não é híbrido/elétrico — finaliza
+                _bateria = 0.0
+                _finalizar_cad = True
+
+            elif _cad_passo == "CAD_VEICULO_BATERIA":
+                _modelo = _cad_get("modelo")
+                _cat = _cad_get("categoria", "carro")
+                _comb = _cad_get("combustivel", "hibrido")
+                _placa_cad = _cad_get("placa")
+                _tanque = float(_cad_get("tanque", "0"))
+                _bateria = converter_para_float(texto_bruto)
+                if _bateria < 0:
+                    await registrar_erro_e_verificar_escape(remote_jid, tenant_id, _cad_key, "Valor negativo não funciona. 😅 Manda a capacidade em kWh:")
+                    return
+                await RedisFSMService.limpar_erros_consecutivos(tenant_id)
+                _finalizar_cad = True
+            else:
+                _finalizar_cad = False
+
+            if _finalizar_cad:
+                await enviar_whatsapp(remote_jid, "⚙ Cadastrando veículo... um segundo!")
+                try:
+                    _km_l_gas = 35.0 if _cat == "moto" else 12.0
+                    _km_l_eta = 24.5 if _cat == "moto" else 8.5
+                    _estoque_cad = json.dumps({
+                        "meta": {
+                            "tipo_veiculo": _comb, "categoria_veiculo": _cat,
+                            "is_flex": _comb == "flex", "is_hibrido": _comb == "hibrido",
+                            "is_eletrico": _comb == "eletrico",
+                            "capacidade_tanque_l": float(_tanque),
+                            "capacidade_bateria_kwh": float(_bateria), "qtd_tanques": 1,
+                        },
+                        "liquido": {
+                            "litros": 0.0, "custo_total": 0.0,
+                            "gasolina_litros": 0.0, "etanol_litros": 0.0,
+                            "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0,
+                            "km_l_gasolina": _km_l_gas, "km_l_etanol": _km_l_eta,
+                        },
+                        "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5},
+                        "gnv": {"m3": 0.0, "custo_total": 0.0, "km_m3": 14.0},
+                    })
+                    await DatabaseService.cadastrar_veiculo_adicional(
+                        motorista_id=motorista_id,
+                        modelo=_modelo, placa=_placa_cad,
+                        combustivel=_comb, estoque_jsonb=_estoque_cad,
+                    )
+                    await RedisFSMService.limpar_buffer(_cad_key)
+                    await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
+                    await enviar_whatsapp(remote_jid,
+                        f"✅  *{_modelo}*  ({_placa_cad}) cadastrado e selecionado como veículo ativo!\n\n"
+                        f"Todos os próximos turnos serão registrados neste veículo.\n"
+                        f"_Para trocar depois:  *!selecionar <placa>*_\n"
+                        f"_Para ver sua frota:  *!veiculos*_"
+                    )
+                except ValueError as _ve:
+                    await RedisFSMService.limpar_buffer(_cad_key)
+                    await enviar_whatsapp(remote_jid, f"⚠  {_ve}")
+                except Exception as _e:
+                    logger.error(f"[CAD_VEICULO] {_e}")
+                    await RedisFSMService.limpar_buffer(_cad_key)
+                    await enviar_whatsapp(remote_jid, "❌ Erro ao cadastrar veículo. Tente novamente.")
+                return
 
         # =========================================================================
         # 3. INTERCEPÇÃO DA FSM DE JORNADA (Precedência Absoluta)

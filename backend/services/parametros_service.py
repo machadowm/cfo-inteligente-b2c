@@ -211,7 +211,7 @@ class ParametrosService:
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 row = await conn.fetchrow(
-                    "SELECT id, estoque_financeiro FROM public.veiculos WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY created_at DESC LIMIT 1;",
+                    "SELECT id, estoque_financeiro FROM public.veiculos WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY selecionado DESC, created_at DESC LIMIT 1;",
                     motorista_id,
                 )
                 if not row:
@@ -318,6 +318,11 @@ class ParametrosService:
                 "  •  *!retirar caixa <nome> <valor>*        → Sacar quando a despesa chegar",
                 "     _Ex: !retirar caixa pneu 480_",
                 "  •  *!excluir caixa <nome>*                → Apagar a caixa permanentemente",
+                "",
+                "🚗  *Frota (múltiplos veículos):*",
+                "  •  *!veiculos*                            → Listar todos os veículos cadastrados",
+                "  •  *!selecionar <placa>*                  → Trocar o veículo ativo (fora do turno)",
+                "     _Ex: !selecionar ABC1234_",
                 "",
                 "_Exemplos:_",
                 "  *!alterar meta mensal 12000*",
@@ -467,7 +472,7 @@ class ParametrosService:
                     veiculo_row = await conn.fetchrow(
                         "SELECT tipo_combustivel, is_flex, is_hibrido "
                         "FROM public.veiculos WHERE motorista_id = $1::uuid AND ativo = TRUE "
-                        "ORDER BY created_at DESC LIMIT 1;",
+                        "ORDER BY selecionado DESC, created_at DESC LIMIT 1;",
                         motorista_id,
                     )
                 if not veiculo_row:
@@ -582,7 +587,7 @@ class ParametrosService:
                 row = await conn.fetchrow(
                     "SELECT id, estoque_financeiro FROM public.veiculos "
                     "WHERE motorista_id = $1::uuid AND ativo = TRUE "
-                    "ORDER BY created_at DESC LIMIT 1 FOR UPDATE;",
+                    "ORDER BY selecionado DESC, created_at DESC LIMIT 1 FOR UPDATE;",
                     motorista_id,
                 )
                 if not row:

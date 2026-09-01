@@ -127,7 +127,7 @@ class TransacaoService:
 
                 if not veiculo_id:
                     veiculo_row = await conn.fetchrow(
-                        "SELECT id FROM public.veiculos WHERE motorista_id = $1::uuid AND ativo = TRUE LIMIT 1;", 
+                        "SELECT id FROM public.veiculos WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY created_at DESC LIMIT 1;",
                         motorista_id
                     )
                     veiculo_id = str(veiculo_row["id"]) if veiculo_row else None

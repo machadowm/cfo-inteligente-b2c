@@ -1304,7 +1304,7 @@ class TurnoService:
                         if km_gap_intra > Decimal("0"):
                             veiculo_row = await conn.fetchrow(
                                 "SELECT id, estoque_financeiro, tipo_combustivel FROM public.veiculos "
-                                "WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY created_at DESC LIMIT 1;",
+                                "WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY selecionado DESC, created_at DESC LIMIT 1;",
                                 motorista_id
                             )
                             if veiculo_row:

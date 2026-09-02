@@ -67,7 +67,7 @@ class ProfileService:
                            is_hibrido, is_eletrico
                     FROM public.veiculos
                     WHERE motorista_id = $1::uuid AND ativo = TRUE
-                    ORDER BY created_at DESC LIMIT 1;
+                    ORDER BY selecionado DESC, created_at DESC LIMIT 1;
                     """,
                     motorista_id,
                 )

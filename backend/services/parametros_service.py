@@ -540,7 +540,7 @@ class ParametrosService:
                     )
                 else:  # veiculos
                     await conn.execute(
-                        f"UPDATE public.veiculos SET {coluna} = $1 WHERE motorista_id = $2::uuid AND ativo = TRUE;",
+                        f"UPDATE public.veiculos SET {coluna} = $1 WHERE motorista_id = $2::uuid AND ativo = TRUE AND selecionado = TRUE;",
                         valor_final, motorista_id,
                     )
 

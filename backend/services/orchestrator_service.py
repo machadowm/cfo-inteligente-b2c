@@ -821,7 +821,7 @@ class OrchestratorService:
                             }
                             await conn.execute(
                                 """
-                                UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE motorista_id = $2::uuid AND ativo = TRUE;
+                                UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE motorista_id = $2::uuid AND ativo = TRUE AND selecionado = TRUE;
                                 """, json.dumps(estoque_dict), motorista_uuid
                             )
                         await RedisFSMService.limpar_buffer(fsm_key)
@@ -907,7 +907,7 @@ class OrchestratorService:
                         }
                         await conn.execute(
                             """
-                            UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE motorista_id = $2::uuid AND ativo = TRUE;
+                            UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE motorista_id = $2::uuid AND ativo = TRUE AND selecionado = TRUE;
                             """, json.dumps(estoque_dict), motorista_uuid
                         )
                     await RedisFSMService.limpar_buffer(fsm_key)

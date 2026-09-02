@@ -65,6 +65,9 @@ PARAM_MAP: dict[str, _ParamEntry] = {
     "franquia":      ("franquia_km_semanal",       Decimal, "veiculos",   "Franquia KM Semanal (km)"),
     "km excedente":  ("valor_km_excedente",        Decimal, "veiculos",   "Preço KM Excedente (R$/km)"),
     "excedente":     ("valor_km_excedente",        Decimal, "veiculos",   "Preço KM Excedente (R$/km)"),
+    # dias de trabalho por semana — afeta custo diário (aluguel/dias) e exibição de escala
+    "dias semana":   ("dias_trabalho_semana",      int,     "veiculos",   "Dias de Trabalho por Semana"),
+    "dias por semana": ("dias_trabalho_semana",    int,     "veiculos",   "Dias de Trabalho por Semana"),
     # ── Capacidade física do veículo (JSONB estoque_financeiro.meta) ─────────
     # tabela prefixada com "jsonb_estoque:meta" — mesmo handler de rendimento
     "tanque":        ("capacidade_tanque_l",   Decimal, "jsonb_estoque:meta", "Capacidade do Tanque (L)"),
@@ -289,6 +292,10 @@ class ParametrosService:
                 "  •  *!alterar km excedente <R$/km>* → Preço do KM além da franquia (carros alugados)",
                 "  •  *!alterar tanque <litros>*     →  Capacidade do tanque (afeta self-heal)",
                 "  •  *!alterar bateria <kWh>*       →  Capacidade da bateria elétrica",
+                "  •  *!alterar dias semana <1-7>*   →  Dias trabalhados por semana (afeta custo diário)",
+                "  •  *!alterar escala <descrição>*  →  Escala semanal (ex: seg a sab, ter a dom)",
+                "     _Ex: !alterar escala seg a sab_  →  Seg a Sáb (6 dias)_",
+                "     _Ex: !alterar escala seg a sex_  →  Seg a Sex (5 dias)_",
                 "",
                 "⛽  *Rendimento Energético (km/L ou km/kWh):*",
                 "  •  *!alterar km gasolina <valor>* →  Rendimento gasolina (km/L)",
@@ -475,6 +482,16 @@ class ParametrosService:
                 f"_Ex: `!retirar caixa {nome_cx} 180`_"
             )
 
+        # ── Comando !alterar escala ───────────────────────────────────────
+        # Aceita texto descritivo da escala semanal com inferência de dias/semana.
+        # Ex: !alterar escala seg a sab   → 6 dias, "Seg a Sáb (6 dias)"
+        #     !alterar escala seg a sex   → 5 dias, "Seg a Sex (5 dias)"
+        #     !alterar escala ter a dom   → 6 dias, "Ter a Dom (6 dias)"
+        #     !alterar escala 5           → 5 dias, mantém escala textual existente
+        match_escala = re.match(r"^!alterar\s+escala\s+(.+)$", texto, re.IGNORECASE)
+        if match_escala:
+            return await ParametrosService._alterar_escala(motorista_id, tenant_id, match_escala.group(1).strip())
+
         # ── Comando !alterar ─────────────────────────────────────────────
         match = ParametrosService._RE_ALTERAR.match(texto)
         if not match:
@@ -560,6 +577,10 @@ class ParametrosService:
                         valor_final, motorista_id,
                     )
                 else:  # veiculos
+                    # Validação de range para dias_trabalho_semana
+                    if coluna == "dias_trabalho_semana":
+                        if not (1 <= int(valor_final) <= 7):
+                            return f"⚠ Dias por semana deve ser entre 1 e 7. Informado: {valor_final}"
                     await conn.execute(
                         f"UPDATE public.veiculos SET {coluna} = $1 WHERE motorista_id = $2::uuid AND ativo = TRUE AND selecionado = TRUE;",
                         valor_final, motorista_id,
@@ -592,6 +613,126 @@ class ParametrosService:
                 f"coluna={coluna}): {exc}"
             )
             return "❌ Erro interno ao salvar o parâmetro. Verifique o valor e tente novamente."
+
+    @staticmethod
+    async def _alterar_escala(motorista_id: str, tenant_id: str, valor_bruto: str) -> str:
+        """Atualiza a escala semanal de trabalho (dias_trabalho_semana + escala_trabalho).
+
+        Aceita dois formatos:
+          • Número puro:  "6"  → 6 dias/semana, mantém texto da escala existente
+          • Texto de escala:  "seg a sab" | "seg a sex" | "ter a dom"
+            → infere automaticamente o número de dias e gera texto formatado
+
+        Escala → dias mapeados pelo intervalo ISO (1=Seg…7=Dom):
+          Seg a Dom = 7 | Seg a Sab = 6 | Seg a Sex = 5 | Ter a Dom = 6
+          Qua a Dom = 5 | Seg a Qui = 4 | etc.
+        """
+        _ABREV = {
+            "seg": 1, "segunda": 1,
+            "ter": 2, "terca": 2, "terça": 2,
+            "qua": 3, "quarta": 3,
+            "qui": 4, "quinta": 4,
+            "sex": 5, "sexta": 5,
+            "sab": 6, "sáb": 6, "sabado": 6, "sábado": 6,
+            "dom": 7, "domingo": 7,
+        }
+        _NOME_CURTO = {1:"Seg", 2:"Ter", 3:"Qua", 4:"Qui", 5:"Sex", 6:"Sáb", 7:"Dom"}
+        _NOME_LONGO = {1:"segunda",2:"terça",3:"quarta",4:"quinta",5:"sexta",6:"sábado",7:"domingo"}
+
+        val_norm = valor_bruto.lower().strip()
+        # Remove acentos simples para matching
+        val_norm = (val_norm.replace("á","a").replace("â","a").replace("ã","a")
+                            .replace("é","e").replace("ê","e")
+                            .replace("ó","o").replace("ô","o")
+                            .replace("ú","u").replace("í","i"))
+
+        dias_calculados: int | None = None
+        texto_escala: str | None = None
+
+        # Tenta parse numérico puro
+        if re.fullmatch(r'\d+', val_norm):
+            n = int(val_norm)
+            if not (1 <= n <= 7):
+                return f"⚠ Valor inválido:  *{n}*  dias. Use um número entre 1 e 7."
+            dias_calculados = n
+            # texto_escala = None → mantém o existente no banco
+
+        else:
+            # Tenta parse de intervalo "DIA_INICIO a DIA_FIM"
+            match_intervalo = re.match(
+                r'^([a-z]+)\s+a\s+([a-z]+)$', val_norm
+            )
+            if match_intervalo:
+                ini_str, fim_str = match_intervalo.group(1), match_intervalo.group(2)
+                ini_iso = _ABREV.get(ini_str)
+                fim_iso = _ABREV.get(fim_str)
+                if ini_iso is None or fim_iso is None:
+                    return (
+                        f"⚠ Não reconheci  *{ini_str}*  ou  *{fim_str}*  como dia da semana.\n"
+                        f"Use abreviações: Seg, Ter, Qua, Qui, Sex, Sáb, Dom."
+                    )
+                # Dias inclusivos, com wrap de semana (ex: Qua a Ter = 7)
+                if fim_iso >= ini_iso:
+                    dias_calculados = fim_iso - ini_iso + 1
+                else:
+                    dias_calculados = (7 - ini_iso + 1) + fim_iso
+                ini_label = _NOME_CURTO[ini_iso]
+                fim_label = _NOME_CURTO[fim_iso]
+                texto_escala = f"{ini_label} a {fim_label} ({dias_calculados} dias)"
+            else:
+                return (
+                    f"⚠ Não entendi  *{valor_bruto}* .\n\n"
+                    f"Use um dos formatos:\n"
+                    f"  *!alterar escala 6*          → 6 dias por semana\n"
+                    f"  *!alterar escala seg a sab*  → segunda a sábado (6 dias)\n"
+                    f"  *!alterar escala seg a sex*  → segunda a sexta (5 dias)\n"
+                    f"  *!alterar escala ter a dom*  → terça a domingo (6 dias)"
+                )
+
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                if texto_escala is not None:
+                    # Atualiza ambos: dias e texto descritivo
+                    await conn.execute(
+                        "UPDATE public.veiculos SET dias_trabalho_semana = $1, escala_trabalho = $2 "
+                        "WHERE motorista_id = $3::uuid AND ativo = TRUE AND selecionado = TRUE;",
+                        dias_calculados, texto_escala, motorista_id,
+                    )
+                else:
+                    # Só atualiza o número; preserva o texto existente
+                    await conn.execute(
+                        "UPDATE public.veiculos SET dias_trabalho_semana = $1 "
+                        "WHERE motorista_id = $2::uuid AND ativo = TRUE AND selecionado = TRUE;",
+                        dias_calculados, motorista_id,
+                    )
+
+            await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
+            await ParametrosService._registrar_auditoria(
+                tenant_id, motorista_id, "escala", "dias_trabalho_semana", dias_calculados
+            )
+
+            escala_fmt = texto_escala or f"{dias_calculados} dias/semana"
+            # Recalcula o custo diário estimado para mostrar o impacto imediato
+            # Lê o aluguel atual do banco para não depender de cache
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                v_row = await conn.fetchrow(
+                    "SELECT custo_aluguel_semanal FROM public.veiculos "
+                    "WHERE motorista_id = $1::uuid AND ativo = TRUE AND selecionado = TRUE;",
+                    motorista_id,
+                )
+            aluguel_sem = float(v_row["custo_aluguel_semanal"] or 0) if v_row else 0
+            aluguel_dia = aluguel_sem / dias_calculados if dias_calculados > 0 else 0
+
+            return (
+                f"✅  *Escala atualizada!*\n"
+                f"• Nova escala:  *{escala_fmt}*\n"
+                f"• Dias por semana:  *{dias_calculados}*\n"
+                + (f"• Custo diário recalculado:  *R$ {aluguel_dia:.2f}*  (R$ {aluguel_sem:.2f} ÷ {dias_calculados}d)\n" if aluguel_sem > 0 else "")
+                + f"\n_O próximo DRE já usará o novo valor diário do aluguel._"
+            )
+        except Exception as exc:
+            logger.error(f"[ParametrosService] Erro ao alterar escala (motorista={motorista_id}): {exc}")
+            return "❌ Erro interno ao salvar a escala. Tente novamente."
 
     @staticmethod
     async def _alterar_rendimento(

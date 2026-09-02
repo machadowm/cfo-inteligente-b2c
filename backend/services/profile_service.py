@@ -292,22 +292,22 @@ class ProfileService:
             _dias_no_mes         = _cal.monthrange(hoje.year, hoje.month)[1]
             dias_uteis_restantes = max(0, round(dias_uteis * (1 - hoje.day / _dias_no_mes)))
 
-            # Médias do histórico
+            # Médias do histórico — exclui turnos com faturamento zero (distorcem a média)
             if hist_mes:
-                fats  = [float(r["faturamento_bruto"] or 0) for r in hist_mes]
-                kms   = [float(r["km_rodados"] or 0) for r in hist_mes if r["km_rodados"] > 0]
-                lucros = [float(r["lucro_liquido_real"] or 0) for r in hist_mes]
-                custos = [float((r["custo_variavel_direto"] or 0) + (r["custo_fixo_rateado"] or 0)) for r in hist_mes]
+                fats  = [float(r["faturamento_bruto"] or 0) for r in hist_mes if float(r["faturamento_bruto"] or 0) > 0]
+                kms   = [float(r["km_rodados"] or 0) for r in hist_mes if r["km_rodados"] and r["km_rodados"] > 0]
+                lucros = [float(r["lucro_liquido_real"] or 0) for r in hist_mes if float(r["faturamento_bruto"] or 0) > 0]
+                custos = [float((r["custo_variavel_direto"] or 0) + (r["custo_fixo_rateado"] or 0)) for r in hist_mes if float(r["faturamento_bruto"] or 0) > 0]
 
-                media_fat_dia   = sum(fats)   / len(fats)
-                media_km_dia    = sum(kms)    / len(kms)   if kms   else 0.0
-                media_lucro_dia = sum(lucros) / len(lucros)
-                media_custo_dia = sum(custos) / len(custos)
-                qtd_turnos      = len(hist_mes)
+                media_fat_dia   = sum(fats)   / len(fats)   if fats   else 0.0
+                media_km_dia    = sum(kms)    / len(kms)    if kms    else 0.0
+                media_lucro_dia = sum(lucros) / len(lucros) if lucros else 0.0
+                media_custo_dia = sum(custos) / len(custos) if custos else 0.0
+                qtd_turnos      = len(hist_mes)  # contagem real inclui os zerados para informação
 
-                # Melhor e pior turno do histórico
-                melhor_fat = max(fats)
-                pior_fat   = min(fats)
+                # Melhor e pior turno do histórico (apenas turnos com faturamento > 0)
+                melhor_fat = max(fats) if fats else 0.0
+                pior_fat   = min(fats) if fats else 0.0
 
                 # Tendência: compara média dos últimos 3 vs 3 anteriores (quando há ≥6)
                 tendencia_str = ""
@@ -373,7 +373,7 @@ class ProfileService:
                 if custo_liq > 0:
                     cmp = custo_liq / litros
                     if litros >= _LIMIAR_CMP_L:
-                        cmp_str = f"  ·  CMP  *R$ {float(cmp):.3f}/L*  ·  total R$ {float(custo_liq):.2f}"
+                        cmp_str = f"  ·  CMP  *{_fmt_brl(float(cmp))}/L*  ·  total {_fmt_brl(float(custo_liq))}"
                     else:
                         cmp_str = f"  ·  R$ {float(custo_liq):.2f} total — _reabasteça em breve_"
                 else:
@@ -451,7 +451,7 @@ class ProfileService:
                 secao_turno_ativo = (
                     f"{status_emoji}  *TURNO EM ANDAMENTO* \n"
                     f"• Início:  *{inicio.strftime('%H:%M')}*  ·  Duração: *{tempo_str}*\n"
-                    f"• Corridas:  *{corridas}*  ·  Faturado:  *{_fmt_brl(fat_p)}* {ritmo_emoji}\n"
+                    f"• Faturado:  *{_fmt_brl(fat_p)}* {ritmo_emoji}\n"
                     f"• Custos no turno:  *{_fmt_brl(desp_p)}*  ·  Lucro parcial:  *{_fmt_brl(lucro_p)}*\n"
                     + (f"• Ritmo:  *{_fmt_brl(fat_por_hora)}/h*  (meta ≈ {_fmt_brl(meta_hora_equiv)}/h)\n" if fat_por_hora > 0 else "")
                     + f"\n"

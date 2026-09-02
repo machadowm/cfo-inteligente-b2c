@@ -876,6 +876,9 @@ class ParametrosService:
                 nome_despesa = "Parcela Financiamento"
             elif locadora_lower in ("proprietario", "quitado"):
                 nome_despesa = "Custo Veículo Próprio"
+            elif locadora_lower in ("alugado", "aluguel"):
+                # Genérico: motorista informou o tipo em vez do nome da locadora
+                nome_despesa = "Aluguel Veículo"
             else:
                 # Locadora real: "Aluguel Zarp", "Aluguel Movida", etc.
                 nome_despesa = f"Aluguel {locadora.strip().title()}"

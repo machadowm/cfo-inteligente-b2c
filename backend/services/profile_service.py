@@ -262,7 +262,7 @@ class ProfileService:
             dias_uteis   = int(m["dias_uteis_mes"] or 26)
             piso_km      = float(m["piso_ganho_km"])
             piso_hora    = float(m["piso_ganho_hora"])
-            meta_diaria  = (meta_mensal / Decimal(str(dias_uteis))).quantize(Decimal("0.01"))
+            meta_diaria  = (meta_mensal / Decimal(str(dias_uteis))).quantize(Decimal("0.01")) if dias_uteis > 0 else meta_mensal
 
             # ── Uso Pessoal do mês ─────────────────────────────────────────────
             rec_pessoal  = float(uso_pessoal_row["rec_pessoal"]  or 0)
@@ -275,6 +275,7 @@ class ProfileService:
             # ── Contrato do veículo ────────────────────────────────────────────
             aluguel_sem      = float(v["custo_aluguel_semanal"] or 1020.85) if v else 1020.85
             _dias_sem        = int(v["dias_trabalho_semana"] or 6) if v else 6
+            _dias_sem        = _dias_sem if _dias_sem > 0 else 6
             aluguel_dia      = aluguel_sem / _dias_sem
             _locadora        = (v["locadora"] or "").lower() if v else ""
             _is_proprio      = _locadora in ("proprietario", "quitado", "financiado")
@@ -533,7 +534,7 @@ class ProfileService:
                             tag_venc = "  ⏰ _vence amanhã_"
                     else:
                         dias_venc = list(r["dias_vencimento"] or [1])
-                        qtd_v     = len(dias_venc)
+                        qtd_v     = len(dias_venc) if dias_venc else 1
                         if hoje_dia in dias_venc:
                             tag_venc = "  🚨 *VENCE HOJE*"
                         elif amanha_dia in dias_venc:

@@ -66,60 +66,217 @@ def converter_para_float(texto_valor: str) -> float:
         return 0.0
 
 def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
-    """Gera o status parcial do turno atualizado com as regras contratuais e do DRE."""
-    dias_semana   = int(info.get("dias_trabalho_semana") or 6)
-    aluguel_diario = info["custo_aluguel_semanal"] / dias_semana
-    meta_diaria = info["meta_mensal"] / info["dias_uteis"]
-    piso_km   = info.get("piso_ganho_km",   2.0)
-    piso_hora = info.get("piso_ganho_hora", 30.0)
-    piso_km_fmt   = f"{piso_km:.2f}".replace(".", ",")
-    piso_hora_fmt = f"{piso_hora:.2f}".replace(".", ",")
+    """Gera o status em tempo real do turno ativo com todos os indicadores disponíveis.
 
-    locadora_lower = (info.get("locadora") or "").lower()
-    is_proprio = locadora_lower in ("proprietario", "quitado", "financiado")
+    Seções:
+      1. Cabeçalho — veículo, status, duração, pausa
+      2. DRE Parcial — faturamento, despesas, lucro e ritmo atual
+      3. Contrato — aluguel, franquia, meta diária e pisos
+      4. Turnos anteriores do dia (duplo turno)
+      5. Histórico recente — médias e tendência
+      6. Alertas — manutenção e vencimentos de despesas hoje/amanhã
+    """
+    import json as _json
+    import pytz as _pytz
+    from datetime import datetime as _dt
 
-    if is_proprio:
-        # Próprio/financiado: não tem franquia nem km excedente contratual
+    _tz_br = _pytz.timezone("America/Sao_Paulo")
+
+    # ── Tempo de turno ─────────────────────────────────────────────────────────
+    dt_inicio = info["dt_inicio_obj"]
+    if hasattr(dt_inicio, "astimezone"):
+        dt_inicio = dt_inicio.astimezone(_tz_br)
+    agora_br       = _dt.now(_tz_br)
+    minutos_turno  = int((agora_br - dt_inicio).total_seconds() / 60)
+    h_t = minutos_turno // 60
+    m_t = minutos_turno % 60
+    tempo_str = f"{h_t}h{m_t:02d}min" if h_t else f"{m_t}min"
+
+    # ── Configurações e metas ──────────────────────────────────────────────────
+    dias_semana  = int(info.get("dias_trabalho_semana") or 6)
+    meta_mensal  = info["meta_mensal"]
+    dias_uteis   = info["dias_uteis"]
+    meta_diaria  = meta_mensal / dias_uteis if dias_uteis > 0 else 0.0
+    piso_km      = info.get("piso_ganho_km",   2.0)
+    piso_hora    = info.get("piso_ganho_hora", 30.0)
+    aluguel_sem  = info["custo_aluguel_semanal"]
+    aluguel_dia  = aluguel_sem / dias_semana if dias_semana > 0 else 0.0
+
+    _locadora_low = (info.get("locadora") or "").lower()
+    _is_proprio   = _locadora_low in ("proprietario", "quitado", "financiado")
+
+    # ── Valores do turno ──────────────────────────────────────────────────────
+    fat_p       = info.get("fat_parcial",      0.0)
+    desp_p      = info.get("desp_parcial",     0.0)
+    lucro_p     = fat_p - desp_p
+    abastecido  = info.get("total_abastecido", 0.0)
+    litros      = info.get("litros_abastecidos", 0.0)
+    corridas    = int(info.get("qtd_corridas", 0))
+    turno_status = info.get("turno_status", "em_andamento")
+
+    status_emoji = "⏸" if turno_status == "em_pausa" else "🟢"
+    status_label = "_em pausa_" if turno_status == "em_pausa" else "em andamento"
+
+    # Ticket médio por corrida
+    ticket_medio = fat_p / corridas if corridas > 0 else 0.0
+
+    # Ritmo em R$/hora e comparação com meta horária implícita (meta_diaria / 8h)
+    fat_por_hora    = (fat_p / (minutos_turno / 60)) if minutos_turno >= 15 else 0.0
+    meta_hora_equiv = meta_diaria / 8.0
+    if fat_por_hora > 0:
+        if fat_por_hora >= meta_hora_equiv:
+            ritmo_emoji = "🔥"
+            ritmo_label = "acima da meta"
+        else:
+            deficit_hora = meta_hora_equiv - fat_por_hora
+            ritmo_emoji  = "⚠️"
+            ritmo_label  = f"faltam R$ {deficit_hora:.2f}/h p/ meta"
+        linha_ritmo = f"• Ritmo:  *R$ {fat_por_hora:.2f}/h*  {ritmo_emoji}  _{ritmo_label}_\n"
+    else:
+        linha_ritmo = ""
+
+    # Projeção de fechamento: quanto vai faturar se mantiver o ritmo até 8h de trabalho
+    projecao_turno = fat_por_hora * 8.0 if fat_por_hora > 0 else 0.0
+    linha_projecao = (
+        f"• Projeção (8h de ritmo):  *R$ {projecao_turno:.2f}*"
+        + ("  ✅" if projecao_turno >= meta_diaria else f"  (meta R$ {meta_diaria:.2f})")
+        + "\n"
+        if fat_por_hora > 0 else ""
+    )
+
+    # ── Cabeçalho ──────────────────────────────────────────────────────────────
+    modelo = info.get("modelo", "")
+    placa  = info.get("placa",  "")
+    cab = (
+        f"{status_emoji}  *STATUS DO TURNO — {info['data_turno']}*  ({status_label})\n\n"
+        f"• Veículo:  *{modelo}*  ({placa})\n"
+        f"• Início:  *{info['data_inicio_hora']}*  ·  Duração: *{tempo_str}*\n"
+        f"• KM Inicial:  *{info['km_inicial']:,.1f} km*\n".replace(",", ".")
+    )
+
+    # ── DRE Parcial ────────────────────────────────────────────────────────────
+    lucro_sinal = "💰" if lucro_p >= 0 else "🔴"
+    dre_parcial = (
+        f"\n📊  *DRE PARCIAL* \n"
+        f"• Corridas:  *{corridas}*"
+        + (f"  ·  Ticket médio: *R$ {ticket_medio:.2f}*" if corridas > 0 else "")
+        + "\n"
+        f"• (+) Faturado:  *R$ {fat_p:.2f}*\n"
+        f"• (-) Despesas no turno:  *R$ {desp_p:.2f}*"
+        + (f"  _(combustível: R$ {abastecido:.2f}" + (f" · {litros:.1f} L" if litros > 0 else "") + ")_" if abastecido > 0 else "")
+        + "\n"
+        + f"{lucro_sinal}  *Lucro Parcial:  R$ {lucro_p:.2f}*\n"
+        + linha_ritmo
+        + linha_projecao
+    )
+
+    # ── Contrato ───────────────────────────────────────────────────────────────
+    if _is_proprio:
         linhas_contrato = (
-            f"• Escala:  *{info['escala_trabalho']}* \n"
-            f"• Custo Diário (pro-rata):  *R$ {aluguel_diario:.2f}*\n"
+            f"• Escala:  *{info['escala_trabalho']}*\n"
+            f"• Custo Diário (pro-rata):  *R$ {aluguel_dia:.2f}*\n"
         )
     else:
-        franquia_diaria = info["franquia_km_semanal"] / 7.0
+        franquia_dia = info["franquia_km_semanal"] / 7.0
+        km_exc       = info.get("valor_km_excedente", 0.75)
         linhas_contrato = (
-            f"• Escala:  *{info['escala_trabalho']}* \n"
-            f"• Aluguel Diário:  *R$ {aluguel_diario:.2f}*  (semanal R$ {info['custo_aluguel_semanal']:.2f} / {dias_semana}d)\n"
-            f"• Franquia Recomendada:  *{franquia_diaria:.0f} km/dia* \n"
-            f"• KM Excedente:  *R$ {info['valor_km_excedente']:.2f}/km* \n"
+            f"• Escala:  *{info['escala_trabalho']}*\n"
+            f"• Aluguel Diário:  *R$ {aluguel_dia:.2f}*  (R$ {aluguel_sem:.2f}/sem ÷ {dias_semana}d)\n"
+            f"• Franquia Hoje:  *{franquia_dia:.0f} km/dia*"
+            + (f"  ·  excedente *R$ {km_exc:.2f}/km*" if km_exc > 0 else "")
+            + "\n"
         )
 
-    # ── Bloco de turnos anteriores do mesmo dia (duplo turno) ────────────────
-    turnos_anteriores = info.get("turnos_anteriores_dia")
-    secao_turnos_anteriores = ""
-    if turnos_anteriores and turnos_anteriores.get("qtd", 0) > 0:
-        t = turnos_anteriores
-        lucro_ant = t["fat"] - t["c_var"] - t["c_fixo"]
-        sinal = "💰" if lucro_ant >= 0 else "🔴"
-        secao_turnos_anteriores = (
-            f"📋  *TURNOS ANTERIORES HOJE ({t['qtd']}x)* \n"
-            f"• Faturamento:  *R$ {t['fat']:.2f}* \n"
-            f"• Custos Variáveis:  *R$ {t['c_var']:.2f}* \n"
-            f"• Custo Fixo (cobrado no 1º turno):  *R$ {t['c_fixo']:.2f}* \n"
-            f"{sinal}  Lucro Acumulado:  *R$ {lucro_ant:.2f}* \n\n"
+    contrato_bloco = (
+        f"\n⚙️  *CONTRATO ({info['locadora']})* \n"
+        + linhas_contrato
+        + f"\n🎯  *METAS* \n"
+        f"• Meta Diária:  *R$ {meta_diaria:.2f}*  · Progresso:  *R$ {fat_p:.2f}*"
+        + (f"  ({fat_p / meta_diaria * 100:.0f}%)" if meta_diaria > 0 else "")
+        + "\n"
+        f"• Piso:  *R$ {piso_km:.2f}/km*  |  *R$ {piso_hora:.2f}/h*\n"
+    )
+
+    # ── Duplo turno ───────────────────────────────────────────────────────────
+    secao_anteriores = ""
+    turnos_ant = info.get("turnos_anteriores_dia")
+    if turnos_ant and turnos_ant.get("qtd", 0) > 0:
+        t       = turnos_ant
+        lucro_a = t["fat"] - t["c_var"] - t["c_fixo"]
+        sinal_a = "💰" if lucro_a >= 0 else "🔴"
+        km_str  = f"  ·  KM: *{t['km_total']:.0f} km*" if t.get("km_total", 0) > 0 else ""
+        secao_anteriores = (
+            f"\n📋  *TURNOS ANTERIORES HOJE ({t['qtd']}×)* \n"
+            f"• Faturamento:  *R$ {t['fat']:.2f}*{km_str}\n"
+            f"• Custos Variáveis:  *R$ {t['c_var']:.2f}*\n"
+            f"• Custo Fixo (1× cobrado):  *R$ {t['c_fixo']:.2f}*\n"
+            f"{sinal_a}  Lucro Acumulado:  *R$ {lucro_a:.2f}*\n"
+            f"\n• *Total do dia até agora: R$ {t['fat'] + fat_p:.2f}*  (faturado acumulado)\n"
         )
+
+    # ── Histórico recente ─────────────────────────────────────────────────────
+    secao_hist = ""
+    hist_rows = info.get("hist_rows", [])
+    if hist_rows:
+        fats   = [float(r.get("faturamento_bruto") or 0) for r in hist_rows]
+        lucros = [float(r.get("lucro_liquido_real") or 0) for r in hist_rows]
+        media_fat   = sum(fats)   / len(fats)
+        media_lucro = sum(lucros) / len(lucros)
+
+        tendencia = ""
+        if len(fats) >= 4:
+            rec = sum(fats[:2]) / 2
+            ant = sum(fats[2:4]) / 2
+            dp  = (rec - ant) / ant * 100 if ant > 0 else 0
+            if dp >= 5:
+                tendencia = f"  📈 +{dp:.0f}%"
+            elif dp <= -5:
+                tendencia = f"  📉 {dp:.0f}%"
+            else:
+                tendencia = "  ➡️ estável"
+
+        secao_hist = (
+            f"\n📈  *ÚLTIMOS {len(hist_rows)} TURNOS* \n"
+            f"• Média faturamento:  *R$ {media_fat:.2f}*{tendencia}\n"
+            f"• Média lucro:  *R$ {media_lucro:.2f}*\n"
+        )
+
+    # ── Alertas de manutenção ─────────────────────────────────────────────────
+    secao_manut = ""
+    alertas = info.get("alertas_manut", [])
+    if alertas:
+        secao_manut = (
+            f"\n🔧  *ALERTAS DE MANUTENÇÃO* \n"
+            + "\n".join(f"• {a}" for a in alertas)
+            + "\n"
+        )
+
+    # ── Despesas vencendo hoje/amanhã ─────────────────────────────────────────
+    secao_desp_venc = ""
+    desp_venc = info.get("desp_vencendo", [])
+    if desp_venc:
+        import datetime as _dt_mod
+        _hoje_dia   = _dt_mod.date.today().day
+        linhas_v    = []
+        for d in desp_venc:
+            dia_v  = int(d.get("dia_vencimento") or 1)
+            nome_d = d.get("nome", "")
+            val_d  = float(d.get("valor_mensal") or 0)
+            saldo_d = float(d.get("saldo_atual") or 0)
+            tag    = "🚨 *HOJE*" if dia_v == _hoje_dia else "⏰ _amanhã_"
+            cobertura = "✅" if saldo_d >= val_d else ("⚠️ parcial" if saldo_d > 0 else "❌ sem saldo")
+            linhas_v.append(f"• {tag}  {nome_d}:  R$ {val_d:.2f}  ({cobertura})")
+        secao_desp_venc = "\n📅  *VENCIMENTOS PRÓXIMOS* \n" + "\n".join(linhas_v) + "\n"
 
     return (
-        f"📥  *DADOS PARCIAIS DO TURNO DE HOJE ({info['data_turno']})* \n\n"
-        f"• Início:  *{info['data_inicio_hora']}* \n"
-        f"• KM Inicial:  *{info['km_inicial']:,.1f} km* \n".replace(",", ".") +
-        f"• Combustível Lançado:  *R$ {info['total_abastecido']:.2f}* \n\n"
-        + secao_turnos_anteriores
-        + f"⚙  *CUSTOS DO CONTRATO ({info['locadora']})* \n\n"
-        + linhas_contrato
-        + f"\n🎯  *METAS DE HOJE* \n\n"
-        f"• Meta Diária:  *R$ {meta_diaria:.2f}* \n"
-        f"• Piso Indicado:  *R$ {piso_km_fmt}/km*  |  *R$ {piso_hora_fmt}/h* \n\n"
-        f"🔮 Para encerrar a sua jornada e emitir o DRE, envie:  *'fechar [KM final]'"
+        cab
+        + dre_parcial
+        + contrato_bloco
+        + secao_anteriores
+        + secao_hist
+        + secao_manut
+        + secao_desp_venc
+        + f"\n🔮  _Para encerrar a jornada:  *fechar [KM final]*_"
     )
 
 def _formatar_sugestao_recalibracao(s: dict) -> str:
@@ -1243,12 +1400,15 @@ class OrchestratorService:
                 async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                     turno_ativo = await conn.fetchrow(
                         """
-                        SELECT t.id, t.km_inicial, t.data_inicio,
+                        SELECT t.id, t.km_inicial, t.data_inicio, t.status,
+                               v.id AS veiculo_id,
+                               v.modelo, v.placa,
                                v.locadora, v.custo_aluguel_semanal, v.franquia_km_semanal,
                                v.valor_km_excedente, v.escala_trabalho,
                                COALESCE(v.dias_trabalho_semana, 6) AS dias_trabalho_semana,
+                               v.estoque_financeiro, v.tipo_combustivel,
                                m.meta_mensal_faturamento, m.dias_uteis_mes,
-                               COALESCE(m.piso_ganho_km, 2.0) AS piso_ganho_km,
+                               COALESCE(m.piso_ganho_km,   2.0)  AS piso_ganho_km,
                                COALESCE(m.piso_ganho_hora, 30.0) AS piso_ganho_hora
                         FROM public.turnos t
                         JOIN public.veiculos v ON v.id = t.veiculo_id
@@ -1258,21 +1418,32 @@ class OrchestratorService:
                         """, motorista_id
                     )
                     if turno_ativo:
-                        turno_id = str(turno_ativo["id"])
-                        dt_inicio = turno_ativo["data_inicio"]
-                        tx = await conn.fetchrow(
+                        turno_id   = str(turno_ativo["id"])
+                        veiculo_id = str(turno_ativo["veiculo_id"])
+                        dt_inicio  = turno_ativo["data_inicio"]
+
+                        # Transações do turno: faturamento, despesas, combustível, corridas
+                        tx_turno = await conn.fetchrow(
                             """
-                            SELECT COALESCE(SUM(valor), 0.00) as abastecido FROM public.transacoes
-                            WHERE motorista_id = $1::uuid AND turno_id = $2::uuid AND categoria = 'combustivel' AND estornado = FALSE;
+                            SELECT
+                                COALESCE(SUM(valor) FILTER (WHERE tipo_movimentacao = 'receita'),               0) AS fat_parcial,
+                                COALESCE(SUM(valor) FILTER (WHERE tipo_movimentacao = 'despesa'),               0) AS desp_parcial,
+                                COALESCE(SUM(valor) FILTER (WHERE categoria = 'combustivel'),                   0) AS total_abastecido,
+                                COALESCE(SUM(litros_abastecidos) FILTER (WHERE categoria = 'combustivel'),      0) AS litros_abastecidos,
+                                COUNT(id)   FILTER (WHERE tipo_movimentacao = 'receita')                           AS qtd_corridas
+                            FROM public.transacoes
+                            WHERE motorista_id = $1::uuid AND turno_id = $2::uuid AND estornado = FALSE;
                             """, motorista_id, turno_id
                         )
-                        # FIX #8 — agrega fechamentos anteriores do mesmo dia (duplo turno)
+
+                        # Duplo turno: fechamentos anteriores do mesmo dia
                         ant = await conn.fetchrow(
                             """
-                            SELECT COUNT(*)                              AS qtd,
-                                   COALESCE(SUM(faturamento_bruto), 0)  AS fat,
-                                   COALESCE(SUM(custo_variavel_direto), 0) AS c_var,
-                                   COALESCE(SUM(custo_fixo_rateado), 0) AS c_fixo
+                            SELECT COUNT(*)                                 AS qtd,
+                                   COALESCE(SUM(faturamento_bruto),      0) AS fat,
+                                   COALESCE(SUM(custo_variavel_direto),  0) AS c_var,
+                                   COALESCE(SUM(custo_fixo_rateado),     0) AS c_fixo,
+                                   COALESCE(SUM(km_rodados),             0) AS km_total
                             FROM public.fechamento_diario
                             WHERE motorista_id = $1::uuid
                               AND turno_id != $2::uuid
@@ -1282,33 +1453,110 @@ class OrchestratorService:
                         turnos_anteriores_dia = None
                         if ant and int(ant["qtd"] or 0) > 0:
                             turnos_anteriores_dia = {
-                                "qtd":   int(ant["qtd"]),
-                                "fat":   float(ant["fat"]),
-                                "c_var": float(ant["c_var"]),
-                                "c_fixo": float(ant["c_fixo"]),
+                                "qtd":      int(ant["qtd"]),
+                                "fat":      float(ant["fat"]),
+                                "c_var":    float(ant["c_var"]),
+                                "c_fixo":   float(ant["c_fixo"]),
+                                "km_total": float(ant["km_total"]),
                             }
+
+                        # Histórico: últimos 5 fechamentos para tendência e pisos
+                        hist_rows = await conn.fetch(
+                            """
+                            SELECT faturamento_bruto, km_rodados, lucro_liquido_real,
+                                   custo_variavel_direto + custo_fixo_rateado AS custo_total
+                            FROM public.fechamento_diario
+                            WHERE motorista_id = $1::uuid
+                            ORDER BY data_fechamento DESC LIMIT 5;
+                            """, motorista_id
+                        )
+
+                        # Alertas de manutenção do veículo ativo
+                        km_ult_row = await conn.fetchrow(
+                            """
+                            SELECT km_final FROM public.turnos
+                            WHERE veiculo_id = $1::uuid AND status = 'concluido'
+                              AND km_final IS NOT NULL
+                            ORDER BY data_fim DESC LIMIT 1;
+                            """, veiculo_id
+                        )
+                        alertas_manut = []
+                        if km_ult_row:
+                            km_ref = float(km_ult_row["km_final"])
+                            regras = await conn.fetch(
+                                """
+                                SELECT rm.tipo_servico, rm.intervalo_km, rm.aviso_previo_km,
+                                       COALESCE(MAX(hm.km_execucao), 0) AS ultimo_km
+                                FROM public.regras_manutencao rm
+                                LEFT JOIN public.historico_manutencao hm ON hm.regra_id = rm.id
+                                WHERE rm.veiculo_id = $1::uuid AND rm.ativo = TRUE
+                                GROUP BY rm.id, rm.tipo_servico, rm.intervalo_km, rm.aviso_previo_km;
+                                """, veiculo_id
+                            )
+                            for r in regras:
+                                ultimo  = float(r["ultimo_km"])
+                                proximo = ultimo + float(r["intervalo_km"])
+                                restante = proximo - km_ref
+                                if restante <= float(r["aviso_previo_km"]):
+                                    if restante <= 0:
+                                        alertas_manut.append(f"🔴 *{r['tipo_servico']}* — VENCIDA! ({abs(int(restante))} km atrasada)")
+                                    else:
+                                        alertas_manut.append(f"🟡 *{r['tipo_servico']}* — faltam *{int(restante)} km*")
+
+                        # Despesas com vencimento hoje
+                        import datetime as _datetime_mod
+                        _hoje_dia = _datetime_mod.date.today().day
+                        _amanha_dia = (_datetime_mod.date.today() + _datetime_mod.timedelta(days=1)).day
+                        desp_venc = await conn.fetch(
+                            """
+                            SELECT dfm.nome, dfm.valor_mensal,
+                                   COALESCE(cp.saldo_atual, 0) AS saldo_atual,
+                                   venc.dia AS dia_vencimento
+                            FROM public.despesas_fixas_mensais dfm
+                            LEFT JOIN public.caixas_provisao cp ON cp.id = dfm.caixa_id
+                            JOIN LATERAL UNNEST(dfm.dias_vencimento) AS venc(dia) ON TRUE
+                            WHERE dfm.motorista_id = $1::uuid AND dfm.ativo = TRUE
+                              AND venc.dia = ANY($2::int[]);
+                            """, motorista_id, [_hoje_dia, _amanha_dia]
+                        )
+
+                        _locadora_low = (turno_ativo["locadora"] or "").lower()
+                        _is_proprio   = _locadora_low in ("proprietario", "quitado", "financiado")
                         info_turno = {
-                            "data_turno": dt_inicio.strftime('%d/%m/%Y'),
-                            "data_inicio_hora": dt_inicio.strftime('%H:%M'),
-                            "km_inicial": float(turno_ativo["km_inicial"]),
-                            "locadora": turno_ativo["locadora"] or "Localiza Zarp",
+                            "turno_status":         turno_ativo["status"],
+                            "data_turno":           dt_inicio.strftime('%d/%m/%Y'),
+                            "data_inicio_hora":     dt_inicio.strftime('%H:%M'),
+                            "dt_inicio_obj":        dt_inicio,
+                            "km_inicial":           float(turno_ativo["km_inicial"]),
+                            "modelo":               turno_ativo["modelo"] or "",
+                            "placa":                turno_ativo["placa"]  or "",
+                            "locadora":             turno_ativo["locadora"] or "Localiza Zarp",
                             "custo_aluguel_semanal": float(turno_ativo["custo_aluguel_semanal"] or 1020.85),
-                            "dias_trabalho_semana": int(turno_ativo["dias_trabalho_semana"] or 6),
-                            "franquia_km_semanal": float(turno_ativo["franquia_km_semanal"] or (
-                                0.0 if (turno_ativo["locadora"] or "").lower() in ("proprietario", "quitado", "financiado")
-                                else 1505.0
-                            )),
-                            "valor_km_excedente": float(turno_ativo["valor_km_excedente"] or (
-                                0.0 if (turno_ativo["locadora"] or "").lower() in ("proprietario", "quitado", "financiado")
-                                else 0.75
-                            )),
-                            "escala_trabalho": turno_ativo["escala_trabalho"] or "De quarta a segunda (6 dias)",
-                            "meta_mensal": float(turno_ativo["meta_mensal_faturamento"] or 12000.0),
-                            "dias_uteis": int(turno_ativo["dias_uteis_mes"] or 26),
-                            "piso_ganho_km":   float(turno_ativo["piso_ganho_km"]),
-                            "piso_ganho_hora": float(turno_ativo["piso_ganho_hora"]),
-                            "total_abastecido": float(tx["abastecido"]),
+                            "dias_trabalho_semana":  int(turno_ativo["dias_trabalho_semana"] or 6),
+                            "franquia_km_semanal":   float(turno_ativo["franquia_km_semanal"] or (0.0 if _is_proprio else 1505.0)),
+                            "valor_km_excedente":    float(turno_ativo["valor_km_excedente"]  or (0.0 if _is_proprio else 0.75)),
+                            "escala_trabalho":       turno_ativo["escala_trabalho"] or "De quarta a segunda (6 dias)",
+                            "meta_mensal":           float(turno_ativo["meta_mensal_faturamento"] or 12000.0),
+                            "dias_uteis":            int(turno_ativo["dias_uteis_mes"] or 26),
+                            "piso_ganho_km":         float(turno_ativo["piso_ganho_km"]),
+                            "piso_ganho_hora":       float(turno_ativo["piso_ganho_hora"]),
+                            # Transações do turno
+                            "fat_parcial":           float(tx_turno["fat_parcial"]        or 0),
+                            "desp_parcial":          float(tx_turno["desp_parcial"]       or 0),
+                            "total_abastecido":      float(tx_turno["total_abastecido"]   or 0),
+                            "litros_abastecidos":    float(tx_turno["litros_abastecidos"] or 0),
+                            "qtd_corridas":          int(tx_turno["qtd_corridas"]         or 0),
+                            # Contexto dia
                             "turnos_anteriores_dia": turnos_anteriores_dia,
+                            # Histórico
+                            "hist_rows":             [dict(r) for r in hist_rows],
+                            # Manutenção
+                            "alertas_manut":         alertas_manut,
+                            # Despesas vencendo
+                            "desp_vencendo":         [dict(r) for r in desp_venc],
+                            # Estoque JSONB
+                            "estoque_financeiro":    turno_ativo["estoque_financeiro"],
+                            "tipo_combustivel":      turno_ativo["tipo_combustivel"] or "",
                         }
                         resposta = formatar_relatorio_parcial(motorista["nome"], info_turno)
                     else:

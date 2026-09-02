@@ -698,15 +698,31 @@ class ParametrosService:
                 mensal     = float(r["valor_mensal"])
                 diario     = float(r["valor_pro_rata_diario"])
                 dias_venc  = list(r["dias_vencimento"] or [1])
-                venc_str   = " e ".join(f"*{d}*" for d in dias_venc)
+                qtd_v      = len(dias_venc)
                 alertas    = []
                 if hoje_dia in dias_venc:
                     alertas.append("⚠️ *VENCE HOJE!*")
                 if amanha_dia in dias_venc:
                     alertas.append("⏰ _vence amanhã_")
                 alerta = ("  " + "  ".join(alertas)) if alertas else ""
+
+                # Exibição do calendário de vencimentos:
+                # 1 vencimento  → "vence dia *5*"
+                # 2–6 vencimentos → "vence dias *5* e *20*"
+                # 7+ vencimentos  → "vence dias *1* a *13*  (13×/mês)"  (compacto)
+                if qtd_v == 1:
+                    venc_str = f"vence dia  *{dias_venc[0]}*"
+                elif qtd_v <= 6:
+                    venc_str = "vence dias  " + " e ".join(f"*{d}*" for d in dias_venc)
+                else:
+                    parcela = mensal / qtd_v
+                    venc_str = (
+                        f"vence dias  *{dias_venc[0]}* a *{dias_venc[-1]}*  "
+                        f"({qtd_v}× por mês · ≈ R$ {parcela:.2f}/parcela)"
+                    )
+
                 linhas.append(
-                    f"• {nome}:  *R$ {mensal:.2f}/mês*  (≈ R$ {diario:.2f}/dia)  📅 vence dia  {venc_str}{alerta}"
+                    f"• {nome}:  *R$ {mensal:.2f}/mês*  (≈ R$ {diario:.2f}/dia)  📅 {venc_str}{alerta}"
                 )
             linhas.append(f"\n*Total pro-rata diário: R$ {total_pro_rata:.2f}*")
             linhas.append(

@@ -1,22 +1,32 @@
 """
-ReminderService — Lembretes proativos de turno via WhatsApp.
+ReminderService — Lembretes proativos de turno e automação de caixa via WhatsApp.
 
-Executa dois gatilhos periódicos sem dependências externas (asyncio nativo):
+Executa rotinas periódicas sem dependências externas (asyncio nativo):
 
-  • PAUSA_PROLONGADA : turno em 'em_pausa' há > 90 min sem interação recente.
-  • TURNO_ZUMBI     : turno 'em_andamento' aberto há > 12 h sem interação recente.
+  • PAUSA_PROLONGADA    : turno em 'em_pausa' há > 90 min sem interação recente.
+  • TURNO_ZUMBI        : turno 'em_andamento' aberto há > 12 h sem interação recente.
+  • VENCIMENTOS        : notifica sobre despesas que vencem hoje/amanhã com UX
+                         adaptativa ao saldo real da caixinha de provisão.
+  • BAIXAS_AUTOMATICAS : executa baixa automática de caixas 1 dia após o vencimento.
 
-Idempotência: cada lembrete grava uma chave Redis com TTL igual ao intervalo mínimo
-entre reenvios, evitando spam mesmo em múltiplos workers ou reinicializações.
+Idempotência: cada evento grava uma chave Redis com TTL, evitando spam em múltiplos
+workers ou reinicializações.
 
 Bypass de interação: se o motorista enviou qualquer mensagem nos últimos 15 minutos
-(detectado pela chave buffer_msg: no Redis), o lembrete é suprimido.
+(detectado pela chave last_seen: no Redis), os lembretes de turno são suprimidos.
+
+Calendário imune a timezone drift: todos os cálculos de data e de teto de mês
+(último dia do mês, clamp de dia 29/30/31) são realizados em Python com
+pytz/America/Sao_Paulo e injetados como parâmetros escalares na query SQL.
+Isso evita que funções nativas do PostgreSQL (DATE_TRUNC, CURRENT_DATE) operem
+em UTC e produzam resultados divergentes entre 21h e 23h59 no fuso de Brasília.
 """
 
 import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 
 import httpx
 import pytz
@@ -30,14 +40,14 @@ EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://cfo_evolution:8080")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "evolution_secret_key")
 
 # ── Configuração de limites ───────────────────────────────────────────────────
-_PAUSA_LIMITE_MIN       = 90        # minutos em pausa antes de lembrar
-_ZUMBI_LIMITE_H         = 12        # horas de turno aberto antes de lembrar
-_BYPASS_INTERACAO_MIN   = 15        # ignora lembrete se motorista interagiu neste intervalo
-_TTL_REMINDER_PAUSA_S   = 60 * 60   # reenvio mínimo: 1 h
-_TTL_REMINDER_ZUMBI_S   = 60 * 120  # reenvio mínimo: 2 h
+_PAUSA_LIMITE_MIN       = 90            # minutos em pausa antes de lembrar
+_ZUMBI_LIMITE_H         = 12            # horas de turno aberto antes de lembrar
+_BYPASS_INTERACAO_MIN   = 15            # ignora lembrete se motorista interagiu neste intervalo
+_TTL_REMINDER_PAUSA_S   = 60 * 60       # reenvio mínimo: 1 h
+_TTL_REMINDER_ZUMBI_S   = 60 * 120      # reenvio mínimo: 2 h
 _TTL_REMINDER_VENC_S    = 60 * 60 * 20  # vencimento: reenvio mínimo 20 h (1× por dia)
 _TTL_BAIXA_AUTO_S       = 60 * 60 * 24 * 32  # baixa automática: idempotência de ~1 mês
-_INTERVALO_LOOP_S       = 300       # varredura a cada 5 min
+_INTERVALO_LOOP_S       = 300           # varredura a cada 5 min
 
 
 async def _enviar(remote_jid: str, texto: str) -> None:
@@ -68,12 +78,8 @@ async def _marcar_lembrado(tenant_id: str, tipo: str, ttl: int) -> None:
 
 
 async def _interagiu_recentemente(tenant_id: str) -> bool:
-    """Verifica se existe buffer de mensagem ativo (motorista interagiu recentemente)."""
+    """Verifica se existe chave last_seen: ativa (motorista interagiu recentemente)."""
     client = await RedisFSMService.get_client()
-    # buffer_msg: tem TTL = janela de debouncing (4 s por default).
-    # Para bypass de lembrete usamos a chave de erros como proxy de atividade recente —
-    # ela tem TTL de 15 min e é resetada em toda interação bem-sucedida.
-    # Alternativa mais direta: chave last_seen: gravada abaixo.
     return await client.exists(f"last_seen:{tenant_id}") == 1
 
 
@@ -99,18 +105,18 @@ async def _processar_pausas_prolongadas() -> None:
         return
 
     for row in rows:
-        tenant_id = row["telefone"]
+        tenant_id    = row["telefone"]
         motorista_id = row["motorista_id"]
-        minutos = int(row["minutos_pausa"])
-        remote_jid = f"{tenant_id}@s.whatsapp.net"
+        minutos      = int(row["minutos_pausa"])
+        remote_jid   = f"{tenant_id}@s.whatsapp.net"
 
         if await _interagiu_recentemente(tenant_id):
             continue
         if await _ja_foi_lembrado(tenant_id, "pausa"):
             continue
 
-        horas = minutos // 60
-        mins  = minutos % 60
+        horas     = minutos // 60
+        mins      = minutos % 60
         tempo_str = f"{horas}h{mins:02d}min" if horas else f"{mins}min"
 
         texto = (
@@ -146,10 +152,10 @@ async def _processar_turnos_zumbi() -> None:
         return
 
     for row in rows:
-        tenant_id = row["telefone"]
+        tenant_id    = row["telefone"]
         motorista_id = row["motorista_id"]
-        horas = round(float(row["horas_abertas"]), 1)
-        remote_jid = f"{tenant_id}@s.whatsapp.net"
+        horas        = round(float(row["horas_abertas"]), 1)
+        remote_jid   = f"{tenant_id}@s.whatsapp.net"
 
         if await _interagiu_recentemente(tenant_id):
             continue
@@ -175,42 +181,55 @@ async def _processar_vencimentos_despesas() -> None:
     Suporta múltiplos vencimentos por despesa (dias_vencimento INTEGER[]).
     Cada elemento do array gera uma notificação independente, controlada por
     chave Redis com TTL de 20 h: reminder:venc:{tenant}:{despesa_id}:{dia}:{data}.
+
+    Calendário calculado integralmente em Python (pytz/America/Sao_Paulo) e
+    injetado na query como parâmetros escalares, eliminando a dependência de
+    DATE_TRUNC/CURRENT_DATE no Postgres e o risco de timezone drift.
+
+    UX adaptativa: lê o saldo real da caixinha vinculada e ramifica a mensagem
+    em três estados — saldo suficiente, saldo parcial e caixinha zerada — para
+    evitar que o sistema sugira retiradas impossíveis ao motorista.
     """
     _tz = pytz.timezone("America/Sao_Paulo")
-    hoje = datetime.now(_tz).date()
+    hoje  = datetime.now(_tz).date()
     amanha = hoje + timedelta(days=1)
+
+    # Último dia do mês corrente calculado em Python — usado como teto de clamp
+    # para despesas com vencimento nos dias 29, 30 ou 31 (ex: fev. só tem 28/29)
     ultimo_dia_mes = (hoje.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    dias_alvo = {
-        min(hoje.day, ultimo_dia_mes.day),
-        min(amanha.day, ultimo_dia_mes.day),
-    }
+
+    # Dias de interesse: usamos os valores brutos (não clamped) aqui porque o
+    # LEAST no SQL já aplica o clamp ao comparar venc.dia.  Se usássemos os valores
+    # clamped no set Python, poderíamos descartar despesas com dia_vencimento > ultimo_dia
+    # que deveriam ser tratadas como vencendo no último dia do mês.
+    dias_alvo = {hoje.day, amanha.day}
 
     try:
         async with DatabaseService.get_connection() as conn:
-            # UNNEST expande o array — cada vencimento vira uma linha independente
+            # $1 = lista de dias alvo (hoje e amanhã, valores brutos)
+            # $2 = último dia do mês calculado em Python (teto do LEAST)
+            # LEFT JOIN com caixas_provisao para ler o saldo real e calibrar UX
             rows = await conn.fetch(
                 """
-                SELECT dfm.id::text          AS despesa_id,
+                SELECT dfm.id::text                    AS despesa_id,
                        dfm.nome,
                        dfm.valor_mensal,
-                       venc.dia             AS dia_vencimento,
-                       m.id::text           AS motorista_id,
-                       m.telefone
+                       array_length(dfm.dias_vencimento, 1) AS qtd_vencimentos,
+                       venc.dia                        AS dia_vencimento,
+                       m.id::text                      AS motorista_id,
+                       m.telefone,
+                       COALESCE(cp.saldo_atual, 0)     AS saldo_atual
                 FROM public.despesas_fixas_mensais dfm
                 JOIN public.motoristas m ON m.id = dfm.motorista_id
-                -- expande cada elemento do array em linha separada
+                -- Junta com a caixinha vinculada para leitura de saldo (pode ser NULL)
+                LEFT JOIN public.caixas_provisao cp ON cp.id = dfm.caixa_id
+                -- Expande cada elemento do array em linha separada
                 JOIN LATERAL UNNEST(dfm.dias_vencimento) AS venc(dia) ON TRUE
                 WHERE dfm.ativo = TRUE
-                  AND LEAST(
-                        venc.dia,
-                        DATE_PART('day',
-                            DATE_TRUNC('month', CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo')
-                            + INTERVAL '1 month'
-                            - INTERVAL '1 day'
-                        )::int
-                  ) = ANY($1::int[]);
+                  AND LEAST(venc.dia, $2::int) = ANY($1::int[]);
                 """,
                 list(dias_alvo),
+                int(ultimo_dia_mes.day),
             )
     except Exception as e:
         logger.error(f"[ReminderService] Erro ao buscar vencimentos: {e}")
@@ -218,40 +237,128 @@ async def _processar_vencimentos_despesas() -> None:
 
     client = await RedisFSMService.get_client()
     for row in rows:
-        tenant_id   = row["telefone"]
-        dia_venc    = int(row["dia_vencimento"])
-        nome        = row["nome"]
-        valor       = float(row["valor_mensal"])
-        despesa_id  = row["despesa_id"]
-        remote_jid  = f"{tenant_id}@s.whatsapp.net"
-        # Chave inclui dia_vencimento para disparar independentemente por vencimento
-        redis_key   = f"reminder:venc:{tenant_id}:{despesa_id}:{dia_venc}:{hoje.isoformat()}"
+        tenant_id    = row["telefone"]
+        dia_venc     = int(row["dia_vencimento"])
+        nome         = row["nome"]
+        valor_mensal = Decimal(str(row["valor_mensal"]))
+        saldo_atual  = Decimal(str(row["saldo_atual"]))
+        despesa_id   = row["despesa_id"]
+        remote_jid   = f"{tenant_id}@s.whatsapp.net"
 
+        # Valor da parcela deste vencimento específico:
+        # Se a despesa tem N vencimentos/mês, cada parcela = valor_mensal / N.
+        # Ex: cartão R$ 800 com venc. dias 5 e 20 → cada parcela = R$ 400.
+        # Ex: empréstimo R$ 650 pago por 13 dias → cada parcela = R$ 50/dia.
+        # Se há apenas 1 vencimento, valor_parcela == valor_mensal (sem divisão).
+        qtd_venc      = max(1, int(row["qtd_vencimentos"] or 1))
+        valor_parcela = (valor_mensal / Decimal(str(qtd_venc))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        eh_multiplo   = qtd_venc > 1
+
+        # Chave inclui dia_vencimento para disparar independentemente por vencimento
+        redis_key = f"reminder:venc:{tenant_id}:{despesa_id}:{dia_venc}:{hoje.isoformat()}"
         if await client.exists(redis_key):
             continue  # já notificado hoje para este vencimento
 
-        valor_fmt = f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        if dia_venc == hoje.day or (hoje.day == ultimo_dia_mes.day and dia_venc > ultimo_dia_mes.day):
-            texto = (
-                f"📅  *Vencimento HOJE — {nome}*\n\n"
-                f"• Valor:  *{valor_fmt}*\n\n"
-                f"Se a caixinha já tem saldo suficiente, use:\n"
-                f"  👉  `!retirar caixa {nome} {valor:.2f}`\n\n"
-                f"_Para ver o saldo atual envie  *!caixas*_"
-            )
+        valor_fmt   = f"R$ {float(valor_mensal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        parcela_fmt = f"R$ {float(valor_parcela):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        saldo_fmt   = f"R$ {float(saldo_atual):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+        # Linha de contexto de parcela — formulada de forma legível para qualquer N:
+        # ≤6 vencimentos: "Parcela (2× por mês): R$ 400,00"
+        # ≥7 vencimentos (regime diário/semanal): "Pagamento diário: R$ 50,00"
+        if not eh_multiplo:
+            linha_parcela = ""
+        elif qtd_venc <= 6:
+            linha_parcela = f"• Parcela ({qtd_venc}× por mês):  *{parcela_fmt}*\n"
         else:
-            texto = (
-                f"⏰  *Vencimento AMANHÃ — {nome}*\n\n"
-                f"• Valor:  *{valor_fmt}*\n\n"
-                f"Confira o saldo da caixinha antes do vencimento:\n"
-                f"  👉  `!caixas`"
-            )
+            linha_parcela = f"• Valor por pagamento ({qtd_venc} parcelas/mês):  *{parcela_fmt}*\n"
+
+        # Valor efetivo a cobrar neste vencimento
+        valor_cobrar = valor_parcela
+
+        # Resolve se o vencimento clamped corresponde a hoje ou amanhã.
+        # dia_venc pode ser 31 num mês de 30 dias — o LEAST no SQL já retornou 30,
+        # então comparamos o dia clamped (não o raw) com hoje.day / amanha.day.
+        dia_venc_efetivo = min(dia_venc, ultimo_dia_mes.day)
+        is_hoje = dia_venc_efetivo == hoje.day
+
+        # Data de vencimento formatada em BR para exibição nas mensagens
+        data_venc_obj = hoje if is_hoje else amanha
+        data_venc_fmt = data_venc_obj.strftime("%d/%m/%Y")
+
+        # ── UX Adaptativa — 3 estados baseados no saldo real da caixinha ──────
+        if is_hoje:
+            if saldo_atual >= valor_cobrar:
+                # Caso A: saldo cobre a parcela — oferece o comando de retirada
+                texto = (
+                    f"📅  *Vencimento HOJE ({data_venc_fmt}) — {nome}*\n\n"
+                    f"• Valor mensal:  *{valor_fmt}*\n"
+                    + linha_parcela +
+                    f"• Saldo na caixinha:  *{saldo_fmt}*  ✅\n\n"
+                    f"Tudo provisionado! Para registrar a saída:\n"
+                    f"  👉  `!retirar caixa {nome} {float(valor_cobrar):.2f}`\n\n"
+                    f"_Se não retirar agora, a baixa automática executa na virada do dia._"
+                )
+            elif saldo_atual > Decimal("0"):
+                # Caso B: saldo parcial — aponta déficit e oferece retirada do disponível
+                faltando     = (valor_cobrar - saldo_atual).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                faltando_fmt = f"R$ {float(faltando):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                texto = (
+                    f"⚠️  *Vencimento HOJE ({data_venc_fmt}) — {nome}*\n\n"
+                    f"• Valor mensal:  *{valor_fmt}*\n"
+                    + linha_parcela +
+                    f"• Saldo na caixinha:  *{saldo_fmt}*  (parcial 🚨)\n"
+                    f"• Déficit:  *{faltando_fmt}*\n\n"
+                    f"O saldo provisionado não cobre a parcela. Complemente o pagamento externamente.\n"
+                    f"Para resgatar o saldo disponível:\n"
+                    f"  👉  `!retirar caixa {nome} {float(saldo_atual):.2f}`"
+                )
+            else:
+                # Caso C: caixinha zerada — apenas alerta
+                texto = (
+                    f"🚨  *Vencimento HOJE ({data_venc_fmt}) — {nome}*\n\n"
+                    f"• Valor mensal:  *{valor_fmt}*\n"
+                    + linha_parcela +
+                    f"• Saldo na caixinha:  *R$ 0,00*  ❌\n\n"
+                    f"Não há reserva para cobrir esta parcela.\n"
+                    f"Realize o pagamento com recursos externos."
+                )
+        else:
+            # Vencimento amanhã
+            if saldo_atual >= valor_cobrar:
+                texto = (
+                    f"⏰  *Vencimento AMANHÃ ({data_venc_fmt}) — {nome}*\n\n"
+                    f"• Valor mensal:  *{valor_fmt}*\n"
+                    + linha_parcela +
+                    f"• Saldo na caixinha:  *{saldo_fmt}*  ✅\n\n"
+                    f"Provisionamento em dia! Amanhã lembrarei você de fazer a retirada."
+                )
+            elif saldo_atual > Decimal("0"):
+                faltando     = (valor_cobrar - saldo_atual).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                faltando_fmt = f"R$ {float(faltando):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                texto = (
+                    f"⏰  *Vencimento AMANHÃ ({data_venc_fmt}) — {nome}*\n\n"
+                    f"• Valor mensal:  *{valor_fmt}*\n"
+                    + linha_parcela +
+                    f"• Saldo na caixinha:  *{saldo_fmt}*  (parcial ⚠️)\n"
+                    f"• Faltam:  *{faltando_fmt}*\n\n"
+                    f"Complete a caixinha antes do fechamento do dia para cobertura total."
+                )
+            else:
+                texto = (
+                    f"⏰  *Vencimento AMANHÃ ({data_venc_fmt}) — {nome}*\n\n"
+                    f"• Valor mensal:  *{valor_fmt}*\n"
+                    + linha_parcela +
+                    f"• Saldo na caixinha:  *R$ 0,00*  ❌\n\n"
+                    f"Sem provisão para esta parcela. Prepare recursos externos para quitá-la amanhã.\n"
+                    f"_Para ver o saldo de todas as caixas:  *!caixas*_"
+                )
 
         await _enviar(remote_jid, texto)
         await client.set(redis_key, "1", ex=_TTL_REMINDER_VENC_S)
         logger.info(
             f"[ReminderService] Lembrete VENCIMENTO enviado: motorista={row['motorista_id']} "
-            f"despesa={nome} dia_venc={dia_venc} hoje={hoje}"
+            f"despesa={nome} dia_venc={dia_venc} (efetivo={dia_venc_efetivo}) hoje={hoje}"
         )
 
 
@@ -264,26 +371,35 @@ async def _processar_baixas_automaticas() -> None:
 
     A chave de idempotência inclui o dia do vencimento:
       baixa_auto:{motorista}:{despesa}:{dia_venc}:{ano-mês}
-    """
-    from decimal import Decimal, ROUND_HALF_UP
 
+    Calendário calculado inteiramente em Python (ontem, último_dia_mes_ontem)
+    e injetado como parâmetros escalares ($1, $2) para blindar a query de
+    funções nativas temporais do Postgres sujeitas ao fuso do servidor.
+    """
     _tz = pytz.timezone("America/Sao_Paulo")
-    hoje = datetime.now(_tz).date()
+    hoje  = datetime.now(_tz).date()
     ontem = hoje - timedelta(days=1)
+
+    # Teto de calendário do mês de ontem (necessário quando ontem = último dia do mês)
+    ultimo_dia_mes_ontem = (ontem.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
     # Ano-mês de referência para a chave de idempotência (usa o mês de ontem)
     ano_mes_ref = ontem.strftime("%Y-%m")
 
     try:
         async with DatabaseService.get_connection() as conn:
+            # $1 = último dia do mês de ontem (teto do LEAST — imune ao fuso do DB)
+            # $2 = dia numérico de ontem (dia do vencimento a processar)
             rows = await conn.fetch(
                 """
-                SELECT dfm.id::text          AS despesa_id,
+                SELECT dfm.id::text                    AS despesa_id,
                        dfm.nome,
                        dfm.valor_mensal,
-                       venc.dia             AS dia_vencimento,
-                       dfm.caixa_id::text    AS caixa_id,
+                       array_length(dfm.dias_vencimento, 1) AS qtd_vencimentos,
+                       venc.dia                        AS dia_vencimento,
+                       dfm.caixa_id::text              AS caixa_id,
                        cp.saldo_atual,
-                       m.id::text            AS motorista_id,
+                       m.id::text                      AS motorista_id,
                        m.telefone
                 FROM public.despesas_fixas_mensais dfm
                 JOIN public.motoristas m ON m.id = dfm.motorista_id
@@ -292,16 +408,10 @@ async def _processar_baixas_automaticas() -> None:
                 WHERE dfm.ativo = TRUE
                   AND dfm.caixa_id IS NOT NULL
                   AND cp.saldo_atual > 0
-                  AND LEAST(
-                        venc.dia,
-                        DATE_PART('day',
-                            DATE_TRUNC('month', $1::date AT TIME ZONE 'America/Sao_Paulo')
-                            + INTERVAL '1 month'
-                            - INTERVAL '1 day'
-                        )::int
-                  ) = DATE_PART('day', $1::date)::int;
+                  AND LEAST(venc.dia, $1::int) = $2::int;
                 """,
-                ontem,
+                int(ultimo_dia_mes_ontem.day),
+                int(ontem.day),
             )
     except Exception as e:
         logger.error(f"[ReminderService] Erro ao buscar baixas automáticas: {e}")
@@ -320,14 +430,28 @@ async def _processar_baixas_automaticas() -> None:
         saldo_atual  = Decimal(str(row["saldo_atual"]))
         remote_jid   = f"{tenant_id}@s.whatsapp.net"
 
+        # Valor da parcela deste vencimento específico (mesmo critério dos lembretes)
+        qtd_venc      = max(1, int(row["qtd_vencimentos"] or 1))
+        valor_parcela = (valor_mensal / Decimal(str(qtd_venc))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        # Linha de contexto de parcela na notificação de baixa
+        if qtd_venc <= 1:
+            linha_parcela_baixa = ""
+        elif qtd_venc <= 6:
+            parcela_fmt_b = f"R$ {float(valor_parcela):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            linha_parcela_baixa = f"• Parcela ({qtd_venc}× por mês):  *{parcela_fmt_b}*\n"
+        else:
+            parcela_fmt_b = f"R$ {float(valor_parcela):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            linha_parcela_baixa = f"• Valor por pagamento ({qtd_venc} parcelas/mês):  *{parcela_fmt_b}*\n"
+
         # Chave de idempotência: 1 baixa por (motorista, despesa, dia_vencimento, ano-mês)
         # Inclui o dia para que vencimentos múltiplos da mesma despesa sejam independentes
         redis_key = f"baixa_auto:{motorista_id}:{despesa_id}:{dia_venc}:{ano_mes_ref}"
         if await client.exists(redis_key):
             continue  # já executado neste mês para este vencimento
 
-        # Quanto retirar: mínimo entre saldo disponível e valor da despesa
-        retirada = min(saldo_atual, valor_mensal).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # Quanto retirar: mínimo entre saldo disponível e valor da parcela
+        retirada = min(saldo_atual, valor_parcela).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
@@ -362,26 +486,28 @@ async def _processar_baixas_automaticas() -> None:
         await client.set(redis_key, "1", ex=_TTL_BAIXA_AUTO_S)
 
         # Monta notificação
-        valor_fmt   = f"R$ {float(valor_mensal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        retirada_fmt = f"R$ {float(retirada):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        valor_fmt      = f"R$ {float(valor_mensal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        retirada_fmt   = f"R$ {float(retirada):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         novo_saldo_fmt = f"R$ {float(novo_saldo):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        faltou = (valor_mensal - retirada).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        faltou         = (valor_parcela - retirada).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         if faltou <= Decimal("0.01"):
-            # Saldo cobriu 100% — quitado
+            # Saldo cobriu 100% da parcela — quitado
             texto = (
                 f"✅  *Baixa automática — {nome}*\n\n"
-                f"• Valor da despesa:  *{valor_fmt}*\n"
+                f"• Valor mensal:  *{valor_fmt}*\n"
+                + linha_parcela_baixa +
                 f"• Retirado da caixinha:  *{retirada_fmt}*\n"
                 f"• Saldo restante:  *{novo_saldo_fmt}*\n\n"
-                f"_Despesa quitada automaticamente. Cofre atualizado!_ 🛡"
+                f"_Parcela quitada automaticamente. Cofre atualizado!_ 🛡"
             )
         else:
-            # Saldo parcial — informa o que falta
+            # Saldo parcial — informa o que falta para cobrir a parcela
             faltou_fmt = f"R$ {float(faltou):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             texto = (
                 f"⚠  *Baixa parcial — {nome}*\n\n"
-                f"• Valor da despesa:  *{valor_fmt}*\n"
+                f"• Valor mensal:  *{valor_fmt}*\n"
+                + linha_parcela_baixa +
                 f"• Retirado (saldo disponível):  *{retirada_fmt}*\n"
                 f"• Ainda falta:  *{faltou_fmt}*\n\n"
                 f"_A caixinha não tinha saldo suficiente. "

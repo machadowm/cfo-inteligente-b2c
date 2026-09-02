@@ -819,7 +819,37 @@ class ParametrosService:
         locadora: str,
         aluguel_semanal: float,
         dias_uteis: int = 26,
+        dia_vencimento: int = 1,
+        dias_vencimento: list[int] | None = None,
+        recorrencia_tipo: str = "mensal",
+        dias_semana: list[int] | None = None,
     ) -> None:
+        """Cria ou atualiza automaticamente a despesa fixa e a caixinha do contrato veicular.
+
+        Parâmetros de vencimento (mutuamente exclusivos):
+          • dia_vencimento  — legado: aceita um único dia do mês (compat. retroativa)
+          • dias_vencimento — array de dias do mês (ex: [5, 20]); sobrepõe dia_vencimento
+          • recorrencia_tipo — 'mensal' (default) | 'semanal'
+          • dias_semana      — array ISO weekday (ex: [5] = toda sexta), só se semanal
+
+        Quando nenhum argumento de vencimento é fornecido, usa dia_vencimento=1.
+        """
+        # Resolve o array de dias do mês a persistir
+        if dias_vencimento is not None:
+            _dias_venc = sorted(set(d for d in dias_vencimento if 1 <= d <= 31)) or [1]
+        else:
+            _dias_venc = [dia_vencimento] if 1 <= dia_vencimento <= 31 else [1]
+
+        # Para recorrência semanal, dias_semana deve estar preenchido
+        _recorrencia = recorrencia_tipo if recorrencia_tipo in ("mensal", "semanal") else "mensal"
+        _dias_semana = (
+            sorted(set(d for d in dias_semana if 1 <= d <= 7))
+            if _recorrencia == "semanal" and dias_semana
+            else None
+        )
+        # Se semanal sem dias_semana válido, degrade para mensal
+        if _recorrencia == "semanal" and not _dias_semana:
+            _recorrencia = "mensal"
         """Cria ou atualiza automaticamente a despesa fixa e a caixinha do contrato veicular.
 
         Chamado sempre que o contrato é configurado ou alterado — no onboarding e no
@@ -883,9 +913,11 @@ class ParametrosService:
                     await conn.execute(
                         "UPDATE public.despesas_fixas_mensais "
                         "SET valor_mensal = $1, dias_trabalho_previstos = $2, ativo = TRUE, "
-                        "    caixa_id = $3::uuid "
-                        "WHERE id = $4::uuid;",
-                        valor_mensal, dias_uteis, caixa_id, str(existing["id"]),
+                        "    caixa_id = $3::uuid, dias_vencimento = $4::integer[], "
+                        "    recorrencia_tipo = $5, dias_semana = $6::integer[] "
+                        "WHERE id = $7::uuid;",
+                        valor_mensal, dias_uteis, caixa_id,
+                        _dias_venc, _recorrencia, _dias_semana, str(existing["id"]),
                     )
                     # Sincroniza meta da caixa com o novo valor_mensal do contrato
                     await conn.execute(
@@ -896,10 +928,12 @@ class ParametrosService:
                     await conn.execute(
                         """
                         INSERT INTO public.despesas_fixas_mensais
-                            (motorista_id, nome, valor_mensal, dias_trabalho_previstos, dias_vencimento, caixa_id)
-                        VALUES ($1::uuid, $2, $3, $4, ARRAY[1]::integer[], $5::uuid);
+                            (motorista_id, nome, valor_mensal, dias_trabalho_previstos,
+                             dias_vencimento, recorrencia_tipo, dias_semana, caixa_id)
+                        VALUES ($1::uuid, $2, $3, $4, $5::integer[], $6, $7::integer[], $8::uuid);
                         """,
-                        motorista_id, nome_despesa, valor_mensal, dias_uteis, caixa_id,
+                        motorista_id, nome_despesa, valor_mensal, dias_uteis,
+                        _dias_venc, _recorrencia, _dias_semana, caixa_id,
                     )
 
                 # 4. Para carro alugado: remove caixa "Amortização de IPVA/Seguro" se estiver

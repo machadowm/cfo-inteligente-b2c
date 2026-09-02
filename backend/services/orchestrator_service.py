@@ -933,77 +933,21 @@ class OrchestratorService:
                     await enviar_whatsapp(remote_jid, "🔋 E qual a capacidade da bateria em  *kWh* ? (Ex:  *30* )")
                     return
                 else:
-                    await enviar_whatsapp(remote_jid, "⚙  *A preparar o seu cofre contábil... Só um segundo!*")
-                    try:
-                        motorista_uuid = await DatabaseService.registrar_novo_motorista(
-                            telefone=tenant_id, nome=nome, veiculo_modelo=veiculo, combustivel=combustivel, placa=placa
-                        )
-                        # Defaults de rendimento calibrados por categoria de veículo.
-                        # Motos têm rendimento ~3× superior a carros — usar o default de
-                        # carro causaria rejeição silenciosa no sanity check Full-to-Full.
-                        _km_l_gas = 35.0 if categoria_veiculo == "moto" else 12.0
-                        _km_l_eta = 24.5 if categoria_veiculo == "moto" else 8.5
-                        async with DatabaseService.get_tenant_connection(motorista_uuid) as conn:
-                            estoque_dict = {
-                                "meta": {
-                                    "tipo_veiculo": combustivel,
-                                    "categoria_veiculo": categoria_veiculo,
-                                    "is_flex": bool(combustivel == "flex"),
-                                    "is_hibrido": False,
-                                    "is_eletrico": False,
-                                    "capacidade_tanque_l": float(tanque_val),
-                                    "capacidade_bateria_kwh": 0.0,
-                                    "qtd_tanques": 1
-                                },
-                                "liquido": {
-                                    "litros": 0.0,
-                                    "custo_total": 0.0,
-                                    "gasolina_litros": 0.0,
-                                    "etanol_litros": 0.0,
-                                    "gasolina_proporcao": 1.0,
-                                    "etanol_proporcao": 0.0,
-                                    "km_l_gasolina": _km_l_gas,
-                                    "km_l_etanol": _km_l_eta
-                                },
-                                "eletricidade": {
-                                    "kwh": 0.0,
-                                    "custo_total": 0.0,
-                                    "km_kwh": 6.5
-                                },
-                                "gnv": {
-                                    "m3": 0.0,
-                                    "custo_total": 0.0,
-                                    "km_m3": 14.0
-                                }
-                            }
-                            await conn.execute(
-                                """
-                                UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE motorista_id = $2::uuid AND ativo = TRUE AND selecionado = TRUE;
-                                """, json.dumps(estoque_dict), motorista_uuid
-                            )
-                        await RedisFSMService.limpar_buffer(fsm_key)
-                        # Cria despesa fixa + caixinha para o contrato padrão (Localiza Zarp)
-                        # O motorista pode alterar depois com 'atualizar contrato'
-                        await ParametrosService.sincronizar_despesa_contrato(
-                            motorista_uuid, tenant_id,
-                            locadora="Localiza Zarp",
-                            aluguel_semanal=1020.85,
-                            dias_uteis=26,
-                        )
-                        await enviar_whatsapp(
-                            remote_jid,
-                            f"Tudo pronto,  *{nome}* ! 🎉\n\n"
-                            f"Seu cofre está ativo para o  *{veiculo}*  ({placa}).\n\n"
-                            "Sempre que iniciar seu dia, manda  *iniciar*  com o km do painel.\n"
-                            "Ex:  *iniciar 45230*\n\n"
-                            "⚙  _Para ajustar o contrato:_\n"
-                            "_atualizar contrato Zarp 1020 1500_\n"
-                            "_atualizar contrato Proprietario 90 0_\n"
-                            "_atualizar contrato Financiado 150 0_"
-                        )
-                    except Exception as e:
-                        logger.error(f"Falha ao salvar onboarding no banco: {e}")
-                        await RedisFSMService.limpar_buffer(fsm_key)
+                    # Veículo normal (não híbrido/elétrico) — avança para pergunta de vencimento
+                    await RedisFSMService.definir_estado(
+                        fsm_key,
+                        f"AGUARDANDO_VENCIMENTO_CONTRATO|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}|combustivel:{combustivel}|placa:{placa}|tanque:{tanque_val}|bateria:0",
+                    )
+                    await enviar_whatsapp(
+                        remote_jid,
+                        "📅  *Última pergunta!*\n\n"
+                        "Quando vence seu aluguel, financiamento ou custo fixo do veículo?\n\n"
+                        "💡  *Exemplos:*\n"
+                        "  • Mensal:  *5*  ou  *20*  _(todo dia 5 ou 20)_\n"
+                        "  • Mensal múltiplo:  *5 20*  _(dias 5 e 20 do mês)_\n"
+                        "  • Semanal:  *toda sexta*  ou  *segunda*  _(todo dia da semana)_\n\n"
+                        "_Se não souber agora, manda  *pular*._"
+                    )
                     return
 
             elif estado_atual.startswith("AGUARDANDO_CAPACIDADE_BATERIA"):
@@ -1021,73 +965,148 @@ class OrchestratorService:
                     )
                     return
                 await RedisFSMService.limpar_erros_consecutivos(tenant_id)
-                await enviar_whatsapp(remote_jid, "⚙ Configurando seu cofre... um segundo!")
+                # Híbrido/elétrico — avança para pergunta de vencimento (mesmo fluxo do veículo normal)
+                await RedisFSMService.definir_estado(
+                    fsm_key,
+                    f"AGUARDANDO_VENCIMENTO_CONTRATO|name:{nome}|veiculo:{veiculo}|categoria:{categoria_veiculo}|combustivel:{combustivel}|placa:{placa}|tanque:{tanque_val}|bateria:{bateria_val}",
+                )
+                await enviar_whatsapp(
+                    remote_jid,
+                    "📅  *Última pergunta!*\n\n"
+                    "Quando vence seu aluguel, financiamento ou custo fixo do veículo?\n\n"
+                    "💡  *Exemplos:*\n"
+                    "  • Mensal:  *5*  ou  *20*  _(todo dia 5 ou 20)_\n"
+                    "  • Mensal múltiplo:  *5 20*  _(dias 5 e 20 do mês)_\n"
+                    "  • Semanal:  *toda sexta*  ou  *segunda*  _(todo dia da semana)_\n\n"
+                    "_Se não souber agora, manda  *pular*._"
+                )
+                return
+
+            elif estado_atual.startswith("AGUARDANDO_VENCIMENTO_CONTRATO"):
+                # ── Último passo do onboarding: vencimento do contrato ─────────
+                # Suporta: mensal simples (5), mensal múltiplo (5 20), semanal (toda sexta)
+                _p = estado_atual.split("|")
+                _get = lambda k, d="": next((x.split(f"{k}:")[1] for x in _p if x.startswith(f"{k}:")), d)
+                nome              = _get("name", "Motorista")
+                veiculo           = _get("veiculo", "Veículo")
+                categoria_veiculo = _get("categoria", "carro")
+                combustivel       = _get("combustivel", "gasolina")
+                placa             = _get("placa", "")
+                tanque_val        = float(_get("tanque", "50"))
+                bateria_val       = float(_get("bateria", "0"))
+
+                _resp = texto_bruto.strip().lower()
+
+                # ── Mapeamento de dias da semana (ISO 1=Seg … 7=Dom) ──────────
+                _SEMANA_MAP = {
+                    "segunda": 1, "seg": 1, "segunda-feira": 1,
+                    "terca": 2, "terça": 2, "ter": 2, "terça-feira": 2,
+                    "quarta": 3, "qua": 3, "quarta-feira": 3,
+                    "quinta": 4, "qui": 4, "quinta-feira": 4,
+                    "sexta": 5, "sex": 5, "sexta-feira": 5,
+                    "sabado": 6, "sábado": 6, "sab": 6, "sáb": 6,
+                    "domingo": 7, "dom": 7,
+                }
+
+                # ── Defaults para "pular" ──────────────────────────────────────
+                if _resp in ("pular", "nao", "não", "skip", "depois", "nao sei", "não sei"):
+                    recorrencia_tipo = "mensal"
+                    dias_vencimento  = [1]
+                    dias_semana_lst  = None
+                    msg_venc = ""
+
+                # ── Detecta semanal: "toda segunda", "sexta", "toda sexta-feira" ─
+                elif any(k in normalizar_texto(_resp) for k in _SEMANA_MAP):
+                    _resp_norm = normalizar_texto(_resp)
+                    dias_semana_lst = sorted({
+                        iso for k, iso in _SEMANA_MAP.items() if k in _resp_norm
+                    })
+                    recorrencia_tipo = "semanal"
+                    dias_vencimento  = [1]  # placeholder (não usado para semanal)
+                    _nomes = {1:"Segunda",2:"Terça",3:"Quarta",4:"Quinta",
+                              5:"Sexta",6:"Sábado",7:"Domingo"}
+                    nomes_dias = " e ".join(_nomes[d] for d in dias_semana_lst)
+                    msg_venc = f"• Vencimento configurado:  *toda  {nomes_dias}*\n"
+
+                # ── Mensal: um ou mais números ─────────────────────────────────
+                else:
+                    numeros = [int(n) for n in re.findall(r'\d+', texto_bruto)]
+                    numeros = sorted(set(n for n in numeros if 1 <= n <= 31))
+                    if not numeros:
+                        await registrar_erro_e_verificar_escape(
+                            remote_jid, tenant_id, fsm_key,
+                            "Não entendi. 😅  Exemplos válidos:\n"
+                            "  *5*  — mensal dia 5\n"
+                            "  *5 20*  — dias 5 e 20 do mês\n"
+                            "  *toda sexta*  — toda sexta-feira\n"
+                            "  *pular*  — configurar depois"
+                        )
+                        return
+                    recorrencia_tipo = "mensal"
+                    dias_vencimento  = numeros
+                    dias_semana_lst  = None
+                    if len(numeros) == 1:
+                        msg_venc = f"• Vencimento configurado:  *todo dia {numeros[0]}*\n"
+                    else:
+                        dias_str = " e ".join(f"dia *{d}*" for d in numeros)
+                        msg_venc = f"• Vencimento configurado:  *{dias_str}*  do mês\n"
+
+                await enviar_whatsapp(remote_jid, "⚙  *Configurando seu cofre... um segundo!*")
                 try:
                     motorista_uuid = await DatabaseService.registrar_novo_motorista(
-                        telefone=tenant_id, nome=nome, veiculo_modelo=veiculo, combustivel=combustivel, placa=placa
+                        telefone=tenant_id, nome=nome, veiculo_modelo=veiculo,
+                        combustivel=combustivel, placa=placa
                     )
-                    # Híbridos/elétricos são sempre carros no contexto de apps de frete
                     _km_l_gas = 35.0 if categoria_veiculo == "moto" else 12.0
                     _km_l_eta = 24.5 if categoria_veiculo == "moto" else 8.5
                     async with DatabaseService.get_tenant_connection(motorista_uuid) as conn:
                         estoque_dict = {
                             "meta": {
-                                "tipo_veiculo": combustivel,
-                                "categoria_veiculo": categoria_veiculo,
-                                "is_flex": bool(combustivel == "flex"),
-                                "is_hibrido": bool(combustivel == "hibrido"),
-                                "is_eletrico": bool(combustivel == "eletrico"),
-                                "capacidade_tanque_l": float(tanque_val),
-                                "capacidade_bateria_kwh": float(bateria_val),
-                                "qtd_tanques": 1
+                                "tipo_veiculo": combustivel, "categoria_veiculo": categoria_veiculo,
+                                "is_flex": combustivel == "flex",
+                                "is_hibrido": combustivel == "hibrido",
+                                "is_eletrico": combustivel == "eletrico",
+                                "capacidade_tanque_l": tanque_val,
+                                "capacidade_bateria_kwh": bateria_val, "qtd_tanques": 1,
                             },
                             "liquido": {
-                                "litros": 0.0,
-                                "custo_total": 0.0,
-                                "gasolina_litros": 0.0,
-                                "etanol_litros": 0.0,
-                                "gasolina_proporcao": 1.0,
-                                "etanol_proporcao": 0.0,
-                                "km_l_gasolina": _km_l_gas,
-                                "km_l_etanol": _km_l_eta
+                                "litros": 0.0, "custo_total": 0.0,
+                                "gasolina_litros": 0.0, "etanol_litros": 0.0,
+                                "gasolina_proporcao": 1.0, "etanol_proporcao": 0.0,
+                                "km_l_gasolina": _km_l_gas, "km_l_etanol": _km_l_eta,
                             },
-                            "eletricidade": {
-                                "kwh": 0.0,
-                                "custo_total": 0.0,
-                                "km_kwh": 6.5
-                            },
-                            "gnv": {
-                                "m3": 0.0,
-                                "custo_total": 0.0,
-                                "km_m3": 14.0
-                            }
+                            "eletricidade": {"kwh": 0.0, "custo_total": 0.0, "km_kwh": 6.5},
+                            "gnv": {"m3": 0.0, "custo_total": 0.0, "km_m3": 14.0},
                         }
                         await conn.execute(
-                            """
-                            UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE motorista_id = $2::uuid AND ativo = TRUE AND selecionado = TRUE;
-                            """, json.dumps(estoque_dict), motorista_uuid
+                            "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb "
+                            "WHERE motorista_id = $2::uuid AND ativo = TRUE AND selecionado = TRUE;",
+                            json.dumps(estoque_dict), motorista_uuid,
                         )
                     await RedisFSMService.limpar_buffer(fsm_key)
-                    # Cria despesa fixa + caixinha para o contrato padrão (Localiza Zarp)
                     await ParametrosService.sincronizar_despesa_contrato(
                         motorista_uuid, tenant_id,
                         locadora="Localiza Zarp",
                         aluguel_semanal=1020.85,
                         dias_uteis=26,
+                        dias_vencimento=dias_vencimento,
+                        recorrencia_tipo=recorrencia_tipo,
+                        dias_semana=dias_semana_lst,
                     )
                     await enviar_whatsapp(
                         remote_jid,
                         f"Tudo pronto,  *{nome}* ! 🎉\n\n"
-                        f"Seu cofre está ativo para o  *{veiculo}*  ({placa}).\n\n"
-                        "Sempre que iniciar seu dia, manda  *iniciar*  com o km do painel.\n"
+                        f"Seu cofre está ativo para o  *{veiculo}*  ({placa}).\n"
+                        + msg_venc
+                        + "\nSempre que iniciar seu dia, manda  *iniciar*  com o km do painel.\n"
                         "Ex:  *iniciar 45230*\n\n"
-                        "⚙  _Para ajustar o contrato:_\n"
+                        "⚙  _Para ajustar o contrato depois:_\n"
                         "_atualizar contrato Zarp 1020 1500_\n"
                         "_atualizar contrato Proprietario 90 0_\n"
                         "_atualizar contrato Financiado 150 0_"
                     )
                 except Exception as e:
-                    logger.error(f"Falha ao salvar onboarding híbrido no banco: {e}")
+                    logger.error(f"[Onboarding] Falha ao concluir cadastro: {e}")
                     await RedisFSMService.limpar_buffer(fsm_key)
                 return
 

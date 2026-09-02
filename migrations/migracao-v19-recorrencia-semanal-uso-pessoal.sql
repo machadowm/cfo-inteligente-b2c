@@ -63,7 +63,7 @@ DO $$ BEGIN
 END $$;
 
 -- Constraint: cada elemento de dias_semana deve ser 1-7 (ISO weekday)
--- Aplica-se apenas quando o array não é NULL.
+-- Usa o operador <@ ("está contido em") — sem subquery, compatível com CHECK.
 DO $$ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
@@ -75,10 +75,7 @@ DO $$ BEGIN
                 dias_semana IS NULL
                 OR (
                     array_length(dias_semana, 1) > 0
-                    AND NOT EXISTS (
-                        SELECT 1 FROM UNNEST(dias_semana) d(v)
-                        WHERE v < 1 OR v > 7
-                    )
+                    AND dias_semana <@ ARRAY[1,2,3,4,5,6,7]::integer[]
                 )
             );
     END IF;
@@ -120,6 +117,5 @@ COMMIT;
 
 -- =============================================================================
 -- Como usar:
---   docker exec -i cfo_postgres psql -U admin -d cfo_b2c \
---     < migracao-v19-recorrencia-semanal-uso-pessoal.sql
+--   docker exec -i cfo_postgres psql -U admin -d cfo_b2c \ < migracao-v19-recorrencia-semanal-uso-pessoal.sql
 -- =============================================================================

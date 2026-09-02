@@ -564,10 +564,14 @@ def _montar_resposta_abertura_turno(nome: str, km: float, res: dict) -> str:
 
     Quando há uso pessoal (odometer gap), informa o motorista de forma
     transparente sobre a amortização que foi realizada no cofre virtual.
+
+    Quando há anacronismo de competência (abastecimento no meio do gap),
+    exibe o aviso detalhado de segmentação Pré/Pós-Abastecimento.
     """
     km_fmt = f"{km:,.1f}".replace(",", ".")
     km_uso = res.get("km_uso_pessoal", 0.0)
     custo_uso = res.get("custo_uso_pessoal", 0.0)
+    aviso_anacronismo = res.get("aviso_anacronismo")
 
     base = f"🚀 Turno aberto! Odômetro inicial registrado em  *{km_fmt} km* . Boa jornada, {nome}!"
 
@@ -580,6 +584,11 @@ def _montar_resposta_abertura_turno(nome: str, km: float, res: dict) -> str:
             f"• Custo amortizado do cofre:  *{custo_fmt}*  (CMP calculado pelo estoque atual).\n"
             f"_O Lucro Real dos próximos turnos já está protegido._"
         )
+
+    # Aviso de anacronismo: exibido adicionalmente quando houve abastecimento
+    # no intervalo entre o último turno e o turno recém-aberto.
+    if aviso_anacronismo:
+        base += f"\n\n{aviso_anacronismo}"
 
     return base
 

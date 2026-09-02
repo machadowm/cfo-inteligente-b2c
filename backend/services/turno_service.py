@@ -43,15 +43,57 @@ class TurnoService:
         is_hibrido: bool,
         is_eletrico: bool,
         tipo_comb: str,
+        estoque_snapshot_pre: Optional[dict] = None,
     ) -> tuple[Decimal, str]:
         """Debita do cofre virtual o custo de combustível referente a quilometragem de uso pessoal.
 
-        Aplica o mesmo Power Split de três fases (EV → GNV → Líquido) usado em
-        `abrir_turno` e `retomar_turno`.  Modifica `estoque` in-place.
+        Aplica o Power Split de quatro fases (EV → GNV → Líquido → Fallback SRE).
+        Modifica ``estoque`` in-place.
+
+        Parâmetro opcional ``estoque_snapshot_pre``:
+            Snapshot do estado do cofre *antes* de um abastecimento que ocorreu no meio
+            do gap (Anacronismo de Competência).  Quando fornecido, a função opera em dois
+            segmentos distintos:
+
+            • Segmento PRÉ  → km rodados desde km_anterior até km_corte do abastecimento.
+              Usa o snapshot antigo (estoque antes de incluir o combustível novo).
+              Pode resultar em custo fallback se o cofre antigo estava vazio — isso é
+              *correto contabilmente*, pois o combustível novo ainda não existia.
+
+            • Segmento PÓS  → km rodados desde km_corte até km_ini (início do novo turno).
+              Usa o cofre atual (já inclui o abastecimento novo) representado por ``estoque``.
+
+            Sem ``estoque_snapshot_pre`` a função processa o gap como único bloco
+            (comportamento original — correto quando não houve abastecimento no gap).
+
+        Invariante de underflow: todas as subtrações são guardadas com ``max(Decimal("0"), …)``
+        para garantir que o cofre jamais entre em território negativo, independentemente de
+        imprecisões acumuladas de arredondamento.
 
         Retorna:
             (custo_total: Decimal, detalhe: str) — custo amortizado e descrição legível.
         """
+        # ── Segmentação Pré/Pós-Abastecimento ─────────────────────────────────────
+        # Quando há snapshot pré, o gap PÓS já está em `km_gap` (foi cortado pelo
+        # chamador) e o segmento PRÉ precisa ser processado no snapshot antigo.
+        # O custo PRÉ é calculado aqui mesmo para manter a lógica coesa; o resultado
+        # final é a soma dos dois segmentos.
+        custo_pre = Decimal("0.00")
+        detalhe_pre = ""
+        if estoque_snapshot_pre is not None:
+            # Processa o segmento PRÉ recursivamente sobre o snapshot (sem snapshot_pre
+            # para evitar recursão infinita) — o snapshot já é uma cópia independente
+            # fornecida pelo chamador, então a mutação in-place é segura.
+            custo_pre, detalhe_pre = TurnoService._processar_uso_pessoal(
+                km_gap=estoque_snapshot_pre.pop("_km_pre"),  # km pré injetado pelo chamador
+                estoque=estoque_snapshot_pre,
+                is_hibrido=is_hibrido,
+                is_eletrico=is_eletrico,
+                tipo_comb=tipo_comb,
+                estoque_snapshot_pre=None,  # sem recursão adicional
+            )
+        # ──────────────────────────────────────────────────────────────────────────
+
         custo = Decimal("0.00")
         partes: list[str] = []
         km_restante = km_gap
@@ -59,15 +101,15 @@ class TurnoService:
         # Fase 1 — Elétrico / Híbrido
         if (is_hibrido or is_eletrico) and km_restante > Decimal("0"):
             eletro = estoque["eletricidade"]
-            kwh_disp = Decimal(str(eletro.get("kwh", 0.0)))
-            custo_bat = Decimal(str(eletro.get("custo_total", 0.0)))
+            kwh_disp = max(Decimal("0"), Decimal(str(eletro.get("kwh", 0.0))))
+            custo_bat = max(Decimal("0"), Decimal(str(eletro.get("custo_total", 0.0))))
             km_kwh = Decimal(str(eletro.get("km_kwh", 6.5)))
             if kwh_disp > Decimal("0") and km_kwh > Decimal("0"):
                 cmp_kwh = custo_bat / kwh_disp
                 kwh_q = min(kwh_disp, km_restante / km_kwh)
                 c = (kwh_q * cmp_kwh).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 custo += c
-                eletro["kwh"]        = float(max(Decimal("0"), kwh_disp - kwh_q).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                eletro["kwh"]         = float(max(Decimal("0"), kwh_disp - kwh_q).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
                 eletro["custo_total"] = float(max(Decimal("0"), custo_bat - c).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
                 km_restante -= kwh_q * km_kwh
                 partes.append(f"{float(kwh_q):.2f} kWh (R$ {float(c):.2f})")
@@ -75,14 +117,14 @@ class TurnoService:
         # Fase 2 — GNV
         if tipo_comb == "gnv" and km_restante > Decimal("0"):
             gnv = estoque["gnv"]
-            m3_disp = Decimal(str(gnv.get("m3", 0.0)))
-            custo_gnv = Decimal(str(gnv.get("custo_total", 0.0)))
+            m3_disp = max(Decimal("0"), Decimal(str(gnv.get("m3", 0.0))))
+            custo_gnv = max(Decimal("0"), Decimal(str(gnv.get("custo_total", 0.0))))
             km_m3 = Decimal(str(gnv.get("km_m3", 14.0)))
             if m3_disp > Decimal("0") and km_m3 > Decimal("0"):
                 m3_q = min(m3_disp, km_restante / km_m3)
                 c = (m3_q * custo_gnv / m3_disp).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 custo += c
-                gnv["m3"]        = float(max(Decimal("0"), m3_disp - m3_q).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                gnv["m3"]         = float(max(Decimal("0"), m3_disp - m3_q).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
                 gnv["custo_total"] = float(max(Decimal("0"), custo_gnv - c).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
                 km_restante -= m3_q * km_m3
                 partes.append(f"{float(m3_q):.2f} m³ (R$ {float(c):.2f})")
@@ -90,8 +132,8 @@ class TurnoService:
         # Fase 3 — Líquido (Flex / Gasolina)
         if km_restante > Decimal("0") and not is_eletrico and tipo_comb != "gnv":
             liq = estoque["liquido"]
-            total_l = Decimal(str(liq.get("litros", 0.0)))
-            custo_l = Decimal(str(liq.get("custo_total", 0.0)))
+            total_l = max(Decimal("0"), Decimal(str(liq.get("litros", 0.0))))
+            custo_l = max(Decimal("0"), Decimal(str(liq.get("custo_total", 0.0))))
             if total_l > Decimal("0"):
                 km_l_gas = Decimal(str(liq.get("km_l_gasolina", 12.0)))
                 km_l_eta = Decimal(str(liq.get("km_l_etanol",  8.5)))
@@ -119,14 +161,25 @@ class TurnoService:
                 km_restante -= litros_q * km_l_med
                 partes.append(f"{float(litros_q):.2f} L (R$ {float(c):.2f})")
 
-        # Fase 4 — Fallback: sem estoque, sem abastecimento registrado
+        # Fase 4 — Fallback SRE: km restantes sem cobertura de estoque
         if km_restante > Decimal("0"):
             c_fb = (km_restante * Decimal("0.48")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             custo += c_fb
             partes.append(f"est. R$ {float(c_fb):.2f} ({float(km_restante):.1f} km s/ estoque)")
 
-        detalhe = " | ".join(partes) if partes else "sem estoque"
-        return custo, detalhe
+        detalhe_pos = " | ".join(partes) if partes else "sem estoque"
+
+        # ── Consolida os dois segmentos quando há anacronismo ──────────────────
+        custo_total = custo_pre + custo
+        if detalhe_pre and detalhe_pos and detalhe_pos != "sem estoque":
+            detalhe = f"[pré-abast.] {detalhe_pre} | [pós-abast.] {detalhe_pos}"
+        elif detalhe_pre:
+            detalhe = f"[pré-abast.] {detalhe_pre}"
+        else:
+            detalhe = detalhe_pos
+        # ──────────────────────────────────────────────────────────────────────
+
+        return custo_total, detalhe
 
     @staticmethod
     def _garantir_estrutura_estoque(estoque: dict) -> dict:
@@ -217,6 +270,7 @@ class TurnoService:
                 km_uso_pessoal = Decimal("0.00")
                 custo_uso_pessoal = Decimal("0.00")  # rastreado para a notificação ao motorista
                 gap_requer_confirmacao = False        # flag para trava de sanidade (erros de digitação)
+                aviso_anacronismo: Optional[str] = None  # aviso de anacronismo de competência do estoque
 
                 if ultimo_km_row and ultimo_km_row["km_final"] is not None:
                     km_anterior = Decimal(str(ultimo_km_row["km_final"]))
@@ -250,7 +304,15 @@ class TurnoService:
                             "tipo_erro": "GAP_ODOMETRO_ELEVADO",
                         }
 
-                    # Processamento de Uso Pessoal se houver gap positivo
+                    # ── Processamento de Uso Pessoal com Segmentação de Gap ────────────────
+                    # Detecta se houve abastecimento(s) entre km_anterior e km_ini.
+                    # Se sim, o gap é segmentado em:
+                    #   PRÉ : km_anterior → km do abastecimento mais antigo no gap
+                    #   PÓS : km do abastecimento mais antigo no gap → km_ini
+                    # O segmento PRÉ é abatido do cofre snapshot ANTES de o abastecimento
+                    # entrar; o PÓS é abatido do cofre ATUAL (que já inclui o combustível
+                    # novo). Isso resolve o Anacronismo de Competência do Estoque.
+                    # ─────────────────────────────────────────────────────────────────────
                     if km_ini > km_anterior:
                         km_uso_pessoal = km_ini - km_anterior
 
@@ -266,12 +328,136 @@ class TurnoService:
                             or meta.get("tipo_veiculo", "")
                         ).lower()
 
-                        custo_uso_pessoal, _detalhe = TurnoService._processar_uso_pessoal(
-                            km_uso_pessoal, estoque, is_hibrido, is_eletrico, tipo_comb
+                        # ── Busca o abastecimento mais antigo dentro do gap ──────────────
+                        # Usa o mais antigo (ORDER BY ASC) para ancorar o primeiro ponto
+                        # de corte — garante que o máximo de km pré-abastecimento seja
+                        # coberto pelo cofre correto (o mais antigo possível).
+                        abast_no_gap = await conn.fetchrow(
+                            """
+                            SELECT odometro_abastecimento
+                            FROM public.transacoes
+                            WHERE veiculo_id = $1::uuid
+                              AND categoria = 'combustivel'
+                              AND estornado = FALSE
+                              AND odometro_abastecimento IS NOT NULL
+                              AND odometro_abastecimento > $2
+                              AND odometro_abastecimento < $3
+                            ORDER BY odometro_abastecimento ASC
+                            LIMIT 1;
+                            """,
+                            veiculo_id,
+                            float(km_anterior),
+                            float(km_ini),
                         )
+
+                        aviso_anacronismo: Optional[str] = None
+                        estoque_snapshot_pre: Optional[dict] = None
+                        _litros_abastecidos_no_gap: Optional[Decimal] = None  # para alerta 50%
+                        km_pre = Decimal("0")   # km rodados antes do abastecimento no gap
+                        km_pos = Decimal("0")   # km rodados após o abastecimento no gap
+
+                        if abast_no_gap and abast_no_gap["odometro_abastecimento"] is not None:
+                            km_corte = Decimal(str(abast_no_gap["odometro_abastecimento"]))
+                            km_pre   = km_corte - km_anterior   # km rodados antes do abastecimento
+                            km_pos   = km_ini - km_corte         # km rodados após o abastecimento
+
+                            logger.info(
+                                f"[abrir_turno] Anacronismo detectado: abast. km {float(km_corte):.1f} "
+                                f"dentro do gap {float(km_anterior):.1f}→{float(km_ini):.1f} | "
+                                f"pré={float(km_pre):.1f} km, pós={float(km_pos):.1f} km "
+                                f"(motorista={motorista_id})"
+                            )
+
+                            if km_pre > Decimal("0"):
+                                # Reconstrói o estado do cofre *antes* do abastecimento de
+                                # km_corte realizando uma reversão sintética: subtrai os litros
+                                # adicionados por esse abastecimento para obter o snapshot pré.
+                                # Isso é mais preciso do que usar o snapshot do turno anterior
+                                # porque captura múltiplos abastecimentos intercalados.
+                                abast_detalhe = await conn.fetchrow(
+                                    """
+                                    SELECT litros_abastecidos, preco_por_litro, valor
+                                    FROM public.transacoes
+                                    WHERE veiculo_id = $1::uuid
+                                      AND categoria = 'combustivel'
+                                      AND estornado = FALSE
+                                      AND odometro_abastecimento = $2
+                                    ORDER BY data_transacao ASC
+                                    LIMIT 1;
+                                    """,
+                                    veiculo_id,
+                                    float(km_corte),
+                                )
+
+                                # Monta o snapshot pré revertendo o abastecimento de km_corte
+                                estoque_snapshot_pre = json.loads(json.dumps(estoque))  # deep copy
+                                if abast_detalhe and abast_detalhe["litros_abastecidos"]:
+                                    litros_abast = Decimal(str(abast_detalhe["litros_abastecidos"]))
+                                    valor_abast  = Decimal(str(abast_detalhe["valor"] or 0))
+                                    _litros_abastecidos_no_gap = litros_abast  # para alerta 50%
+                                    liq_snap = estoque_snapshot_pre["liquido"]
+                                    litros_atuais = max(Decimal("0"), Decimal(str(liq_snap.get("litros", 0))))
+                                    custo_atual   = max(Decimal("0"), Decimal(str(liq_snap.get("custo_total", 0))))
+                                    litros_pre = max(Decimal("0"), litros_atuais - litros_abast)
+                                    custo_pre_v = max(Decimal("0"), custo_atual - valor_abast)
+                                    liq_snap["litros"]      = float(litros_pre.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                                    liq_snap["custo_total"] = float(custo_pre_v.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                                    # Recalcula sub-litros proporcionalmente
+                                    if litros_pre > Decimal("0") and litros_atuais > Decimal("0"):
+                                        fator = litros_pre / litros_atuais
+                                        gas_pre = max(Decimal("0"), Decimal(str(liq_snap.get("gasolina_litros", 0))) * fator)
+                                        eta_pre = max(Decimal("0"), Decimal(str(liq_snap.get("etanol_litros", 0))) * fator)
+                                        liq_snap["gasolina_litros"] = float(gas_pre.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                                        liq_snap["etanol_litros"]   = float(eta_pre.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                                    else:
+                                        liq_snap["gasolina_litros"] = 0.0
+                                        liq_snap["etanol_litros"]   = 0.0
+                                    estoque_snapshot_pre["liquido"] = liq_snap
+
+                                # Injeta km_pre no snapshot para consumo pela função
+                                estoque_snapshot_pre["_km_pre"] = km_pre
+
+                                # km_gap para o segmento PÓS (passa ao Power Split principal)
+                                km_uso_pessoal = km_pos
+
+                            # Monta aviso conversacional de anacronismo
+                            aviso_anacronismo = (
+                                f"⚠️ *Aviso Contábil — Abastecimento no Intervalo*\n"
+                                f"Detectei que você abasteceu no km *{float(km_corte):,.0f}*, "
+                                f"antes de iniciar o turno.\n"
+                                f"Os *{float(km_pre):.1f} km* rodados antes do abastecimento foram "
+                                f"debitados do cofre anterior. Os km restantes ({float(km_pos):.1f} km) "
+                                f"consomem o combustível novo. 📊 _CMP protegido._"
+                            )
+
+                        custo_uso_pessoal, _detalhe = TurnoService._processar_uso_pessoal(
+                            km_uso_pessoal,
+                            estoque,
+                            is_hibrido,
+                            is_eletrico,
+                            tipo_comb,
+                            estoque_snapshot_pre=estoque_snapshot_pre,
+                        )
+
+                        # ── Alerta de Consumo Alto do Estoque Recém-Adicionado ─────────
+                        # Se o abate pós-abastecimento consumiu mais de 50% do estoque
+                        # líquido atual, emite aviso de transparência ao motorista.
+                        if _litros_abastecidos_no_gap and _litros_abastecidos_no_gap > Decimal("0"):
+                            liq_pos = estoque.get("liquido", {})
+                            litros_restantes_pos = max(Decimal("0"), Decimal(str(liq_pos.get("litros", 0.0))))
+                            litros_consumidos_pos = _litros_abastecidos_no_gap - litros_restantes_pos
+                            if litros_consumidos_pos > _litros_abastecidos_no_gap * Decimal("0.50"):
+                                aviso_consumo_alto = (
+                                    f"🔔 Notei que você rodou bastante antes de iniciar o turno. "
+                                    f"Abati *{float(litros_consumidos_pos):.1f} L* do seu último "
+                                    f"abastecimento para cobrir o uso pessoal — restam "
+                                    f"*{float(litros_restantes_pos):.1f} L* no cofre."
+                                )
+                                aviso_anacronismo = (aviso_anacronismo or "") + f"\n\n{aviso_consumo_alto}"
+
                         if custo_uso_pessoal > Decimal("0"):
                             logger.info(
-                                f"[abrir_turno] Uso pessoal {float(km_uso_pessoal):.1f} km → "
+                                f"[abrir_turno] Uso pessoal {float(km_ini - km_anterior):.1f} km → "
                                 f"R$ {float(custo_uso_pessoal):.2f} | {_detalhe} (motorista={motorista_id})"
                             )
 
@@ -297,6 +483,7 @@ class TurnoService:
                     "km_inicial": float(row["km_inicial"]),
                     "km_uso_pessoal": float(row["km_uso_pessoal"]),
                     "custo_uso_pessoal": float(custo_uso_pessoal),
+                    "aviso_anacronismo": aviso_anacronismo,
                     "data_inicio": row["data_inicio"],
                 }
         except Exception as exc:
@@ -1112,8 +1299,9 @@ class TurnoService:
                         turno_id
                     )
                     if pausa_row and pausa_row["km_inicio"] is not None:
-                        km_gap = km_dec - Decimal(str(pausa_row["km_inicio"]))
-                        if km_gap > Decimal("0"):
+                        km_gap_intra = km_dec - Decimal(str(pausa_row["km_inicio"]))
+                        km_ini_pausa  = Decimal(str(pausa_row["km_inicio"]))
+                        if km_gap_intra > Decimal("0"):
                             veiculo_row = await conn.fetchrow(
                                 "SELECT id, estoque_financeiro, tipo_combustivel FROM public.veiculos "
                                 "WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY created_at DESC LIMIT 1;",
@@ -1127,15 +1315,80 @@ class TurnoService:
                                 is_hibrido = bool(meta.get("is_hibrido", False))
                                 is_eletrico = bool(meta.get("is_eletrico", False))
                                 tipo_comb = (veiculo_row["tipo_combustivel"] or meta.get("tipo_veiculo", "")).lower()
+
+                                # ── Segmentação do gap intra-turno ──────────────────────────
+                                abast_intra = await conn.fetchrow(
+                                    """
+                                    SELECT odometro_abastecimento
+                                    FROM public.transacoes
+                                    WHERE veiculo_id = $1::uuid
+                                      AND categoria = 'combustivel'
+                                      AND estornado = FALSE
+                                      AND odometro_abastecimento IS NOT NULL
+                                      AND odometro_abastecimento > $2
+                                      AND odometro_abastecimento < $3
+                                    ORDER BY odometro_abastecimento ASC
+                                    LIMIT 1;
+                                    """,
+                                    str(veiculo_row["id"]),
+                                    float(km_ini_pausa),
+                                    float(km_dec),
+                                )
+
+                                estoque_snapshot_intra: Optional[dict] = None
+                                km_gap_pos = km_gap_intra  # padrão: sem segmentação
+
+                                if abast_intra and abast_intra["odometro_abastecimento"] is not None:
+                                    km_corte_intra = Decimal(str(abast_intra["odometro_abastecimento"]))
+                                    km_pre_intra   = km_corte_intra - km_ini_pausa
+                                    km_gap_pos     = km_dec - km_corte_intra
+
+                                    if km_pre_intra > Decimal("0"):
+                                        abast_det_intra = await conn.fetchrow(
+                                            """
+                                            SELECT litros_abastecidos, valor
+                                            FROM public.transacoes
+                                            WHERE veiculo_id = $1::uuid
+                                              AND categoria = 'combustivel'
+                                              AND estornado = FALSE
+                                              AND odometro_abastecimento = $2
+                                            ORDER BY data_transacao ASC LIMIT 1;
+                                            """,
+                                            str(veiculo_row["id"]),
+                                            float(km_corte_intra),
+                                        )
+                                        estoque_snapshot_intra = json.loads(json.dumps(estoque))
+                                        if abast_det_intra and abast_det_intra["litros_abastecidos"]:
+                                            litros_abast_i = Decimal(str(abast_det_intra["litros_abastecidos"]))
+                                            valor_abast_i  = Decimal(str(abast_det_intra["valor"] or 0))
+                                            liq_s = estoque_snapshot_intra["liquido"]
+                                            lit_at = max(Decimal("0"), Decimal(str(liq_s.get("litros", 0))))
+                                            cst_at = max(Decimal("0"), Decimal(str(liq_s.get("custo_total", 0))))
+                                            lit_pr = max(Decimal("0"), lit_at - litros_abast_i)
+                                            cst_pr = max(Decimal("0"), cst_at - valor_abast_i)
+                                            liq_s["litros"]      = float(lit_pr.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                                            liq_s["custo_total"] = float(cst_pr.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                                            if lit_pr > Decimal("0") and lit_at > Decimal("0"):
+                                                fator_i = lit_pr / lit_at
+                                                liq_s["gasolina_litros"] = float((max(Decimal("0"), Decimal(str(liq_s.get("gasolina_litros", 0))) * fator_i)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                                                liq_s["etanol_litros"]   = float((max(Decimal("0"), Decimal(str(liq_s.get("etanol_litros",   0))) * fator_i)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                                            else:
+                                                liq_s["gasolina_litros"] = 0.0
+                                                liq_s["etanol_litros"]   = 0.0
+                                            estoque_snapshot_intra["liquido"] = liq_s
+                                        estoque_snapshot_intra["_km_pre"] = km_pre_intra
+                                    # km_gap_pos já foi atualizado acima
+
                                 custo_intra, detalhe_intra = TurnoService._processar_uso_pessoal(
-                                    km_gap, estoque, is_hibrido, is_eletrico, tipo_comb
+                                    km_gap_pos, estoque, is_hibrido, is_eletrico, tipo_comb,
+                                    estoque_snapshot_pre=estoque_snapshot_intra,
                                 )
                                 await conn.execute(
                                     "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
                                     json.dumps(estoque), str(veiculo_row["id"])
                                 )
                                 logger.info(
-                                    f"[retomar_turno] Uso pessoal intra-turno {float(km_gap):.1f} km → "
+                                    f"[retomar_turno] Uso pessoal intra-turno {float(km_gap_intra):.1f} km → "
                                     f"R$ {float(custo_intra):.2f} | {detalhe_intra} (motorista={motorista_id})"
                                 )
 

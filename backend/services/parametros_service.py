@@ -1201,9 +1201,11 @@ class ParametrosService:
     async def _excluir_caixa(motorista_id: str, tenant_id: str, nome: str) -> str:
         """Exclui permanentemente uma caixa de provisão.
 
-        Bloqueia a exclusão se houver saldo positivo — o motorista deve zerar antes.
-        Desvincula despesas_fixas_mensais (caixa_id → NULL) antes do DELETE para evitar
-        violação de integridade referencial.
+        Só bloqueia se houver saldo materialmente positivo (> R$ 0,01) — saldos
+        residuais de arredondamento (ex: R$ 0,00 reportado como -0,001 no banco)
+        são ignorados para não gerar instruções absurdas como '!retirar caixa X 0.00'.
+        Desvincula despesas_fixas_mensais (caixa_id → NULL) antes do DELETE para
+        evitar violação de integridade referencial.
         """
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
@@ -1214,34 +1216,51 @@ class ParametrosService:
                 )
                 if not row:
                     return (
-                        f"⚠ Nenhuma caixa chamada  *{nome}*  encontrada.\n"
+                        f"⚠  Nenhuma caixa chamada  *{nome}*  encontrada.\n"
                         f"Envie  *!caixas*  para ver a lista."
                     )
+
+                # Tolerância de R$ 0,01 para imprecisões de arredondamento acumuladas.
+                # Sem isso, saldo de R$ 0,001 bloqueia exclusão e sugere retirar R$ 0,00.
                 saldo = Decimal(str(row["saldo_atual"]))
-                if saldo > Decimal("0"):
+                _TOLERANCIA = Decimal("0.01")
+                if saldo > _TOLERANCIA:
+                    saldo_fmt = f"R$ {float(saldo):.2f}".replace(".", ",")
                     return (
-                        f"⚠  *Não é possível excluir — a caixa tem saldo!*\n"
-                        f"• Caixa  *{nome}* :  *R$ {float(saldo):.2f}*\n\n"
-                        f"Retire o saldo antes de excluir:\n"
-                        f"  👉  `!retirar caixa {nome} {float(saldo):.2f}`"
+                        f"⚠️  *{nome}* ainda tem saldo!  *{saldo_fmt}*\n\n"
+                        f"Retire antes de excluir:\n"
+                        f"  👉  `!retirar caixa {nome} {float(saldo):.2f}`\n\n"
+                        f"_Ou, se quiser excluir mesmo assim e perder o saldo, "
+                        f"retire primeiro com o comando acima._"
                     )
-                # Desvincula despesas_fixas_mensais que apontam para esta caixa
-                await conn.execute(
-                    "UPDATE public.despesas_fixas_mensais SET caixa_id = NULL "
-                    "WHERE motorista_id = $1::uuid AND caixa_id = $2::uuid;",
+
+                # Desvincula despesas ativas que apontam para esta caixa e conta quantas foram
+                desp_desvinculadas_rows = await conn.fetch(
+                    """
+                    UPDATE public.despesas_fixas_mensais SET caixa_id = NULL
+                    WHERE motorista_id = $1::uuid AND caixa_id = $2::uuid AND ativo = TRUE
+                    RETURNING id;
+                    """,
                     motorista_id, str(row["id"]),
                 )
+                desp_desvinculadas = len(desp_desvinculadas_rows)
+
                 await conn.execute(
                     "DELETE FROM public.caixas_provisao WHERE id = $1::uuid;",
                     str(row["id"]),
                 )
+
             await ParametrosService._registrar_auditoria(
                 tenant_id, motorista_id, f"excluir_caixa_{nome}", "deleted", True
             )
             await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
+
+            nota_desv = (
+                f"\n_Despesas vinculadas foram desvinculadas — continue acumulando em outra caixa ou crie uma nova._"
+                if desp_desvinculadas > 0 else ""
+            )
             return (
-                f"🗑  *Caixa {nome} excluída com sucesso!* \n"
-                f"_Despesas fixas vinculadas foram desvinculadas mas não removidas._"
+                f"🗑  *Caixa  {nome}  excluída!*{nota_desv}"
             )
         except Exception as exc:
             logger.error(f"[ParametrosService] Erro ao excluir caixa (motorista={motorista_id}): {exc}")
@@ -1249,27 +1268,96 @@ class ParametrosService:
 
     @staticmethod
     async def _remover_despesa_fixa(motorista_id: str, tenant_id: str, nome: str) -> str:
-        """Desativa (soft-delete) uma despesa fixa pelo nome."""
+        """Desativa (soft-delete) uma despesa fixa pelo nome.
+
+        Após desativar, verifica a caixa vinculada:
+          • Saldo = 0 e sem outras despesas → exclui a caixa automaticamente (sem perda)
+          • Saldo > 0 → informa o saldo existente e oferece os comandos de retirada/exclusão
+          • Caixa vinculada a outras despesas ativas → desvincula mas mantém a caixa
+        """
         try:
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
-                result = await conn.execute(
-                    "UPDATE public.despesas_fixas_mensais SET ativo = FALSE "
-                    "WHERE motorista_id = $1::uuid AND lower(nome) = lower($2) AND ativo = TRUE;",
+                # Busca a despesa e a caixa vinculada antes de desativar
+                desp_row = await conn.fetchrow(
+                    """
+                    SELECT id, caixa_id
+                    FROM public.despesas_fixas_mensais
+                    WHERE motorista_id = $1::uuid AND lower(nome) = lower($2) AND ativo = TRUE;
+                    """,
                     motorista_id, nome,
                 )
-            # asyncpg retorna "UPDATE N" como string
-            n = int(result.split()[-1]) if result else 0
-            if n == 0:
-                return (
-                    f"⚠ Nenhuma despesa fixa ativa com o nome  *{nome}*  foi encontrada.\n"
-                    f"Envie  *!despesas fixas*  para ver a lista atual."
+                if not desp_row:
+                    return (
+                        f"⚠  Nenhuma despesa fixa ativa com o nome  *{nome}*  foi encontrada.\n"
+                        f"Envie  *!despesas fixas*  para ver a lista atual."
+                    )
+
+                despesa_id = str(desp_row["id"])
+                caixa_id   = str(desp_row["caixa_id"]) if desp_row["caixa_id"] else None
+
+                # Desativa a despesa
+                await conn.execute(
+                    "UPDATE public.despesas_fixas_mensais SET ativo = FALSE WHERE id = $1::uuid;",
+                    despesa_id,
                 )
+
+                # Analisa o destino da caixa vinculada
+                nota_caixa = ""
+                if caixa_id:
+                    caixa_row = await conn.fetchrow(
+                        "SELECT nome_caixa, saldo_atual FROM public.caixas_provisao WHERE id = $1::uuid;",
+                        caixa_id,
+                    )
+                    if caixa_row:
+                        nome_cx  = caixa_row["nome_caixa"]
+                        saldo_cx = Decimal(str(caixa_row["saldo_atual"]))
+
+                        # Quantas despesas ATIVAS ainda apontam para esta caixa (exceto a que acabamos de remover)
+                        outras_desp = await conn.fetchval(
+                            """
+                            SELECT COUNT(*) FROM public.despesas_fixas_mensais
+                            WHERE caixa_id = $1::uuid AND ativo = TRUE AND id != $2::uuid;
+                            """,
+                            caixa_id, despesa_id,
+                        ) or 0
+
+                        _TOLERANCIA = Decimal("0.01")
+
+                        if outras_desp > 0:
+                            # Caixa ainda alimenta outra despesa — apenas desvincula esta despesa
+                            await conn.execute(
+                                "UPDATE public.despesas_fixas_mensais SET caixa_id = NULL WHERE id = $1::uuid;",
+                                despesa_id,
+                            )
+                            nota_caixa = (
+                                f"\n\n📦  _A caixinha  *{nome_cx}*  foi mantida — ela ainda está vinculada "
+                                f"a {outras_desp} outra(s) despesa(s) ativa(s)._"
+                            )
+                        elif saldo_cx > _TOLERANCIA:
+                            # Caixa fica órfã mas tem saldo — pergunta o que fazer
+                            saldo_fmt = f"R$ {float(saldo_cx):.2f}".replace(".", ",")
+                            nota_caixa = (
+                                f"\n\n📦  *A caixinha  {nome_cx}  ainda tem  {saldo_fmt}  de saldo.*\n"
+                                f"O que deseja fazer?\n"
+                                f"  👉  `!retirar caixa {nome_cx} {float(saldo_cx):.2f}`  — resgatar o valor\n"
+                                f"  👉  `!excluir caixa {nome_cx}`  — excluir após zerar"
+                            )
+                        else:
+                            # Caixa vazia e órfã — exclui automaticamente
+                            await conn.execute(
+                                "DELETE FROM public.caixas_provisao WHERE id = $1::uuid;",
+                                caixa_id,
+                            )
+                            nota_caixa = f"\n\n📦  _A caixinha  *{nome_cx}*  estava vazia e foi excluída automaticamente._"
+
             await ParametrosService._registrar_auditoria(
                 tenant_id, motorista_id, f"remover_despesa_{nome}", "ativo", False
             )
+            await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
             return (
-                f"✅  *Despesa fixa  *{nome}*  removida com sucesso!*\n"
-                f"_Ela não será mais deduzida nos próximos fechamentos de turno._"
+                f"✅  Despesa  *{nome}*  removida!\n"
+                f"_Não será mais deduzida nos próximos fechamentos._"
+                + nota_caixa
             )
         except Exception as exc:
             logger.error(f"[ParametrosService] Erro ao remover despesa fixa (motorista={motorista_id}): {exc}")

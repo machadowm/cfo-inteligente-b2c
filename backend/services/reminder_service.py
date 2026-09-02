@@ -301,7 +301,7 @@ async def _processar_baixas_automaticas() -> None:
                         )::int
                   ) = DATE_PART('day', $1::date)::int;
                 """,
-                str(ontem),
+                ontem,
             )
     except Exception as e:
         logger.error(f"[ReminderService] Erro ao buscar baixas automáticas: {e}")

@@ -2410,6 +2410,29 @@ class OrchestratorService:
                 else:
                     resposta = f"✅  *{valor_fmt_geral}*  registrado como  *receita*  ({_cat_label})! 🛡"
 
+                # ── AVISO DE USO PESSOAL ───────────────────────────────────────────────
+                # Se não há turno aberto E a categoria não é combustível,
+                # a transação foi marcada como 'uso_pessoal' no banco.
+                # Informa o motorista sem bloquear — ele pode estar ciente disso.
+                turno_aberto_check = await RedisFSMService.obter_estado(fsm_turno_key)
+                if not turno_aberto_check and cat != "combustivel":
+                    try:
+                        async with DatabaseService.get_tenant_connection(motorista_id) as _conn_check:
+                            _t = await _conn_check.fetchval(
+                                "SELECT id FROM public.turnos WHERE motorista_id = $1::uuid "
+                                "AND status IN ('em_andamento', 'em_pausa', 'ABERTO') LIMIT 1;",
+                                motorista_id,
+                            )
+                        if not _t:
+                            resposta += (
+                                f"\n\n👤 _Registrado como  *uso pessoal*  (sem turno aberto). "
+                                f"Não afeta o resultado operacional do trabalho. "
+                                f"Veja no  *perfil*  a seção de Uso Pessoal._"
+                            )
+                    except Exception:
+                        pass
+                # ─────────────────────────────────────────────────────────────────────────
+
                 # ── AUTO-RESUME ──────────────────────────────────────────────────────────
                 # Se o turno está em pausa e o motorista acabou de registrar uma RECEITA,
                 # retomamos automaticamente — o motorista voltou a trabalhar sem avisar.

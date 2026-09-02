@@ -307,6 +307,10 @@ class ParametrosService:
                 "     _Ex: !adicionar despesa seguro 180_           _(dias=auto, vence dia 1)_",
                 "     _Ex: !adicionar despesa seguro 180 26 5_      _(26 dias, vence dia 5)_",
                 "     _Ex: !adicionar despesa cartao 800 26 5 20_   _(vence dias 5 e 20)_",
+                "  •  *!adicionar despesa semanal <nome> <R$/mês> [dia_semana]*",
+                "     _Ex: !adicionar despesa semanal aluguel 400_  _(toda segunda-feira)_",
+                "     _Ex: !adicionar despesa semanal aluguel 400 5_ _(toda sexta-feira)_",
+                "     _Dias da semana: 1=Seg  2=Ter  3=Qua  4=Qui  5=Sex  6=Sáb  7=Dom_",
                 "  •  *!remover despesa <nome>*        → Desativar despesa pelo nome",
                 "",
                 "📦  *Caixas de Provisão (sinking fund):*",
@@ -338,6 +342,23 @@ class ParametrosService:
         # ── Gestão de despesas fixas mensais ─────────────────────────────
         if re.match(r"^!despesas?\s+fix", texto, re.IGNORECASE):
             return await ParametrosService._listar_despesas_fixas(motorista_id)
+
+        # ── Despesa SEMANAL: !adicionar despesa semanal <nome> <valor> [dia_iso] ──
+        # Formato: !adicionar despesa semanal <nome> <valor> [1-7]
+        # Dia da semana ISO: 1=Segunda ... 7=Domingo. Default: 1 (segunda).
+        # Ex: !adicionar despesa semanal diaria 80
+        # Ex: !adicionar despesa semanal diaria 80 5   (toda sexta)
+        match_semanal = re.match(
+            r"^!adicionar\s+despesa\s+semanal\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)(?:\s+([1-7]))?\s*$",
+            texto, re.IGNORECASE,
+        )
+        if match_semanal:
+            nome_desp  = match_semanal.group(1).strip()[:50]
+            valor_desp = Decimal(match_semanal.group(2).replace(",", "."))
+            dia_iso    = int(match_semanal.group(3)) if match_semanal.group(3) else 1
+            return await ParametrosService._adicionar_despesa_semanal(
+                motorista_id, tenant_id, nome_desp, valor_desp, dia_iso
+            )
 
         # Formato: !adicionar despesa <nome> <valor> [dias_uteis] [venc1] [venc2] ...
         # Exemplos:
@@ -673,10 +694,11 @@ class ParametrosService:
                 rows = await conn.fetch(
                     """
                     SELECT nome, valor_mensal, dias_trabalho_previstos,
-                           valor_pro_rata_diario, dias_vencimento
+                           valor_pro_rata_diario, dias_vencimento,
+                           recorrencia_tipo, dias_semana
                     FROM public.despesas_fixas_mensais
                     WHERE motorista_id = $1::uuid AND ativo = TRUE
-                    ORDER BY dias_vencimento[1], valor_mensal DESC;
+                    ORDER BY recorrencia_tipo, dias_vencimento[1], valor_mensal DESC;
                     """,
                     motorista_id,
                 )
@@ -686,54 +708,73 @@ class ParametrosService:
                     "Para adicionar, envie:\n"
                     "  *!adicionar despesa <nome> <R$/mês> [dias] [venc1] [venc2...]*\n"
                     "_Ex: !adicionar despesa seguro 180 26 5_\n"
-                    "_Ex: !adicionar despesa cartao 800 26 5 20_  _(2 vencimentos)_"
+                    "_Ex: !adicionar despesa cartao 800 26 5 20_  _(2 vencimentos)_\n\n"
+                    "Para despesas semanais:\n"
+                    "  *!adicionar despesa semanal <nome> <R$/mês> [1-7]*\n"
+                    "_Ex: !adicionar despesa semanal diaria 80 5_  _(toda sexta)_"
                 )
             from datetime import date as _date, timedelta as _timedelta
-            hoje_dia   = _date.today().day
-            amanha_dia = (_date.today() + _timedelta(days=1)).day
+            hoje       = _date.today()
+            hoje_dia   = hoje.day
+            amanha_dia = (hoje + _timedelta(days=1)).day
+            hoje_iso   = hoje.isoweekday()          # 1=Seg … 7=Dom
+            amanha_iso = (hoje + _timedelta(days=1)).isoweekday()
+
+            _DIAS_SEMANA_LABEL = {1: "Seg", 2: "Ter", 3: "Qua", 4: "Qui", 5: "Sex", 6: "Sáb", 7: "Dom"}
+            _DIAS_SEMANA_FULL  = {1: "Segunda", 2: "Terça", 3: "Quarta", 4: "Quinta",
+                                   5: "Sexta", 6: "Sábado", 7: "Domingo"}
+
             total_pro_rata = sum(float(r["valor_pro_rata_diario"]) for r in rows)
-            linhas = ["📌  *Despesas Fixas Mensais Ativas:*\n"]
+            linhas = ["📌  *Despesas Fixas Ativas:*\n"]
             for r in rows:
-                nome       = r["nome"]
-                mensal     = float(r["valor_mensal"])
-                diario     = float(r["valor_pro_rata_diario"])
-                dias_venc  = list(r["dias_vencimento"] or [1])
-                qtd_v      = len(dias_venc)
-                alertas    = []
-                if hoje_dia in dias_venc:
-                    alertas.append("⚠️ *VENCE HOJE!*")
-                if amanha_dia in dias_venc:
-                    alertas.append("⏰ _vence amanhã_")
-                alerta = ("  " + "  ".join(alertas)) if alertas else ""
+                nome      = r["nome"]
+                mensal    = float(r["valor_mensal"])
+                diario    = float(r["valor_pro_rata_diario"])
+                rec_tipo  = r.get("recorrencia_tipo") or "mensal"
+                alertas   = []
 
-                # Exibição do calendário de vencimentos:
-                # 1 vencimento  → "vence dia *5*"
-                # 2–6 vencimentos → "vence dias *5* e *20*"
-                # 7+ vencimentos  → "vence dias *1* a *13*  (13×/mês)"  (compacto)
-                if qtd_v == 1:
-                    venc_str = f"vence dia  *{dias_venc[0]}*"
-                elif qtd_v <= 6:
-                    venc_str = "vence dias  " + " e ".join(f"*{d}*" for d in dias_venc)
+                if rec_tipo == "semanal":
+                    dias_s   = list(r["dias_semana"] or [1])
+                    qtd_v    = len(dias_s)
+                    nomes_ds = [_DIAS_SEMANA_FULL.get(d, str(d)) for d in dias_s]
+                    venc_str = f"📅 toda  *{' e '.join(nomes_ds)}*  (semanal)"
+                    if hoje_iso in dias_s:
+                        alertas.append("⚠️ *VENCE HOJE!*")
+                    elif amanha_iso in dias_s:
+                        alertas.append("⏰ _vence amanhã_")
+                    parcela = mensal / qtd_v if qtd_v > 1 else mensal
+                    extra = f"  (≈ R$ {parcela:.2f}/semana)" if qtd_v == 1 else f"  ({qtd_v}× /sem · ≈ R$ {parcela:.2f} cada)"
                 else:
-                    parcela = mensal / qtd_v
-                    venc_str = (
-                        f"vence dias  *{dias_venc[0]}* a *{dias_venc[-1]}*  "
-                        f"({qtd_v}× por mês · ≈ R$ {parcela:.2f}/parcela)"
-                    )
+                    dias_venc = list(r["dias_vencimento"] or [1])
+                    qtd_v     = len(dias_venc)
+                    if hoje_dia in dias_venc:
+                        alertas.append("⚠️ *VENCE HOJE!*")
+                    if amanha_dia in dias_venc:
+                        alertas.append("⏰ _vence amanhã_")
+                    if qtd_v == 1:
+                        venc_str = f"📅 vence dia  *{dias_venc[0]}*"
+                    elif qtd_v <= 6:
+                        venc_str = "📅 vence dias  " + " e ".join(f"*{d}*" for d in dias_venc)
+                    else:
+                        parcela_m = mensal / qtd_v
+                        venc_str = f"📅 {qtd_v}× (dias *{dias_venc[0]}*–*{dias_venc[-1]}* · ≈ R$ {parcela_m:.2f}/parcela)"
+                    extra = ""
 
+                alerta = ("  " + "  ".join(alertas)) if alertas else ""
                 linhas.append(
-                    f"• {nome}:  *R$ {mensal:.2f}/mês*  (≈ R$ {diario:.2f}/dia)  📅 {venc_str}{alerta}"
+                    f"• {nome}:  *R$ {mensal:.2f}/mês*"
+                    f"  (≈ R$ {diario:.2f}/dia)  {venc_str}{extra}{alerta}"
                 )
             linhas.append(f"\n*Total pro-rata diário: R$ {total_pro_rata:.2f}*")
             linhas.append(
                 "\n_Para remover, envie:  *!remover despesa <nome>*_\n"
-                "_Para adicionar:  *!adicionar despesa <nome> <R$/mês> [dias] [venc1] [venc2...]*_"
+                "_Para adicionar mensal:  *!adicionar despesa <nome> <R$/mês> [dias] [venc1...]*_\n"
+                "_Para adicionar semanal: *!adicionar despesa semanal <nome> <R$/mês> [1-7]*_"
             )
             return "\n".join(linhas)
         except Exception as exc:
             logger.error(f"[ParametrosService] Erro ao listar despesas fixas (motorista={motorista_id}): {exc}")
             return "❌ Erro ao buscar despesas fixas. Tente novamente em instantes."
-
     @staticmethod
     async def _obter_ou_criar_caixa(
         conn, motorista_id: str, nome_caixa: str,
@@ -898,6 +939,90 @@ class ParametrosService:
                 f"[ParametrosService] Erro ao sincronizar despesa de contrato "
                 f"(motorista={motorista_id}): {exc}"
             )
+
+    @staticmethod
+    async def _adicionar_despesa_semanal(
+        motorista_id: str, tenant_id: str, nome: str,
+        valor_mensal: Decimal, dia_iso: int,
+    ) -> str:
+        """Cadastra uma despesa com recorrência semanal (vence todo dia_iso da semana).
+
+        `dia_iso` segue ISO-8601: 1=Segunda … 7=Domingo.
+        O valor_mensal é o total mensal estimado; cada parcela semanal = valor_mensal / 4.
+        O pro-rata diário usa 28 dias como denominador (4 semanas × 7 dias),
+        garantindo paridade com o calendário semanal de 4 vencimentos por mês.
+        """
+        _DIAS_FULL = {1: "Segunda-feira", 2: "Terça-feira", 3: "Quarta-feira",
+                      4: "Quinta-feira", 5: "Sexta-feira", 6: "Sábado", 7: "Domingo"}
+        if valor_mensal <= 0:
+            return "⚠ O valor mensal deve ser maior que zero."
+        if not (1 <= dia_iso <= 7):
+            return "⚠ Dia da semana inválido. Use 1=Segunda … 7=Domingo."
+
+        # Pro-rata diário para despesa semanal: valor_mensal / 28 dias
+        # (equivale a 4 semanas por mês — denominador fixo para consistência)
+        dias_pro_rata = 28
+
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                caixa_id = await ParametrosService._obter_ou_criar_caixa(
+                    conn, motorista_id, nome, meta_valor=valor_mensal
+                )
+                existing = await conn.fetchrow(
+                    "SELECT id FROM public.despesas_fixas_mensais "
+                    "WHERE motorista_id = $1::uuid AND lower(nome) = lower($2);",
+                    motorista_id, nome,
+                )
+                if existing:
+                    await conn.execute(
+                        """
+                        UPDATE public.despesas_fixas_mensais
+                        SET valor_mensal = $1, dias_trabalho_previstos = $2, ativo = TRUE,
+                            caixa_id = $3::uuid, recorrencia_tipo = 'semanal',
+                            dias_semana = $4::integer[], dias_vencimento = ARRAY[1]::integer[]
+                        WHERE id = $5::uuid;
+                        """,
+                        valor_mensal, dias_pro_rata, caixa_id,
+                        [dia_iso], str(existing["id"]),
+                    )
+                    await conn.execute(
+                        "UPDATE public.caixas_provisao SET meta_valor = $1 WHERE id = $2::uuid;",
+                        valor_mensal, caixa_id,
+                    )
+                    acao = "reativada e atualizada"
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO public.despesas_fixas_mensais
+                            (motorista_id, nome, valor_mensal, dias_trabalho_previstos,
+                             dias_vencimento, recorrencia_tipo, dias_semana, caixa_id)
+                        VALUES ($1::uuid, $2, $3, $4, ARRAY[1]::integer[], 'semanal', $5::integer[], $6::uuid);
+                        """,
+                        motorista_id, nome, valor_mensal, dias_pro_rata,
+                        [dia_iso], caixa_id,
+                    )
+                    acao = "adicionada"
+
+            await ParametrosService._registrar_auditoria(
+                tenant_id, motorista_id, f"despesa_semanal_{nome}", "valor_mensal", valor_mensal
+            )
+            await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
+
+            parcela_sem = float(valor_mensal / Decimal("4"))
+            pro_rata    = float(valor_mensal / Decimal(str(dias_pro_rata)))
+            dia_label   = _DIAS_FULL.get(dia_iso, str(dia_iso))
+            return (
+                f"✅  *Despesa semanal {acao}!*\n"
+                f"• Nome:  *{nome}*\n"
+                f"• Valor mensal:  *R$ {float(valor_mensal):.2f}*  (≈ R$ {parcela_sem:.2f}/semana)\n"
+                f"• Vencimento:  *toda  {dia_label}*\n"
+                f"• Pro-rata diário:  *R$ {pro_rata:.2f}*  (base: 28 dias)\n"
+                f"• Caixinha vinculada:  *{nome}*  _(aportes automáticos a cada fechamento)_\n\n"
+                f"_Esse custo será deduzido automaticamente em cada fechamento de turno._"
+            )
+        except Exception as exc:
+            logger.error(f"[ParametrosService] Erro ao adicionar despesa semanal (motorista={motorista_id}): {exc}")
+            return "❌ Erro ao salvar a despesa semanal. Verifique os dados e tente novamente."
 
     @staticmethod
     async def _adicionar_despesa_fixa(

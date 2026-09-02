@@ -521,6 +521,126 @@ async def _processar_baixas_automaticas() -> None:
         )
 
 
+async def _processar_vencimentos_semanais() -> None:
+    """Avisa motoristas sobre despesas semanais que vencem hoje ou amanhã.
+
+    Opera sobre despesas com recorrencia_tipo = 'semanal' e dias_semana INTEGER[].
+    Usa isoweekday() (1=Segunda … 7=Domingo) para comparar com os dias cadastrados.
+    Compartilha a mesma UX adaptativa de saldo da função mensal — 3 estados:
+    saldo suficiente, saldo parcial, caixinha zerada.
+    Chave de idempotência inclui o isoweekday para disparar 1× por semana por vencimento.
+    """
+    _tz   = pytz.timezone("America/Sao_Paulo")
+    hoje  = datetime.now(_tz).date()
+    amanha = hoje + timedelta(days=1)
+
+    hoje_iso   = hoje.isoweekday()          # 1=Seg … 7=Dom
+    amanha_iso = amanha.isoweekday()
+
+    try:
+        async with DatabaseService.get_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT dfm.id::text                    AS despesa_id,
+                       dfm.nome,
+                       dfm.valor_mensal,
+                       array_length(dfm.dias_semana, 1) AS qtd_dias_semana,
+                       venc.dia                        AS dia_semana,
+                       m.id::text                      AS motorista_id,
+                       m.telefone,
+                       COALESCE(cp.saldo_atual, 0)     AS saldo_atual
+                FROM public.despesas_fixas_mensais dfm
+                JOIN public.motoristas m ON m.id = dfm.motorista_id
+                LEFT JOIN public.caixas_provisao cp ON cp.id = dfm.caixa_id
+                JOIN LATERAL UNNEST(dfm.dias_semana) AS venc(dia) ON TRUE
+                WHERE dfm.ativo = TRUE
+                  AND dfm.recorrencia_tipo = 'semanal'
+                  AND venc.dia = ANY($1::int[]);
+                """,
+                [hoje_iso, amanha_iso],
+            )
+    except Exception as e:
+        logger.error(f"[ReminderService] Erro ao buscar vencimentos semanais: {e}")
+        return
+
+    _DIAS_FULL = {1: "Segunda", 2: "Terça", 3: "Quarta", 4: "Quinta",
+                  5: "Sexta", 6: "Sábado", 7: "Domingo"}
+
+    client = await RedisFSMService.get_client()
+    for row in rows:
+        tenant_id    = row["telefone"]
+        dia_semana   = int(row["dia_semana"])
+        nome         = row["nome"]
+        valor_mensal = Decimal(str(row["valor_mensal"]))
+        saldo_atual  = Decimal(str(row["saldo_atual"]))
+        despesa_id   = row["despesa_id"]
+        remote_jid   = f"{tenant_id}@s.whatsapp.net"
+
+        # Parcela semanal = valor_mensal / 4 (4 semanas por mês)
+        qtd_dias = max(1, int(row["qtd_dias_semana"] or 1))
+        valor_parcela = (valor_mensal / Decimal("4") / Decimal(str(qtd_dias))).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+        # Chave de idempotência: 1× por semana por dia cadastrado
+        # Usa o isoformat da data atual para garantir 1 disparo por dia calendário
+        redis_key = f"reminder:venc_sem:{tenant_id}:{despesa_id}:{dia_semana}:{hoje.isoformat()}"
+        if await client.exists(redis_key):
+            continue
+
+        is_hoje     = dia_semana == hoje_iso
+        dia_label   = _DIAS_FULL.get(dia_semana, str(dia_semana))
+        data_venc   = hoje if is_hoje else amanha
+        data_fmt    = data_venc.strftime("%d/%m/%Y")
+
+        valor_fmt   = f"R$ {float(valor_mensal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        parcela_fmt = f"R$ {float(valor_parcela):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        saldo_fmt   = f"R$ {float(saldo_atual):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        cabecalho   = f"{'HOJE' if is_hoje else 'AMANHÃ'} ({data_fmt}) — {nome}"
+        emoji_h     = "📅" if is_hoje else "⏰"
+
+        linha_freq  = f"• Recorrência:  *toda  {dia_label}*  ·  parcela  *{parcela_fmt}*\n"
+
+        if saldo_atual >= valor_parcela:
+            texto = (
+                f"{emoji_h}  *Vencimento {cabecalho}*\n\n"
+                f"• Valor mensal:  *{valor_fmt}*\n"
+                f"{linha_freq}"
+                f"• Saldo na caixinha:  *{saldo_fmt}*  ✅\n\n"
+                f"Tudo provisionado! Para registrar a saída:\n"
+                f"  👉  `!retirar caixa {nome} {float(valor_parcela):.2f}`\n\n"
+                f"_Se não retirar agora, a baixa automática executa na virada do dia._"
+            )
+        elif saldo_atual > Decimal("0"):
+            faltando     = (valor_parcela - saldo_atual).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            faltando_fmt = f"R$ {float(faltando):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            texto = (
+                f"{emoji_h}  *Vencimento {cabecalho}*\n\n"
+                f"• Valor mensal:  *{valor_fmt}*\n"
+                f"{linha_freq}"
+                f"• Saldo na caixinha:  *{saldo_fmt}*  (parcial 🚨)\n"
+                f"• Déficit:  *{faltando_fmt}*\n\n"
+                f"Complete o pagamento externamente. Para resgatar o disponível:\n"
+                f"  👉  `!retirar caixa {nome} {float(saldo_atual):.2f}`"
+            )
+        else:
+            texto = (
+                f"{emoji_h}  *Vencimento {cabecalho}*\n\n"
+                f"• Valor mensal:  *{valor_fmt}*\n"
+                f"{linha_freq}"
+                f"• Saldo na caixinha:  *R$ 0,00*  ❌\n\n"
+                f"Não há reserva para cobrir esta parcela.\n"
+                f"Realize o pagamento com recursos externos."
+            )
+
+        await _enviar(remote_jid, texto)
+        await client.set(redis_key, "1", ex=_TTL_REMINDER_VENC_S)
+        logger.info(
+            f"[ReminderService] Lembrete VENCIMENTO SEMANAL enviado: motorista={row['motorista_id']} "
+            f"despesa={nome} dia_semana={dia_semana} ({dia_label}) hoje={hoje}"
+        )
+
+
 async def loop_lembretes() -> None:
     """
     Loop infinito de varredura. Deve ser iniciado como asyncio.Task no lifespan do FastAPI.
@@ -539,6 +659,7 @@ async def loop_lembretes() -> None:
             await _processar_pausas_prolongadas()
             await _processar_turnos_zumbi()
             await _processar_vencimentos_despesas()
+            await _processar_vencimentos_semanais()
             await _processar_baixas_automaticas()
         except asyncio.CancelledError:
             logger.info("[ReminderService] Loop encerrado graciosamente.")

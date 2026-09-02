@@ -106,7 +106,9 @@ class ProfileService:
                     motorista_id,
                 )
 
-                # ── 4. Acumulado do mês corrente — exclui turno aberto ────────
+                # ── 4. Acumulado do mês corrente — exclui turno aberto E uso pessoal ──
+                # Uso pessoal (contexto_operacional='uso_pessoal') é contabilizado
+                # separadamente na seção 8, para não distorcer o resultado operacional.
                 fat_row = await conn.fetchrow(
                     """
                     SELECT
@@ -115,6 +117,7 @@ class ProfileService:
                     FROM public.transacoes t
                     WHERE t.motorista_id = $1::uuid
                       AND t.estornado = FALSE
+                      AND (t.contexto_operacional IS NULL OR t.contexto_operacional != 'uso_pessoal')
                       AND date_trunc('month', t.data_transacao) = date_trunc('month', CURRENT_DATE)
                       AND (
                           t.turno_id IS NULL
@@ -203,7 +206,8 @@ class ProfileService:
                 # ── 7. Despesas fixas ─────────────────────────────────────────
                 despesas_fixas = await conn.fetch(
                     """
-                    SELECT nome, valor_mensal, valor_pro_rata_diario, dias_vencimento
+                    SELECT nome, valor_mensal, valor_pro_rata_diario, dias_vencimento,
+                           recorrencia_tipo, dias_semana
                     FROM public.despesas_fixas_mensais
                     WHERE motorista_id = $1::uuid AND ativo = TRUE
                     ORDER BY valor_mensal DESC;
@@ -211,7 +215,26 @@ class ProfileService:
                     motorista_id,
                 )
 
-                # ── 8. Caixas de provisão ─────────────────────────────────────
+                # ── 8. Uso Pessoal do mês — transações fora de turno ─────────
+                # Segregadas por contexto_operacional = 'uso_pessoal'.
+                # Combustível abastecido fora de turno NÃO entra aqui (contexto NULL).
+                uso_pessoal_row = await conn.fetchrow(
+                    """
+                    SELECT
+                        COALESCE(SUM(valor) FILTER (WHERE tipo_movimentacao = 'receita'), 0) AS rec_pessoal,
+                        COALESCE(SUM(valor) FILTER (WHERE tipo_movimentacao = 'despesa'), 0) AS desp_pessoal,
+                        COUNT(*) FILTER (WHERE tipo_movimentacao = 'despesa')                AS n_desp,
+                        COUNT(*) FILTER (WHERE tipo_movimentacao = 'receita')                AS n_rec
+                    FROM public.transacoes
+                    WHERE motorista_id = $1::uuid
+                      AND contexto_operacional = 'uso_pessoal'
+                      AND estornado = FALSE
+                      AND date_trunc('month', data_transacao) = date_trunc('month', CURRENT_DATE);
+                    """,
+                    motorista_id,
+                )
+
+                # ── 9. Caixas de provisão ─────────────────────────────────────
                 caixas = await conn.fetch(
                     """
                     SELECT cp.nome_caixa, cp.saldo_atual, cp.meta_valor,
@@ -240,6 +263,14 @@ class ProfileService:
             piso_km      = float(m["piso_ganho_km"])
             piso_hora    = float(m["piso_ganho_hora"])
             meta_diaria  = (meta_mensal / Decimal(str(dias_uteis))).quantize(Decimal("0.01"))
+
+            # ── Uso Pessoal do mês ─────────────────────────────────────────────
+            rec_pessoal  = float(uso_pessoal_row["rec_pessoal"]  or 0)
+            desp_pessoal = float(uso_pessoal_row["desp_pessoal"] or 0)
+            n_desp_p     = int(uso_pessoal_row["n_desp"]         or 0)
+            n_rec_p      = int(uso_pessoal_row["n_rec"]          or 0)
+            saldo_pessoal = rec_pessoal - desp_pessoal
+            tem_uso_pessoal = (n_desp_p + n_rec_p) > 0
 
             # ── Contrato do veículo ────────────────────────────────────────────
             aluguel_sem      = float(v["custo_aluguel_semanal"] or 1020.85) if v else 1020.85
@@ -478,29 +509,42 @@ class ProfileService:
                 )
 
             # ── Seção despesas fixas ───────────────────────────────────────────
+            _DIAS_SEMANA_FULL_P = {1: "Segunda", 2: "Terça", 3: "Quarta", 4: "Quinta",
+                                    5: "Sexta", 6: "Sábado", 7: "Domingo"}
+            hoje_iso_p   = hoje.isoweekday()
+            amanha_iso_p = (hoje + _timedelta(days=1)).isoweekday()
+
             if despesas_fixas:
                 total_df = sum(float(r["valor_pro_rata_diario"]) for r in despesas_fixas)
                 linhas_df = []
                 for r in despesas_fixas:
-                    dias_venc = list(r["dias_vencimento"] or [1])
-                    qtd_v     = len(dias_venc)
                     mensal    = float(r["valor_mensal"])
                     diario    = float(r["valor_pro_rata_diario"])
+                    rec_tipo  = r.get("recorrencia_tipo") or "mensal"
+                    tag_venc  = ""
 
-                    # Alerta de vencimento próximo
-                    tag_venc = ""
-                    if hoje_dia in dias_venc:
-                        tag_venc = "  🚨 *VENCE HOJE*"
-                    elif amanha_dia in dias_venc:
-                        tag_venc = "  ⏰ _vence amanhã_"
-
-                    if qtd_v == 1:
-                        venc_str = f"📅 dia *{dias_venc[0]}*"
-                    elif qtd_v <= 6:
-                        venc_str = "📅 dias " + " e ".join(f"*{d}*" for d in dias_venc)
+                    if rec_tipo == "semanal":
+                        dias_s = list(r["dias_semana"] or [1])
+                        nomes  = [_DIAS_SEMANA_FULL_P.get(d, str(d)) for d in dias_s]
+                        venc_str = f"📅 toda  *{' e '.join(nomes)}*"
+                        if hoje_iso_p in dias_s:
+                            tag_venc = "  🚨 *VENCE HOJE*"
+                        elif amanha_iso_p in dias_s:
+                            tag_venc = "  ⏰ _vence amanhã_"
                     else:
-                        parcela = mensal / qtd_v
-                        venc_str = f"📅 {qtd_v}× (dias *{dias_venc[0]}*–*{dias_venc[-1]}* · ≈ {_fmt_brl(parcela)}/parcela)"
+                        dias_venc = list(r["dias_vencimento"] or [1])
+                        qtd_v     = len(dias_venc)
+                        if hoje_dia in dias_venc:
+                            tag_venc = "  🚨 *VENCE HOJE*"
+                        elif amanha_dia in dias_venc:
+                            tag_venc = "  ⏰ _vence amanhã_"
+                        if qtd_v == 1:
+                            venc_str = f"📅 dia *{dias_venc[0]}*"
+                        elif qtd_v <= 6:
+                            venc_str = "📅 dias " + " e ".join(f"*{d}*" for d in dias_venc)
+                        else:
+                            parcela = mensal / qtd_v
+                            venc_str = f"📅 {qtd_v}× (dias *{dias_venc[0]}*–*{dias_venc[-1]}* · ≈ {_fmt_brl(parcela)}/parcela)"
 
                     linhas_df.append(
                         f"• {r['nome']}:  *{_fmt_brl(mensal)}/mês*"
@@ -513,6 +557,22 @@ class ProfileService:
                     "• Nenhuma despesa fixa cadastrada.\n"
                     "_Use  *!adicionar despesa seguro 180 26*_"
                 )
+
+            # ── Seção Uso Pessoal ──────────────────────────────────────────────
+            secao_uso_pessoal = ""
+            if tem_uso_pessoal:
+                saldo_p_emoji = "💰" if saldo_pessoal >= 0 else "🔴"
+                linhas_up = [f"👤  *USO PESSOAL DO MÊS* \n"]
+                if rec_pessoal > 0:
+                    linhas_up.append(f"• (+) Entradas pessoais:  *{_fmt_brl(rec_pessoal)}*  ({n_rec_p} lançamento{'s' if n_rec_p != 1 else ''})")
+                if desp_pessoal > 0:
+                    linhas_up.append(f"• (-) Saídas pessoais:  *{_fmt_brl(desp_pessoal)}*  ({n_desp_p} lançamento{'s' if n_desp_p != 1 else ''})")
+                linhas_up.append(f"{saldo_p_emoji}  Saldo pessoal do mês:  *{_fmt_brl(saldo_pessoal)}*")
+                linhas_up.append(
+                    "_Esses valores não afetam o resultado operacional acima — "
+                    "são registros de vida pessoal fora do turno._"
+                )
+                secao_uso_pessoal = "\n".join(linhas_up) + "\n\n"
 
             # ── Seção caixas de provisão ──────────────────────────────────────
             if caixas:
@@ -575,7 +635,7 @@ class ProfileService:
                 + f"⛽  *ESTOQUE NO COFRE* \n"
                 f"{estoque_str}\n\n"
                 f"📊  *DESEMPENHO DO MÊS ATUAL* \n"
-                f"• Receitas:  *{_fmt_brl(float(fat_bruto))}*\n"
+                f"• Receitas:  *{_fmt_brl(float(fat_bruto))}*  _(operacional)_\n"
                 f"• Despesas:  *{_fmt_brl(float(desp_total))}*\n"
                 f"• Lucro Real Acumulado:  *{_fmt_brl(float(lucro_parcial))}*\n"
                 f"• Meta Mensal:  *{_fmt_brl(float(meta_mensal))}*\n"
@@ -583,7 +643,9 @@ class ProfileService:
                 + (f"• Dias Úteis Restantes (est.):  *{dias_uteis_restantes} dias*\n" if dias_uteis_restantes > 0 else "")
                 + linha_projecao
                 + alerta_ritmo
-                + f"\n\n🎯  *METAS E PISOS* \n"
+                + f"\n\n"
+                + secao_uso_pessoal
+                + f"🎯  *METAS E PISOS* \n"
                 f"• Meta Diária:  *{_fmt_brl(float(meta_diaria))}*  ({dias_uteis} dias úteis/mês)\n"
                 f"• Piso por KM:  *{_fmt_brl(piso_km)}/km*   Piso por Hora:  *{_fmt_brl(piso_hora)}/h*\n\n"
                 f"📌  *DESPESAS FIXAS MENSAIS* \n"

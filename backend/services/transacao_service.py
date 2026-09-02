@@ -125,6 +125,17 @@ class TransacaoService:
                 turno_id = str(turno_ativo["id"]) if turno_ativo else None
                 veiculo_id = str(turno_ativo["veiculo_id"]) if turno_ativo else None
 
+                # Determina contexto operacional para rastreabilidade contábil.
+                # 'uso_pessoal' identifica lançamentos feitos fora de turno —
+                # o ProfileService os segrega do resultado operacional no Raio-X.
+                # Combustível abastecido fora de turno é operacional (entra no cofre),
+                # portanto mantém contexto NULL (padrão operacional implícito).
+                _eh_fora_turno = turno_id is None
+                _eh_combustivel = categoria.lower() == "combustivel"
+                contexto_op: str | None = (
+                    "uso_pessoal" if _eh_fora_turno and not _eh_combustivel else None
+                )
+
                 if not veiculo_id:
                     veiculo_row = await conn.fetchrow(
                         "SELECT id FROM public.veiculos WHERE motorista_id = $1::uuid AND ativo = TRUE ORDER BY selecionado DESC, created_at DESC LIMIT 1;",
@@ -441,8 +452,9 @@ class TransacaoService:
                 INSERT INTO public.transacoes (
                     motorista_id, turno_id, veiculo_id, tipo_movimentacao, categoria,
                     valor, descricao, wpp_msg_id,
-                    litros_abastecidos, preco_por_litro, odometro_abastecimento, tanque_cheio
-                ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    litros_abastecidos, preco_por_litro, odometro_abastecimento, tanque_cheio,
+                    contexto_operacional
+                ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 ON CONFLICT (wpp_msg_id) DO NOTHING
                 RETURNING id, data_transacao;
                 """
@@ -450,7 +462,7 @@ class TransacaoService:
                     query_insert,
                     motorista_id, turno_id, veiculo_id, tipo_validado, categoria,
                     valor_decimal, descricao, wpp_msg_id,
-                    litros_dec, preco_dec, odo_dec, tanque_cheio,
+                    litros_dec, preco_dec, odo_dec, tanque_cheio, contexto_op,
                 )
 
                 if row is None:

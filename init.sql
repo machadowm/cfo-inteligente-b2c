@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict HGX7hRR6AY1WRkNgtzumk6d07eFUnNDG53gh4fBOp0jfAooB60ymF1koMwA6qWe
+\restrict 0XWETnmgfCgIqY9px2BZQwPMBln0WmJRgwLcsAfkCncZZVIedPYcpgXy23e8H9L
 
 -- Dumped from database version 15.18
 -- Dumped by pg_dump version 15.18
@@ -45,6 +45,7 @@ ALTER TABLE IF EXISTS ONLY public.fechamento_diario DROP CONSTRAINT IF EXISTS fe
 ALTER TABLE IF EXISTS ONLY public.fechamento_diario DROP CONSTRAINT IF EXISTS fechamento_diario_motorista_id_fkey;
 ALTER TABLE IF EXISTS ONLY public.dlq_eventos DROP CONSTRAINT IF EXISTS dlq_eventos_motorista_id_fkey;
 ALTER TABLE IF EXISTS ONLY public.despesas_fixas_mensais DROP CONSTRAINT IF EXISTS despesas_fixas_mensais_motorista_id_fkey;
+ALTER TABLE IF EXISTS ONLY public.despesas_fixas_mensais DROP CONSTRAINT IF EXISTS despesas_fixas_mensais_caixa_id_fkey;
 ALTER TABLE IF EXISTS ONLY public.caixas_provisao DROP CONSTRAINT IF EXISTS caixas_provisao_motorista_id_fkey;
 ALTER TABLE IF EXISTS ONLY public.assinaturas DROP CONSTRAINT IF EXISTS assinaturas_motorista_id_fkey;
 DROP TRIGGER IF EXISTS trig_motoristas_atualizado_em ON public.motoristas;
@@ -52,6 +53,7 @@ DROP TRIGGER IF EXISTS trig_caixas_atualizacao ON public.caixas_provisao;
 DROP TRIGGER IF EXISTS trg_trava_periodo_transacoes ON public.transacoes;
 DROP INDEX IF EXISTS public.idx_veiculos_motorista;
 DROP INDEX IF EXISTS public.idx_veiculos_estoque_gin;
+DROP INDEX IF EXISTS public.idx_veiculo_selecionado_unico;
 DROP INDEX IF EXISTS public.idx_unico_turno_aberto;
 DROP INDEX IF EXISTS public.idx_unico_fechamento_periodo;
 DROP INDEX IF EXISTS public.idx_turnos_veiculo;
@@ -59,6 +61,7 @@ DROP INDEX IF EXISTS public.idx_turnos_motorista;
 DROP INDEX IF EXISTS public.idx_transacoes_veiculo;
 DROP INDEX IF EXISTS public.idx_transacoes_turno;
 DROP INDEX IF EXISTS public.idx_transacoes_recalibracao_telemetria;
+DROP INDEX IF EXISTS public.idx_transacoes_odometro_gap;
 DROP INDEX IF EXISTS public.idx_transacoes_motorista;
 DROP INDEX IF EXISTS public.idx_transacoes_data;
 DROP INDEX IF EXISTS public.idx_transacoes_created;
@@ -72,6 +75,7 @@ DROP INDEX IF EXISTS public.idx_fechamento_motorista;
 DROP INDEX IF EXISTS public.idx_dlq_payload_gin;
 DROP INDEX IF EXISTS public.idx_dlq_motorista;
 DROP INDEX IF EXISTS public.idx_despesas_fixas_motorista;
+DROP INDEX IF EXISTS public.idx_despesas_fixas_caixa;
 DROP INDEX IF EXISTS public.idx_caixas_provisao_motorista;
 DROP INDEX IF EXISTS public.idx_assinaturas_motorista;
 ALTER TABLE IF EXISTS ONLY public.veiculos DROP CONSTRAINT IF EXISTS veiculos_placa_key;
@@ -222,8 +226,8 @@ CREATE TABLE public.caixas_provisao (
     motorista_id uuid NOT NULL,
     nome_caixa character varying(50) NOT NULL,
     saldo_atual numeric(14,4) DEFAULT 0.00,
-    meta_valor numeric(14,4) DEFAULT NULL,  -- teto da caixinha; NULL = sem limite (acumulação livre)
-    ultima_atualizacao timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+    ultima_atualizacao timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    meta_valor numeric(14,4) DEFAULT NULL::numeric
 );
 
 
@@ -238,9 +242,9 @@ CREATE TABLE public.despesas_fixas_mensais (
     valor_mensal numeric(14,4) NOT NULL,
     dias_trabalho_previstos integer NOT NULL,
     valor_pro_rata_diario numeric(14,4) GENERATED ALWAYS AS ((valor_mensal / (NULLIF(dias_trabalho_previstos, 0))::numeric)) STORED,
-    dia_vencimento integer NOT NULL,
     ativo boolean DEFAULT true,
-    caixa_id uuid,  -- FK para caixas_provisao; nullable (despesa sem caixa vinculada é válida)
+    caixa_id uuid,
+    dias_vencimento integer[] DEFAULT ARRAY[1] NOT NULL,
     CONSTRAINT despesas_fixas_mensais_dias_trabalho_previstos_check CHECK ((dias_trabalho_previstos > 0))
 );
 
@@ -456,7 +460,9 @@ CREATE TABLE public.veiculos (
     qtd_tanques integer DEFAULT 1,
     is_hibrido boolean DEFAULT false,
     is_eletrico boolean DEFAULT false,
-    selecionado boolean NOT NULL DEFAULT false
+    dias_trabalho_semana integer DEFAULT 6 NOT NULL,
+    selecionado boolean DEFAULT false NOT NULL,
+    CONSTRAINT veiculos_dias_trabalho_semana_check CHECK (((dias_trabalho_semana >= 1) AND (dias_trabalho_semana <= 7)))
 );
 
 
@@ -472,11 +478,13 @@ COPY public.assinaturas (id, motorista_id, gateway_id, plano, data_vencimento, s
 -- Data for Name: caixas_provisao; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-COPY public.caixas_provisao (id, motorista_id, nome_caixa, saldo_atual, ultima_atualizacao) FROM stdin;
-59539b40-b01d-4021-858a-3857593d175b	4ef8c731-7878-4091-923d-50f1c06c34d0	Manutenção Corretiva (Pneus/Freios)	0.0000	2026-08-30 09:33:56.742338-03
-1a5fb189-3c22-43ee-bf7c-82cc7fed79f2	4ef8c731-7878-4091-923d-50f1c06c34d0	Amortização de IPVA/Seguro	0.0000	2026-08-30 09:33:56.742338-03
-0a885bed-68d0-4765-b10f-c263069d202b	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	Manutenção Corretiva (Pneus/Freios)	0.0000	2026-08-30 14:57:03.318752-03
-5898f3eb-f30c-4f9e-9aa2-8ac7822f151a	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	Amortização de IPVA/Seguro	0.0000	2026-08-30 14:57:03.318752-03
+COPY public.caixas_provisao (id, motorista_id, nome_caixa, saldo_atual, ultima_atualizacao, meta_valor) FROM stdin;
+0a885bed-68d0-4765-b10f-c263069d202b	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	Manutenção Corretiva (Pneus/Freios)	0.0000	2026-08-30 14:57:03.318752-03	\N
+5898f3eb-f30c-4f9e-9aa2-8ac7822f151a	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	Amortização de IPVA/Seguro	0.0000	2026-08-30 14:57:03.318752-03	\N
+a5427f29-1eca-44ca-ba46-e56165d3a7c1	4ef8c731-7878-4091-923d-50f1c06c34d0	internet celular	4.4900	2026-09-01 02:26:46.263511-03	44.9000
+6f625fc0-9d39-4d3b-a8b5-01a8ec5c25a0	4ef8c731-7878-4091-923d-50f1c06c34d0	internet casa	12.0000	2026-09-01 02:26:46.263511-03	120.0000
+4f9f18a6-0961-418d-8a0d-7aae737ec949	4ef8c731-7878-4091-923d-50f1c06c34d0	Água	6.4516	2026-09-01 02:26:46.263511-03	200.0000
+82c6eb70-f658-4e28-a88d-bfad66ab6e93	4ef8c731-7878-4091-923d-50f1c06c34d0	Luz	0.0032	2026-09-02 08:29:28.19958-03	400.0000
 \.
 
 
@@ -484,7 +492,11 @@ COPY public.caixas_provisao (id, motorista_id, nome_caixa, saldo_atual, ultima_a
 -- Data for Name: despesas_fixas_mensais; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-COPY public.despesas_fixas_mensais (id, motorista_id, nome, valor_mensal, dias_trabalho_previstos, dia_vencimento, ativo) FROM stdin;
+COPY public.despesas_fixas_mensais (id, motorista_id, nome, valor_mensal, dias_trabalho_previstos, ativo, caixa_id, dias_vencimento) FROM stdin;
+79221734-8552-41f4-b810-02607e1a0667	4ef8c731-7878-4091-923d-50f1c06c34d0	Luz	400.0000	31	f	82c6eb70-f658-4e28-a88d-bfad66ab6e93	{1}
+32e97fbe-7c21-443e-8f6d-66a52a73dca3	4ef8c731-7878-4091-923d-50f1c06c34d0	Água	200.0000	31	f	4f9f18a6-0961-418d-8a0d-7aae737ec949	{1}
+9d5c8714-f93c-4791-b9cb-c4bffe4bd689	4ef8c731-7878-4091-923d-50f1c06c34d0	internet celular	44.9000	10	f	a5427f29-1eca-44ca-ba46-e56165d3a7c1	{1}
+d9ba00fa-d3ca-44a4-94a4-bbee7413aded	4ef8c731-7878-4091-923d-50f1c06c34d0	internet casa	120.0000	10	f	6f625fc0-9d39-4d3b-a8b5-01a8ec5c25a0	{1}
 \.
 
 
@@ -502,6 +514,10 @@ COPY public.dlq_eventos (id, motorista_id, payload_original, motivo_falha, tenta
 
 COPY public.fechamento_diario (id, motorista_id, turno_id, faturamento_bruto, custo_variavel_direto, custo_fixo_rateado, lucro_liquido_real, km_rodados, clima_predominante, data_fechamento, provisao_descontada) FROM stdin;
 e5e3977a-985e-4b9d-9067-ebbd9e982b6d	4ef8c731-7878-4091-923d-50f1c06c34d0	a20e342c-e0ed-4348-ac0f-caf9c1bbe3c7	380.0000	59.8118	42.0000	278.1882	123.00	\N	2026-08-30	0.0000
+4d9af8d2-dcde-45b9-8812-9de3ed453cd4	4ef8c731-7878-4091-923d-50f1c06c34d0	1aae7ca1-8582-4027-a0ca-fdaa52f0a420	0.0000	0.0000	77.8448	-77.8448	0.00	\N	2026-09-01	35.8448
+84b09bfb-8257-4af9-a974-34872e238c68	4ef8c731-7878-4091-923d-50f1c06c34d0	995b704d-37ce-442a-a63b-f77232fba851	0.0000	0.0000	0.0000	0.0000	0.00	\N	2026-09-01	0.0000
+6950d192-db0c-48ef-aa61-4b864d1859cd	4ef8c731-7878-4091-923d-50f1c06c34d0	28ab3e3d-001d-4301-9bbe-0289360eea2e	0.0000	0.0000	0.0000	0.0000	0.00	\N	2026-09-01	0.0000
+b1ba8500-911b-4d8d-b678-7dc071cd24b4	4ef8c731-7878-4091-923d-50f1c06c34d0	67ee4d10-88c3-4dee-a148-c253231813dd	248.6100	52.6022	0.0000	196.0078	84.00	\N	2026-09-01	0.0000
 \.
 
 
@@ -529,6 +545,13 @@ COPY public.lgpd_logs (id, motorista_id, acao_realizada, ip_origem, data_evento)
 79dce11d-28e0-4a2b-8b11-0cd8e75d258e	4ef8c731-7878-4091-923d-50f1c06c34d0	UPGRADE_DATABASE_SCHEMA_V4_PAUSAS_KM	127.0.0.1	2026-08-29 23:51:24.102327-03
 4b8bc4cd-c1d4-4da4-84e8-e30cc3dd4824	4ef8c731-7878-4091-923d-50f1c06c34d0	UPGRADE_DATABASE_SCHEMA_V3	127.0.0.1	2026-08-29 23:52:05.096587-03
 2638394c-ad67-444c-b619-5da9e23d7b61	4ef8c731-7878-4091-923d-50f1c06c34d0	UPGRADE_SCHEMA_V8_FULL_TO_FULL	127.0.0.1	2026-08-31 12:09:22.506907-03
+373c30a2-de84-4548-8cf0-0f66b1eef93b	4ef8c731-7878-4091-923d-50f1c06c34d0	UPGRADE_SCHEMA_V9_CAIXAS_PROVISAO	127.0.0.1	2026-08-31 19:04:09.035286-03
+7e51e1da-7dc8-438b-a7b5-b0dc345e704b	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	UPGRADE_SCHEMA_V9_CAIXAS_PROVISAO	127.0.0.1	2026-08-31 19:04:09.035286-03
+67fef244-bf21-4dc3-b0a7-adbd14ea4c1f	00000000-0000-0000-0000-000000000000	migracao_v10_pisos	migration_script	2026-08-31 19:07:05.609676-03
+a700ee7d-8386-4178-9ac8-6bfe69b4fae4	00000000-0000-0000-0000-000000000000	migracao_v11_caixa_meta	migration_script	2026-08-31 20:19:04.811335-03
+07c0fdd8-62ba-49a7-9fae-4e642b576213	00000000-0000-0000-0000-000000000000	migracao_v12_caixa_meta_backfill	migration_script	2026-09-01 00:58:16.969105-03
+31bad856-32f2-4bac-9cee-5a9176992294	00000000-0000-0000-0000-000000000000	migracao_v13_dias_trabalho_semana	migration_script	2026-09-01 02:54:47.686053-03
+83a28f32-198f-430c-8868-e65fa29d6674	00000000-0000-0000-0000-000000000000	migracao_v14_multiplos_vencimentos	migration_script	2026-09-01 02:54:57.883714-03
 \.
 
 
@@ -536,9 +559,9 @@ COPY public.lgpd_logs (id, motorista_id, acao_realizada, ip_origem, data_evento)
 -- Data for Name: motoristas; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-COPY public.motoristas (id, telefone, nome, status_assinatura, ativo, criado_em, atualizado_em, meta_mensal_faturamento, dias_uteis_mes, nome_social, meta_faturamento_diario, meta_faturamento_semanal, meta_horas_diarias, meta_km_diarios, possui_multiplos_veiculos) FROM stdin;
-4ef8c731-7878-4091-923d-50f1c06c34d0	5513997971393	Willian Machado	TRIAL	t	2026-08-29 09:33:13.797524-03	2026-08-29 09:35:05.48117-03	9100.0000	26	\N	0.0000	0.0000	8.00	0.00	f
-bbe4e5f7-2137-4a29-a28d-a9b629be82cb	5513981454327	Gabriel Machado	TRIAL	t	2026-08-30 14:57:03.318752-03	2026-08-30 14:57:03.318752-03	12000.0000	26	\N	0.0000	0.0000	8.00	0.00	f
+COPY public.motoristas (id, telefone, nome, status_assinatura, ativo, criado_em, atualizado_em, meta_mensal_faturamento, dias_uteis_mes, nome_social, meta_faturamento_diario, meta_faturamento_semanal, meta_horas_diarias, meta_km_diarios, possui_multiplos_veiculos, piso_ganho_km, piso_ganho_hora) FROM stdin;
+4ef8c731-7878-4091-923d-50f1c06c34d0	5513997971393	Willian Machado	TRIAL	t	2026-08-29 09:33:13.797524-03	2026-08-29 09:35:05.48117-03	9100.0000	26	\N	0.0000	0.0000	8.00	0.00	f	2.0000	30.0000
+bbe4e5f7-2137-4a29-a28d-a9b629be82cb	5513981454327	Gabriel Machado	TRIAL	t	2026-08-30 14:57:03.318752-03	2026-08-30 14:57:03.318752-03	12000.0000	26	\N	0.0000	0.0000	8.00	0.00	f	2.0000	30.0000
 \.
 
 
@@ -572,6 +595,12 @@ cd8df731-e2f3-4a49-bbda-a218c025f731	4ef8c731-7878-4091-923d-50f1c06c34d0	a20e34
 a9f1addd-2fd8-4922-9a98-e9c923b65a65	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	geral	227.0000	\N	\N	\N	\N	\N	f	2026-08-31 13:54:45.597082-03	Gastei 227 no mercado	AC307C9EF7824A6BEDDE30CB9FDD7560	2026-08-31 13:54:45.597082-03	\N	\N	\N	f
 ad0680c1-3146-437f-980f-b1ee11791a2a	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	geral	0.0100	\N	\N	\N	\N	\N	f	2026-08-31 16:16:09.767451-03	Gastei 0,01 em teste	AC66671CB5468BDE947A2CD2A7277B1A	2026-08-31 16:16:09.767451-03	\N	\N	\N	f
 919faca9-9cf9-4b39-8676-7fdb79055da4	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7debe768-155b-4d25-b8a1-22a7b8bd13f5	receita	gorjeta	0.0100	\N	\N	\N	\N	\N	f	2026-08-31 16:16:43.453343-03	Ganhei 0,01 de gorjeta	ACC885857394F81FE64AA9D682CC857B	2026-08-31 16:16:43.453343-03	\N	\N	\N	f
+4f22b693-789c-4f09-9fd3-2f1a5e2a3244	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	geral	44.9000	\N	\N	\N	\N	\N	f	2026-08-31 21:29:09.309517-03	! adicionar despesa internet celular 44,90 10 11	AC22D8AFB6B49FA23A35AD3F17BE38A9	2026-08-31 21:29:09.309517-03	\N	\N	\N	f
+38b3f248-5d1a-4bb6-babe-262007f2d0a4	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	f6e845ed-1ece-411e-b1f8-114246e19150	despesa	combustivel	35.0000	\N	\N	\N	\N	\N	f	2026-09-01 15:22:22.612157-03	Abasteci	AC17FD7599D9F0AE2403FE7FC729367D	2026-09-01 15:22:22.612157-03	9.49	3.6900	180019.00	f
+d46f2fc0-0e4b-4fb9-a9fc-1c88f393f269	4ef8c731-7878-4091-923d-50f1c06c34d0	67ee4d10-88c3-4dee-a148-c253231813dd	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	geral	8.5000	\N	\N	\N	\N	\N	f	2026-09-01 18:25:30.162578-03	Gastei 8,5 no energético	AC58F8A9860B59CCF3CDB3CA578DF917	2026-09-01 18:25:30.162578-03	\N	\N	\N	f
+76e20216-3fdb-4475-88aa-496eacbbc8d6	4ef8c731-7878-4091-923d-50f1c06c34d0	67ee4d10-88c3-4dee-a148-c253231813dd	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	combustivel	42.0000	\N	\N	\N	\N	\N	f	2026-09-01 19:46:34.713059-03	Abasteci	AC6B3BA731DF7B743699F1B7919868AD	2026-09-01 19:46:34.713059-03	12.03	3.4900	180075.00	f
+ac665616-c9d5-447a-b706-762541a533f8	4ef8c731-7878-4091-923d-50f1c06c34d0	67ee4d10-88c3-4dee-a148-c253231813dd	7debe768-155b-4d25-b8a1-22a7b8bd13f5	despesa	geral	5.0000	\N	\N	\N	\N	\N	f	2026-09-01 21:50:26.264935-03	Gastei 5 com taxa de saque da Uber	AC22C05A802C60C3FC5828E866772BCC	2026-09-01 21:50:26.264935-03	\N	\N	\N	f
+3dc22c22-a746-474c-b793-114cc68102f6	4ef8c731-7878-4091-923d-50f1c06c34d0	67ee4d10-88c3-4dee-a148-c253231813dd	7debe768-155b-4d25-b8a1-22a7b8bd13f5	receita	geral	248.6100	\N	\N	\N	\N	\N	f	2026-09-01 21:50:48.448576-03	Fiz 248,61 na Uber	AC8BC7CCD72B0ADD40ABB6042B27DFB0	2026-09-01 21:50:48.448576-03	\N	\N	\N	f
 \.
 
 
@@ -581,6 +610,10 @@ ad0680c1-3146-437f-980f-b1ee11791a2a	4ef8c731-7878-4091-923d-50f1c06c34d0	\N	7de
 
 COPY public.turnos (id, motorista_id, veiculo_id, km_inicial, km_final, data_inicio, data_fim, status, km_uso_pessoal) FROM stdin;
 a20e342c-e0ed-4348-ac0f-caf9c1bbe3c7	4ef8c731-7878-4091-923d-50f1c06c34d0	7debe768-155b-4d25-b8a1-22a7b8bd13f5	179869.00	179992.00	2026-08-30 10:07:03.68517-03	2026-08-30 20:46:26.401066-03	concluido	0.00
+1aae7ca1-8582-4027-a0ca-fdaa52f0a420	4ef8c731-7878-4091-923d-50f1c06c34d0	7debe768-155b-4d25-b8a1-22a7b8bd13f5	179992.00	179992.00	2026-09-01 02:26:24.379075-03	2026-09-01 02:26:46.265762-03	concluido	0.00
+995b704d-37ce-442a-a63b-f77232fba851	4ef8c731-7878-4091-923d-50f1c06c34d0	7debe768-155b-4d25-b8a1-22a7b8bd13f5	179992.00	179992.00	2026-09-01 02:56:07.854257-03	2026-09-01 02:56:24.858308-03	concluido	0.00
+28ab3e3d-001d-4301-9bbe-0289360eea2e	4ef8c731-7878-4091-923d-50f1c06c34d0	7debe768-155b-4d25-b8a1-22a7b8bd13f5	179992.00	179992.00	2026-09-01 03:22:35.446361-03	2026-09-01 03:24:24.135575-03	concluido	0.00
+67ee4d10-88c3-4dee-a148-c253231813dd	4ef8c731-7878-4091-923d-50f1c06c34d0	7debe768-155b-4d25-b8a1-22a7b8bd13f5	180020.00	180104.00	2026-09-01 15:33:02.764127-03	2026-09-01 21:50:58.191239-03	concluido	28.00
 \.
 
 
@@ -588,9 +621,10 @@ a20e342c-e0ed-4348-ac0f-caf9c1bbe3c7	4ef8c731-7878-4091-923d-50f1c06c34d0	7debe7
 -- Data for Name: veiculos; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-COPY public.veiculos (id, motorista_id, placa, modelo, tipo_combustivel, estoque_financeiro, ativo, criado_em, created_at, locadora, custo_aluguel_semanal, franquia_km_semanal, valor_km_excedente, escala_trabalho, contrato_personalizado, capacidade_bateria, is_flex, qtd_tanques, is_hibrido, is_eletrico) FROM stdin;
-7debe768-155b-4d25-b8a1-22a7b8bd13f5	4ef8c731-7878-4091-923d-50f1c06c34d0	EPT8C00	Uno Fiat	etanol	{"gnv": {"m3": 0.0, "km_m3": 14.0, "custo_total": 0.0}, "meta": {"is_flex": false, "is_hibrido": false, "is_eletrico": false, "qtd_tanques": 1, "tipo_veiculo": "etanol", "capacidade_tanque_l": 40.0, "capacidade_bateria_kwh": 0.0}, "liquido": {"litros": 1.4, "custo_total": 2.19, "km_l_etanol": 7.5, "etanol_litros": 1.4, "km_l_gasolina": 12.0, "gasolina_litros": 0.0, "etanol_proporcao": 1.0, "gasolina_proporcao": 0.0}, "eletricidade": {"kwh": 0.0, "km_kwh": 6.5, "custo_total": 0.0}}	t	2026-08-29 09:33:13.797524-03	2026-08-29 09:33:13.797524-03	Financiado	252.00	0.00	0.7500	De quarta a segunda (6 dias)	t	30.00	f	1	f	f
-cd405a97-ddb9-4384-8895-628b262bc9dc	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	UDE7C38	Start honda	gasolina	{"gnv": {"m3": 0.0, "km_m3": 14.0, "custo_total": 0.0}, "meta": {"is_flex": false, "is_hibrido": false, "is_eletrico": false, "qtd_tanques": 1, "tipo_veiculo": "gasolina", "categoria_veiculo": "moto", "capacidade_tanque_l": 14.0, "capacidade_bateria_kwh": 0.0}, "liquido": {"litros": 0.0, "custo_total": 0.0, "km_l_etanol": 8.5, "etanol_litros": 0.0, "km_l_gasolina": 12.0, "gasolina_litros": 0.0, "etanol_proporcao": 0.0, "gasolina_proporcao": 1.0}, "eletricidade": {"kwh": 0.0, "km_kwh": 6.5, "custo_total": 0.0}}	t	2026-08-30 14:57:03.318752-03	2026-08-30 14:57:03.318752-03	Localiza Zarp	1020.85	1505.00	0.7500	De quarta a segunda (6 dias)	f	30.00	f	1	f	f
+COPY public.veiculos (id, motorista_id, placa, modelo, tipo_combustivel, estoque_financeiro, ativo, criado_em, created_at, locadora, custo_aluguel_semanal, franquia_km_semanal, valor_km_excedente, escala_trabalho, contrato_personalizado, capacidade_bateria, is_flex, qtd_tanques, is_hibrido, is_eletrico, dias_trabalho_semana, selecionado) FROM stdin;
+7debe768-155b-4d25-b8a1-22a7b8bd13f5	4ef8c731-7878-4091-923d-50f1c06c34d0	EPT8C00	Uno Fiat	etanol	{"gnv": {"m3": 0.0, "km_m3": 14.0, "custo_total": 0.0}, "meta": {"is_flex": false, "is_hibrido": false, "is_eletrico": false, "qtd_tanques": 1, "tipo_veiculo": "etanol", "capacidade_tanque_l": 40.0, "capacidade_bateria_kwh": 0.0}, "liquido": {"litros": 0.83, "custo_total": 2.9, "km_l_etanol": 7.5, "etanol_litros": 0.83, "km_l_gasolina": 12.0, "gasolina_litros": 0.0, "etanol_proporcao": 1.0, "gasolina_proporcao": 0.0}, "eletricidade": {"kwh": 0.0, "km_kwh": 6.5, "custo_total": 0.0}}	t	2026-08-29 09:33:13.797524-03	2026-08-29 09:33:13.797524-03	Financiado	252.00	0.00	0.0000	De quarta a segunda (6 dias)	t	30.00	f	1	f	f	6	t
+cd405a97-ddb9-4384-8895-628b262bc9dc	bbe4e5f7-2137-4a29-a28d-a9b629be82cb	UDE7C38	Start honda	gasolina	{"gnv": {"m3": 0.0, "km_m3": 14.0, "custo_total": 0.0}, "meta": {"is_flex": false, "is_hibrido": false, "is_eletrico": false, "qtd_tanques": 1, "tipo_veiculo": "gasolina", "categoria_veiculo": "moto", "capacidade_tanque_l": 14.0, "capacidade_bateria_kwh": 0.0}, "liquido": {"litros": 0.0, "custo_total": 0.0, "km_l_etanol": 8.5, "etanol_litros": 0.0, "km_l_gasolina": 12.0, "gasolina_litros": 0.0, "etanol_proporcao": 0.0, "gasolina_proporcao": 1.0}, "eletricidade": {"kwh": 0.0, "km_kwh": 6.5, "custo_total": 0.0}}	t	2026-08-30 14:57:03.318752-03	2026-08-30 14:57:03.318752-03	Localiza Zarp	1020.85	1505.00	0.7500	De quarta a segunda (6 dias)	f	30.00	f	1	f	f	6	t
+f6e845ed-1ece-411e-b1f8-114246e19150	4ef8c731-7878-4091-923d-50f1c06c34d0	ABC1D24	Cg 160	gasolina	{"gnv": {"m3": 0.0, "km_m3": 14.0, "custo_total": 0.0}, "meta": {"is_flex": false, "is_hibrido": false, "is_eletrico": false, "qtd_tanques": 1, "tipo_veiculo": "gasolina", "categoria_veiculo": "moto", "capacidade_tanque_l": 10.0, "capacidade_bateria_kwh": 0.0}, "liquido": {"litros": 9.49, "custo_total": 35.0, "km_l_etanol": 24.5, "etanol_litros": 0.0, "km_l_gasolina": 35.0, "gasolina_litros": 9.49, "etanol_proporcao": 0.0, "gasolina_proporcao": 1.0}, "eletricidade": {"kwh": 0.0, "km_kwh": 6.5, "custo_total": 0.0}}	t	2026-09-01 04:12:13.97436-03	2026-09-01 04:12:13.97436-03	Localiza Zarp	1020.85	1505.00	0.7500	De quarta a segunda (6 dias)	f	30.00	f	1	f	f	6	f
 \.
 
 
@@ -761,6 +795,13 @@ CREATE INDEX idx_caixas_provisao_motorista ON public.caixas_provisao USING btree
 
 
 --
+-- Name: idx_despesas_fixas_caixa; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_despesas_fixas_caixa ON public.despesas_fixas_mensais USING btree (caixa_id) WHERE (caixa_id IS NOT NULL);
+
+
+--
 -- Name: idx_despesas_fixas_motorista; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -852,6 +893,20 @@ CREATE INDEX idx_transacoes_motorista ON public.transacoes USING btree (motorist
 
 
 --
+-- Name: idx_transacoes_odometro_gap; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transacoes_odometro_gap ON public.transacoes USING btree (veiculo_id, odometro_abastecimento) WHERE ((estornado = false) AND ((categoria)::text = 'combustivel'::text) AND (odometro_abastecimento IS NOT NULL));
+
+
+--
+-- Name: INDEX idx_transacoes_odometro_gap; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON INDEX public.idx_transacoes_odometro_gap IS 'Índice parcial para detecção de abastecimentos dentro do gap de odômetro inter-turnos (Anacronismo de Competência do Estoque — v17). Cobre queries de range scan em odometro_abastecimento por veiculo_id usadas em TurnoService.abrir_turno e TurnoService.retomar_turno.';
+
+
+--
 -- Name: idx_transacoes_recalibracao_telemetria; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -898,6 +953,13 @@ CREATE UNIQUE INDEX idx_unico_fechamento_periodo ON public.fechamentos_consolida
 --
 
 CREATE UNIQUE INDEX idx_unico_turno_aberto ON public.turnos USING btree (motorista_id) WHERE ((status)::text = ANY ((ARRAY['em_andamento'::character varying, 'em_pausa'::character varying, 'ABERTO'::character varying])::text[]));
+
+
+--
+-- Name: idx_veiculo_selecionado_unico; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_veiculo_selecionado_unico ON public.veiculos USING btree (motorista_id) WHERE ((ativo = true) AND (selecionado = true));
 
 
 --
@@ -949,6 +1011,14 @@ ALTER TABLE ONLY public.assinaturas
 
 ALTER TABLE ONLY public.caixas_provisao
     ADD CONSTRAINT caixas_provisao_motorista_id_fkey FOREIGN KEY (motorista_id) REFERENCES public.motoristas(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: despesas_fixas_mensais despesas_fixas_mensais_caixa_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.despesas_fixas_mensais
+    ADD CONSTRAINT despesas_fixas_mensais_caixa_id_fkey FOREIGN KEY (caixa_id) REFERENCES public.caixas_provisao(id) ON DELETE SET NULL;
 
 
 --
@@ -1226,5 +1296,5 @@ ALTER TABLE public.veiculos ENABLE ROW LEVEL SECURITY;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict HGX7hRR6AY1WRkNgtzumk6d07eFUnNDG53gh4fBOp0jfAooB60ymF1koMwA6qWe
+\unrestrict 0XWETnmgfCgIqY9px2BZQwPMBln0WmJRgwLcsAfkCncZZVIedPYcpgXy23e8H9L
 

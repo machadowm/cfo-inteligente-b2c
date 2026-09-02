@@ -584,7 +584,7 @@ class ProfileService:
                     meta_cx  = float(r["meta_valor"]) if r["meta_valor"] is not None else None
                     aporte   = float(r["aporte_diario"])
 
-                    if meta_cx is not None:
+                    if meta_cx is not None and meta_cx > 0:
                         pct      = min(100.0, saldo_cx / meta_cx * 100)
                         barra_cx = _barra(pct)
                         if saldo_cx >= meta_cx:

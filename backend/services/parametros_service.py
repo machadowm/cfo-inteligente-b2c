@@ -1187,23 +1187,7 @@ class ParametrosService:
         # Se semanal sem dias_semana válido, degrade para mensal
         if _recorrencia == "semanal" and not _dias_semana:
             _recorrencia = "mensal"
-        """Cria ou atualiza automaticamente a despesa fixa e a caixinha do contrato veicular.
 
-        Chamado sempre que o contrato é configurado ou alterado — no onboarding e no
-        comando 'atualizar contrato'.  Garante que:
-
-          • Existe uma despesa fixa "Aluguel <Locadora>" (ou "Parcela Financiamento" /
-            "Custo Veículo Próprio") com o pro-rata correto, vinculada a uma caixinha.
-          • Qualquer despesa de contrato anterior com nome diferente é desativada,
-            evitando que o motorista acumule duplicatas ao trocar de locadora.
-          • Para carro alugado, a caixa "Amortização de IPVA/Seguro" é removida se
-            estiver vazia (IPVA não faz sentido para veículo alugado).
-          • Para carro próprio/financiado, a caixa "Amortização de IPVA/Seguro" é
-            criada/mantida.
-
-        Falhas são logadas mas nunca propagadas — o contrato já foi salvo no banco e
-        esta função é um efeito colateral de enriquecimento do perfil.
-        """
         try:
             locadora_lower = locadora.strip().lower()
             is_proprio = locadora_lower in ("proprietario", "quitado", "financiado")
@@ -1220,10 +1204,33 @@ class ParametrosService:
                 # Locadora real: "Aluguel Zarp", "Aluguel Movida", etc.
                 nome_despesa = f"Aluguel {locadora.strip().title()}"
 
-            # Pro-rata mensal = aluguel semanal × (dias_uteis / 7)
-            # Ex: R$ 1020,85/sem × (26/7) = R$ 3791,58/mês ÷ 26 dias = R$ 145,83/dia
-            valor_mensal = Decimal(str(aluguel_semanal)) * Decimal(str(dias_uteis)) / Decimal("7")
-            valor_mensal = valor_mensal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            # Pro-rata diário:
+            # • Mensal: valor_mensal_calculado / dias_uteis (pro-rata por dia de trabalho)
+            # • Semanal: aluguel_semanal / 7 (custo por dia de calendário, base 28d/4sem)
+            #   — o denominador é sempre 28 para garantir que em 4 semanas a caixinha
+            #   acumule exatamente o valor semanal × 4 necessário.
+            if _recorrencia == "semanal":
+                # valor_mensal = aluguel semanal × 4 semanas (mês padrão de 4 semanas)
+                valor_mensal  = (Decimal(str(aluguel_semanal)) * Decimal("4")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                # pro-rata diário = valor semanal / 7 dias
+                _dias_pro_rata = 28  # denominador fixo para semanal (4 sem × 7 dias)
+            else:
+                # Mensal: pro-rata proporcional aos dias úteis do motorista
+                valor_mensal  = (
+                    Decimal(str(aluguel_semanal)) * Decimal(str(dias_uteis)) / Decimal("7")
+                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                _dias_pro_rata = dias_uteis
+
+            # Meta da caixinha = valor que precisa acumular por ciclo de pagamento
+            # • Mensal: valor_mensal (acumula durante o mês para pagar no dia X)
+            # • Semanal: aluguel_semanal (acumula durante a semana para pagar na terça/etc.)
+            meta_caixa = (
+                Decimal(str(aluguel_semanal)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                if _recorrencia == "semanal"
+                else valor_mensal
+            )
 
             async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                 # 1. Desativa despesas de contrato anteriores com nome diferente
@@ -1240,8 +1247,11 @@ class ParametrosService:
                     motorista_id, nome_despesa,
                 )
 
-                # 2. Cria/atualiza a caixinha do contrato (meta = valor_mensal do contrato)
-                caixa_id = await ParametrosService._obter_ou_criar_caixa(conn, motorista_id, nome_despesa, meta_valor=valor_mensal)
+                # 2. Cria/atualiza a caixinha do contrato
+                # Meta = valor do ciclo de pagamento (semanal: R$ 250 | mensal: R$ 928,57)
+                caixa_id = await ParametrosService._obter_ou_criar_caixa(
+                    conn, motorista_id, nome_despesa, meta_valor=meta_caixa
+                )
 
                 # 3. Upsert da despesa fixa de contrato
                 existing = await conn.fetchrow(
@@ -1256,13 +1266,13 @@ class ParametrosService:
                         "    caixa_id = $3::uuid, dias_vencimento = $4::integer[], "
                         "    recorrencia_tipo = $5, dias_semana = $6::integer[] "
                         "WHERE id = $7::uuid;",
-                        valor_mensal, dias_uteis, caixa_id,
+                        valor_mensal, _dias_pro_rata, caixa_id,
                         _dias_venc, _recorrencia, _dias_semana, str(existing["id"]),
                     )
-                    # Sincroniza meta da caixa com o novo valor_mensal do contrato
+                    # Sincroniza meta da caixa com o ciclo de pagamento correto
                     await conn.execute(
                         "UPDATE public.caixas_provisao SET meta_valor = $1 WHERE id = $2::uuid;",
-                        valor_mensal, caixa_id,
+                        meta_caixa, caixa_id,
                     )
                 else:
                     await conn.execute(
@@ -1272,7 +1282,7 @@ class ParametrosService:
                              dias_vencimento, recorrencia_tipo, dias_semana, caixa_id)
                         VALUES ($1::uuid, $2, $3, $4, $5::integer[], $6, $7::integer[], $8::uuid);
                         """,
-                        motorista_id, nome_despesa, valor_mensal, dias_uteis,
+                        motorista_id, nome_despesa, valor_mensal, _dias_pro_rata,
                         _dias_venc, _recorrencia, _dias_semana, caixa_id,
                     )
 

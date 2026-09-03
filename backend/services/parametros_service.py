@@ -348,6 +348,13 @@ class ParametrosService:
                 "  •  *!selecionar <placa>*                  → Trocar o veículo ativo (fora do turno)",
                 "     _Ex: !selecionar ABC1234_",
                 "",
+                "🤝  *Contrato:*",
+                "  •  *atualizar contrato <Locadora> <Aluguel> <Franquia> [dias] [vencimento]*",
+                "     _Ex mensal:  atualizar contrato Zarp 1020 1505_",
+                "     _Ex semanal: atualizar contrato Pai 250 0 6 toda terça_",
+                "     _Ex mensal múltiplo: atualizar contrato Zarp 1020 1505 6 dia 5 20_",
+                "     _Proprio/Financiado: atualizar contrato Proprietario 90_",
+                "",
                 "_Exemplos:_",
                 "  *!alterar meta mensal 12000*",
                 "  *!alterar tanque 50*",
@@ -493,6 +500,12 @@ class ParametrosService:
                 f"  👉  `!retirar caixa {nome_cx} <valor>`\n\n"
                 f"_Ex: `!retirar caixa {nome_cx} 180`_"
             )
+
+        # ── Comando !atualizar contrato — alias com ! para o fluxo do orchestrator ──
+        # Normaliza para o formato sem ! e deixa cair no catch-all do orchestrator.
+        # Retorna None para que o orchestrator intercepte via is_contrato.
+        if re.match(r"^!atualizar\s+contrato\b", texto, re.IGNORECASE):
+            return None  # deixa o orchestrator processar como "atualizar contrato"
 
         # ── Comando !alterar nome / !alterar nome social ──────────────────
         # Aceita: !alterar nome <valor>  e  !alterar nome social <valor>

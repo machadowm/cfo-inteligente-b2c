@@ -1355,6 +1355,10 @@ class OrchestratorService:
         is_contrato = "atualizar contrato" in texto_limpo
 
         # 1. ATUALIZAÇÃO CONTRATUAL EM TEMPO REAL
+        # Formato: atualizar contrato <Locadora> <Aluguel> <Franquia> [dias/sem] [toda <dia>|dia <n>]
+        # Ex mensal:  atualizar contrato Zarp 1020 1505
+        # Ex semanal: atualizar contrato Pai 250 0 6 toda terça
+        # Ex mensal múltiplo: atualizar contrato Zarp 1020 1505 6 dia 5 20
         if is_contrato:
             await RedisFSMService.limpar_buffer(fsm_turno_key)
             partes = texto_bruto.split()
@@ -1363,18 +1367,58 @@ class OrchestratorService:
                 aluguel_input = converter_para_float(partes[3]) if len(partes) > 3 else 1020.85
                 _locadora_lower = locadora.lower()
                 if _locadora_lower in ["proprietario", "quitado", "financiado"]:
-                    # Próprio/financiado: motorista informa custo/dia, sem franquia.
-                    # Guarda como semanal usando a escala padrão de 6 dias para consistência.
                     dias_semana_novo = 6
-                    aluguel_semanal = aluguel_input * dias_semana_novo
-                    franquia = 0.0
+                    aluguel_semanal  = aluguel_input * dias_semana_novo
+                    franquia         = 0.0
                 else:
-                    # Locadora alugada: motorista informa valor semanal.
-                    # Aceita parâmetro opcional de dias/semana (5ª posição); default 6 (Zarp).
+                    franquia         = converter_para_float(partes[4]) if len(partes) > 4 else 1505.00
                     dias_semana_novo = int(converter_para_float(partes[5])) if len(partes) > 5 else 6
-                    dias_semana_novo = max(1, min(7, dias_semana_novo))  # clamp 1–7
-                    aluguel_semanal = aluguel_input
-                    franquia = converter_para_float(partes[4]) if len(partes) > 4 else 1505.00
+                    dias_semana_novo = max(1, min(7, dias_semana_novo))
+                    aluguel_semanal  = aluguel_input
+
+                # ── Detecção de recorrência de vencimento ──────────────────────
+                # Posições 6+ do comando são opcionais:
+                #   "toda terça"        → semanal, dia ISO 2
+                #   "toda sexta"        → semanal, dia ISO 5
+                #   "dia 5"             → mensal, dia 5
+                #   "dia 5 20"          → mensal, dias 5 e 20
+                # Se omitido: mensal, dia 1 (comportamento anterior)
+                _SEMANA_CONTRATO = {
+                    "seg": 1, "segunda": 1, "ter": 2, "terca": 2, "terca-feira": 2,
+                    "qua": 3, "quarta": 3, "qui": 4, "quinta": 4,
+                    "sex": 5, "sexta": 5, "sab": 6, "sabado": 6, "dom": 7, "domingo": 7,
+                }
+                _resto = [normalizar_texto(p) for p in partes[6:]]
+                _rec_tipo    = "mensal"
+                _dias_venc   = [1]
+                _dias_semana_venc = None
+
+                if _resto:
+                    if _resto[0] == "toda" and len(_resto) >= 2:
+                        # "toda terça" ou "toda sexta"
+                        _dia_nome = _resto[1]
+                        _iso = _SEMANA_CONTRATO.get(_dia_nome)
+                        if _iso:
+                            _rec_tipo = "semanal"
+                            _dias_semana_venc = [_iso]
+                    elif _resto[0] == "dia" and len(_resto) >= 2:
+                        # "dia 5" ou "dia 5 20"
+                        _nums = []
+                        for p in _resto[1:]:
+                            try:
+                                n = int(p)
+                                if 1 <= n <= 31:
+                                    _nums.append(n)
+                            except ValueError:
+                                break
+                        if _nums:
+                            _dias_venc = sorted(set(_nums))
+                    else:
+                        # Tenta interpretar diretamente como nome de dia sem "toda"
+                        _iso = _SEMANA_CONTRATO.get(_resto[0])
+                        if _iso:
+                            _rec_tipo = "semanal"
+                            _dias_semana_venc = [_iso]
 
                 async with DatabaseService.get_tenant_connection(motorista_id) as conn:
                     await conn.execute(
@@ -1385,20 +1429,36 @@ class OrchestratorService:
                         WHERE motorista_id = $5::uuid AND ativo = TRUE AND selecionado = TRUE;
                         """, locadora, aluguel_semanal, franquia, dias_semana_novo, motorista_id
                     )
-                # Invalida cache de perfil para que o próximo 'perfil' reflita o novo contrato
                 await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
-                # Sincroniza despesa fixa + caixinha do contrato automaticamente
                 dias_uteis_motorista = int(motorista.get("dias_uteis_mes") or 26)
                 await ParametrosService.sincronizar_despesa_contrato(
-                    motorista_id, tenant_id, locadora, aluguel_semanal, dias_uteis_motorista
+                    motorista_id, tenant_id, locadora, aluguel_semanal, dias_uteis_motorista,
+                    dias_vencimento=_dias_venc,
+                    recorrencia_tipo=_rec_tipo,
+                    dias_semana=_dias_semana_venc,
                 )
                 locadora_lower = locadora.strip().lower()
                 is_proprio = locadora_lower in ("proprietario", "quitado", "financiado")
-                if is_proprio:
-                    nota_despesa = f"\n\n📌 _Caixinha  *Custo Veículo Próprio*  ou  *Parcela Financiamento*  criada e vinculada — aportes automáticos a cada fechamento de turno._"
+                nota_despesa = (
+                    f"\n\n📌 _Caixinha  *{'Custo Veículo Próprio' if locadora_lower in ('proprietario','quitado') else 'Parcela Financiamento'}*  criada e vinculada._"
+                    if is_proprio else
+                    f"\n\n📌 _Caixinha  *Aluguel {locadora.strip().title()}*  criada e vinculada — aportes automáticos a cada fechamento de turno._"
+                )
+                # Linha descritiva de vencimento para a confirmação
+                if _rec_tipo == "semanal" and _dias_semana_venc:
+                    _DS = {1:"Segunda",2:"Terça",3:"Quarta",4:"Quinta",5:"Sexta",6:"Sábado",7:"Domingo"}
+                    _venc_label = f"toda  *{' e '.join(_DS[d] for d in _dias_semana_venc)}*"
+                elif len(_dias_venc) == 1:
+                    _venc_label = f"todo dia  *{_dias_venc[0]}*"
                 else:
-                    nota_despesa = f"\n\n📌 _Caixinha  *Aluguel {locadora.strip().title()}*  criada e vinculada — aportes automáticos a cada fechamento de turno._"
-                await enviar_whatsapp(remote_jid, f"✅ Contrato atualizado com sucesso para  *{locadora}*! Aluguel rateado recalculado e cofre adaptado. 🛡{nota_despesa}")
+                    _venc_label = "dias " + " e ".join(f"*{d}*" for d in _dias_venc) + " do mês"
+                await enviar_whatsapp(
+                    remote_jid,
+                    f"✅ Contrato atualizado para  *{locadora}* ! 🛡\n"
+                    f"• Vencimento:  {_venc_label}\n"
+                    f"• Recorrência:  *{_rec_tipo}*"
+                    + nota_despesa
+                )
             except Exception as e:
                 logger.error(f"Erro ao atualizar contrato: {e}")
                 await enviar_whatsapp(remote_jid, "⚠ Formato inválido. Use ex: *'atualizar contrato Zarp 1020.85 1505' *")

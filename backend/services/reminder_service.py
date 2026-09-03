@@ -398,6 +398,8 @@ async def _processar_baixas_automaticas() -> None:
                        array_length(dfm.dias_vencimento, 1) AS qtd_vencimentos,
                        venc.dia                        AS dia_vencimento,
                        dfm.caixa_id::text              AS caixa_id,
+                       dfm.parcelas_totais,
+                       dfm.parcelas_pagas,
                        cp.saldo_atual,
                        m.id::text                      AS motorista_id,
                        m.telefone
@@ -408,10 +410,13 @@ async def _processar_baixas_automaticas() -> None:
                 WHERE dfm.ativo = TRUE
                   AND dfm.caixa_id IS NOT NULL
                   AND cp.saldo_atual > 0
+                  AND (dfm.parcelas_totais IS NULL OR dfm.parcelas_pagas < dfm.parcelas_totais)
+                  AND (dfm.data_inicio IS NULL OR dfm.data_inicio <= $3::date)
                   AND LEAST(venc.dia, $1::int) = $2::int;
                 """,
                 int(ultimo_dia_mes_ontem.day),
                 int(ontem.day),
+                ontem,
             )
     except Exception as e:
         logger.error(f"[ReminderService] Erro ao buscar baixas automáticas: {e}")
@@ -485,6 +490,46 @@ async def _processar_baixas_automaticas() -> None:
         # Marca idempotência antes de enviar (mesmo que o envio falhe, não repete a baixa)
         await client.set(redis_key, "1", ex=_TTL_BAIXA_AUTO_S)
 
+        # ── Incrementa parcelas_pagas e auto-desativa se exauriu ──────────
+        _pt = row.get("parcelas_totais")
+        _pp = int(row.get("parcelas_pagas") or 0)
+        _nova_pp = _pp + 1
+        _exaurida = _pt is not None and _nova_pp >= _pt
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                if _exaurida:
+                    # Última parcela paga — desativa a despesa e dispara limpeza da caixa
+                    await conn.execute(
+                        "UPDATE public.despesas_fixas_mensais "
+                        "SET parcelas_pagas = $1, ativo = FALSE "
+                        "WHERE id = $2::uuid AND motorista_id = $3::uuid;",
+                        _nova_pp, despesa_id, motorista_id,
+                    )
+                    # Caixa vazia após a última baixa → exclui automaticamente
+                    if novo_saldo <= Decimal("0.01") and caixa_id:
+                        await conn.execute(
+                            "DELETE FROM public.caixas_provisao "
+                            "WHERE id = $1::uuid AND saldo_atual <= 0.01;",
+                            caixa_id,
+                        )
+                    logger.info(
+                        f"[ReminderService] Despesa exaurida e desativada: motorista={motorista_id} "
+                        f"despesa={nome!r} parcelas={_nova_pp}/{_pt}"
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE public.despesas_fixas_mensais "
+                        "SET parcelas_pagas = $1 "
+                        "WHERE id = $2::uuid AND motorista_id = $3::uuid;",
+                        _nova_pp, despesa_id, motorista_id,
+                    )
+        except Exception as _e:
+            # Falha no incremento não deve impedir o envio da notificação
+            logger.error(
+                f"[ReminderService] Erro ao incrementar parcelas_pagas: "
+                f"motorista={motorista_id} despesa={nome}: {_e}"
+            )
+
         # Monta notificação
         valor_fmt      = f"R$ {float(valor_mensal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         retirada_fmt   = f"R$ {float(retirada):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -493,13 +538,22 @@ async def _processar_baixas_automaticas() -> None:
 
         if faltou <= Decimal("0.01"):
             # Saldo cobriu 100% da parcela — quitado
+            _tag_encerramento = (
+                f"\n\n🏁  *Parcelamento concluído!* Todas as {_pt} parcelas foram quitadas. "
+                f"A despesa foi desativada automaticamente."
+                if _exaurida and _pt and _pt > 1 else
+                f"\n\n🏁  *Despesa única quitada!* Desativada automaticamente."
+                if _exaurida else ""
+            )
+            _prog = f"  (parcela *{_nova_pp}/{_pt}*)" if _pt and not _exaurida else ""
             texto = (
-                f"✅  *Baixa automática — {nome}*\n\n"
+                f"✅  *Baixa automática — {nome}*{_prog}\n\n"
                 f"• Valor mensal:  *{valor_fmt}*\n"
                 + linha_parcela_baixa +
                 f"• Retirado da caixinha:  *{retirada_fmt}*\n"
                 f"• Saldo restante:  *{novo_saldo_fmt}*\n\n"
                 f"_Parcela quitada automaticamente. Cofre atualizado!_ 🛡"
+                + _tag_encerramento
             )
         else:
             # Saldo parcial — informa o que falta para cobrir a parcela

@@ -209,9 +209,11 @@ class ProfileService:
                 despesas_fixas = await conn.fetch(
                     """
                     SELECT nome, valor_mensal, valor_pro_rata_diario, dias_vencimento,
-                           recorrencia_tipo, dias_semana
+                           recorrencia_tipo, dias_semana,
+                           parcelas_totais, parcelas_pagas
                     FROM public.despesas_fixas_mensais
                     WHERE motorista_id = $1::uuid AND ativo = TRUE
+                      AND (parcelas_totais IS NULL OR parcelas_pagas < parcelas_totais)
                     ORDER BY valor_mensal DESC;
                     """,
                     motorista_id,
@@ -554,6 +556,7 @@ class ProfileService:
                     linhas_df.append(
                         f"• {r['nome']}:  *{_fmt_brl(mensal)}/mês*"
                         f"  (≈ {_fmt_brl(diario)}/dia)  {venc_str}{tag_venc}"
+                        + _tag_ciclo_vida(r)
                     )
                 linhas_df.append(f"\n• *Total pro-rata diário: {_fmt_brl(total_df)}*")
                 despesas_fixas_str = "\n".join(linhas_df)

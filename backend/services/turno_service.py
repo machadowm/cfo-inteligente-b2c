@@ -846,12 +846,19 @@ class TurnoService:
                 custo_fixo_contrato = (custo_aluguel_semanal / Decimal(str(dias_semana))).quantize(Decimal("0.02"), rounding=ROUND_HALF_UP)
 
                 # Pro-rata de despesas fixas cadastradas — provisão diária para cada conta
-                # Busca também caixa_id e dia_vencimento para aporte e DRE
+                # Filtra por:
+                #   • ativo = TRUE
+                #   • Ciclo de vida: exaustão (parcelas_pagas < parcelas_totais, ou perpétua)
+                #   • data_inicio: só cobra se a despesa já entrou em vigor
                 despesas_fixas_rows = await conn.fetch(
                     """
-                    SELECT nome, valor_pro_rata_diario, caixa_id, dias_vencimento
+                    SELECT nome, valor_pro_rata_diario, caixa_id, dias_vencimento,
+                           parcelas_totais, parcelas_pagas
                     FROM public.despesas_fixas_mensais
-                    WHERE motorista_id = $1::uuid AND ativo = TRUE;
+                    WHERE motorista_id = $1::uuid
+                      AND ativo = TRUE
+                      AND (parcelas_totais IS NULL OR parcelas_pagas < parcelas_totais)
+                      AND (data_inicio IS NULL OR data_inicio <= CURRENT_DATE);
                     """,
                     motorista_id
                 )

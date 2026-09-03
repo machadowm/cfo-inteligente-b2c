@@ -386,6 +386,84 @@ class ParametrosService:
                 motorista_id, tenant_id, nome_desp, valor_desp, dia_iso
             )
 
+        # ── Despesa ÚNICA: !adicionar despesa unica <nome> <valor> [dia <n>] [a partir de DD/MM] ──
+        # Ex: !adicionar despesa unica manutencao 500
+        # Ex: !adicionar despesa unica seguro 300 dia 15
+        # Ex: !adicionar despesa unica ipva 1200 dia 10 a partir de 01/01
+        match_unica = re.match(
+            r"^!adicionar\s+despesa\s+[uú]nica\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)(.*)?$",
+            texto, re.IGNORECASE,
+        )
+        if match_unica:
+            nome_desp  = match_unica.group(1).strip()[:50]
+            try:
+                valor_desp = Decimal(match_unica.group(2).replace(",", "."))
+            except Exception:
+                return "⚠ Valor inválido. Ex:  *!adicionar despesa unica manutencao 500*"
+            resto      = (match_unica.group(3) or "").lower().strip()
+            # Extrai dia de vencimento se informado ("dia 15")
+            _dia_m = re.search(r'\bdia\s+(\d{1,2})\b', resto)
+            dias_venc_u = [int(_dia_m.group(1))] if _dia_m else [1]
+            invalidos = [d for d in dias_venc_u if not (1 <= d <= 31)]
+            if invalidos:
+                return f"⚠ Dia inválido: {invalidos[0]}. Use um valor entre 1 e 31."
+            # Extrai data de início se informada ("a partir de DD/MM" ou "DD/MM/AAAA")
+            _data_m = re.search(r'a\s+partir\s+de\s+(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{2,4}))?', resto)
+            data_inicio_u = None
+            if _data_m:
+                from datetime import date as _dtu
+                try:
+                    _d, _m = int(_data_m.group(1)), int(_data_m.group(2))
+                    _a = int(_data_m.group(3)) if _data_m.group(3) else _dtu.today().year
+                    _a = _a + 2000 if _a < 100 else _a
+                    data_inicio_u = _dtu(_a, _m, _d)
+                except (ValueError, TypeError):
+                    data_inicio_u = None
+            return await ParametrosService._adicionar_despesa_fixa(
+                motorista_id, tenant_id, nome_desp, valor_desp,
+                None, dias_venc_u,
+                parcelas_totais=1, data_inicio=data_inicio_u,
+            )
+
+        # ── Despesa PARCELADA: !adicionar despesa <nome> <valor> em <N> parcelas [dia <n>] ──
+        # Ex: !adicionar despesa seguro 1200 em 4 parcelas
+        # Ex: !adicionar despesa pneus 800 em 2 parcelas dia 10
+        # Ex: !adicionar despesa pneus 800 em 2 parcelas quinzenal   → dias=[1,15]
+        match_parcelas = re.match(
+            r"^!adicionar\s+despesa\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)\s+em\s+(\d+)\s+parcelas?(.*)?$",
+            texto, re.IGNORECASE,
+        )
+        if match_parcelas:
+            nome_desp   = match_parcelas.group(1).strip()[:50]
+            try:
+                valor_total = Decimal(match_parcelas.group(2).replace(",", "."))
+                n_parcelas  = int(match_parcelas.group(3))
+            except Exception:
+                return "⚠ Formato inválido. Ex:  *!adicionar despesa seguro 1200 em 4 parcelas*"
+            if n_parcelas < 1:
+                return "⚠ O número de parcelas deve ser pelo menos 1."
+            if valor_total <= 0:
+                return "⚠ O valor total deve ser maior que zero."
+            resto_p = (match_parcelas.group(4) or "").lower().strip()
+            # Valor de cada parcela (arredonda para 2 casas; a última parcela absorve resíduo)
+            valor_parcela = (valor_total / Decimal(str(n_parcelas))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            # Verifica se é quinzenal (2 vencimentos no mês: dia 1 e 15)
+            if "quinzenal" in resto_p:
+                dias_venc_p = [1, 15]
+            else:
+                _dia_mp = re.search(r'\bdia\s+(\d{1,2})\b', resto_p)
+                dias_venc_p = [int(_dia_mp.group(1))] if _dia_mp else [1]
+            invalidos = [d for d in dias_venc_p if not (1 <= d <= 31)]
+            if invalidos:
+                return f"⚠ Dia inválido: {invalidos[0]}. Use um valor entre 1 e 31."
+            return await ParametrosService._adicionar_despesa_fixa(
+                motorista_id, tenant_id, nome_desp, valor_parcela,
+                None, dias_venc_p,
+                parcelas_totais=n_parcelas, data_inicio=None,
+            )
+
         # Formato: !adicionar despesa <nome> <valor> [dias_uteis] [venc1] [venc2] ...
         # Exemplos:
         #   !adicionar despesa seguro 180              → dias=auto, vence dia 1
@@ -1032,7 +1110,8 @@ class ParametrosService:
                     """
                     SELECT nome, valor_mensal, dias_trabalho_previstos,
                            valor_pro_rata_diario, dias_vencimento,
-                           recorrencia_tipo, dias_semana
+                           recorrencia_tipo, dias_semana,
+                           parcelas_totais, parcelas_pagas, data_inicio
                     FROM public.despesas_fixas_mensais
                     WHERE motorista_id = $1::uuid AND ativo = TRUE
                     ORDER BY recorrencia_tipo, dias_vencimento[1], valor_mensal DESC;
@@ -1098,9 +1177,24 @@ class ParametrosService:
                     extra = ""
 
                 alerta = ("  " + "  ".join(alertas)) if alertas else ""
+
+                # Tag de ciclo de vida: Parcela X de N / Única / nada para perpétuas
+                _pt = r.get("parcelas_totais")
+                _pp = int(r.get("parcelas_pagas") or 0)
+                if _pt is not None:
+                    _restam = _pt - _pp
+                    if _pt == 1:
+                        tag_ciclo = "  ⚡ _única_"
+                    elif _restam == 1:
+                        tag_ciclo = f"  🔚 _última parcela ({_pp+1}/{_pt})_"
+                    else:
+                        tag_ciclo = f"  📋 _{_pp+1}/{_pt} parcelas_"
+                else:
+                    tag_ciclo = ""
+
                 linhas.append(
                     f"• {nome}:  *R$ {mensal:.2f}/mês*"
-                    f"  (≈ R$ {diario:.2f}/dia)  {venc_str}{extra}{alerta}"
+                    f"  (≈ R$ {diario:.2f}/dia)  {venc_str}{extra}{alerta}{tag_ciclo}"
                 )
             linhas.append(f"\n*Total pro-rata diário: R$ {total_pro_rata:.2f}*")
             linhas.append(
@@ -1413,14 +1507,18 @@ class ParametrosService:
         motorista_id: str, tenant_id: str, nome: str, valor_mensal: Decimal,
         dias: Optional[int],
         dias_vencimento: list[int],
+        parcelas_totais: Optional[int] = None,
+        data_inicio: Optional["date"] = None,
     ) -> str:
         """Insere ou reativa uma despesa fixa mensal e vincula à caixinha de provisão correspondente.
 
         `dias` é o número de dias úteis usado como denominador do pro-rata diário.
         Se None, é preenchido automaticamente com dias_uteis_mes do motorista.
-        Se informado e diferente de dias_uteis_mes, salva mesmo assim mas inclui aviso.
 
-        `dias_vencimento` é a lista de dias do mês em que a despesa vence (ex: [5] ou [5, 20]).
+        `dias_vencimento` é a lista de dias do mês em que a despesa vence.
+
+        `parcelas_totais` — None = perpétua | 1 = única | N > 1 = parcelamento em N vezes.
+        `data_inicio` — None = vigente desde já | date = começa a cobrar a partir desta data.
         """
         if valor_mensal <= 0:
             return "⚠ O valor mensal deve ser maior que zero."
@@ -1461,9 +1559,11 @@ class ParametrosService:
                     await conn.execute(
                         "UPDATE public.despesas_fixas_mensais "
                         "SET valor_mensal = $1, dias_trabalho_previstos = $2, ativo = TRUE, "
-                        "    caixa_id = $3::uuid, dias_vencimento = $4 "
-                        "WHERE id = $5::uuid;",
-                        valor_mensal, dias, caixa_id, dias_vencimento, str(existing["id"]),
+                        "    caixa_id = $3::uuid, dias_vencimento = $4, "
+                        "    parcelas_totais = $5, parcelas_pagas = 0, data_inicio = $6 "
+                        "WHERE id = $7::uuid;",
+                        valor_mensal, dias, caixa_id, dias_vencimento,
+                        parcelas_totais, data_inicio, str(existing["id"]),
                     )
                     # Sincroniza meta da caixa com o novo valor_mensal
                     await conn.execute(
@@ -1475,10 +1575,12 @@ class ParametrosService:
                     await conn.execute(
                         """
                         INSERT INTO public.despesas_fixas_mensais
-                            (motorista_id, nome, valor_mensal, dias_trabalho_previstos, dias_vencimento, caixa_id)
-                        VALUES ($1::uuid, $2, $3, $4, $5::integer[], $6::uuid);
+                            (motorista_id, nome, valor_mensal, dias_trabalho_previstos,
+                             dias_vencimento, caixa_id, parcelas_totais, data_inicio)
+                        VALUES ($1::uuid, $2, $3, $4, $5::integer[], $6::uuid, $7, $8);
                         """,
-                        motorista_id, nome, valor_mensal, dias, dias_vencimento, caixa_id,
+                        motorista_id, nome, valor_mensal, dias, dias_vencimento,
+                        caixa_id, parcelas_totais, data_inicio,
                     )
                     acao = "adicionada"
 
@@ -1487,11 +1589,22 @@ class ParametrosService:
             )
             pro_rata = float(valor_mensal / Decimal(str(dias)))
             venc_str = " e ".join(f"dia *{d}*" for d in dias_vencimento)
+
+            # Linha descritiva de parcelamento
+            if parcelas_totais is None:
+                linha_parcelas = ""
+            elif parcelas_totais == 1:
+                _data_str = f"  (a partir de *{data_inicio.strftime('%d/%m/%Y')}*)" if data_inicio else ""
+                linha_parcelas = f"• Tipo:  *Despesa única*{_data_str}\n"
+            else:
+                linha_parcelas = f"• Parcelamento:  *{parcelas_totais}× de R$ {float(valor_mensal):.2f}*\n"
+
             return (
                 f"✅  *Despesa fixa {acao}!*\n"
                 f"• Nome:  *{nome}*\n"
-                f"• Valor mensal:  *R$ {float(valor_mensal):.2f}*\n"
-                f"• Pro-rata diário:  *R$ {pro_rata:.2f}*  (base: {dias} dias úteis)\n"
+                f"• Valor {'por parcela' if parcelas_totais and parcelas_totais > 1 else 'mensal'}:  *R$ {float(valor_mensal):.2f}*\n"
+                + linha_parcelas
+                + f"• Pro-rata diário:  *R$ {pro_rata:.2f}*  (base: {dias} dias úteis)\n"
                 f"• Vencimento:  *todo {venc_str}*\n"
                 f"• Caixinha vinculada:  *{nome}*  _(aportes automáticos a cada fechamento)_\n\n"
                 f"_Esse custo será deduzido automaticamente em cada fechamento de turno._"

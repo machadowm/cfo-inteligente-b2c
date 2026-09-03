@@ -419,29 +419,37 @@ class ParametrosService:
                 motorista_id, tenant_id, nome_desp, valor_desp, dia_iso
             )
 
-        # ── Despesa ÚNICA: !adicionar despesa unica <nome> <valor> [dia <n>] [a partir de DD/MM] ──
-        # Ex: !adicionar despesa unica manutencao 500
-        # Ex: !adicionar despesa unica seguro 300 dia 15
-        # Ex: !adicionar despesa unica ipva 1200 dia 10 a partir de 01/01
-        match_unica = re.match(
+        # ── Despesa ÚNICA: !adicionar despesa [unica] <nome> <valor> [unica] [dia <n>] [a partir de DD/MM] ──
+        # Suporta:
+        #   !adicionar despesa Manutencao 500 unica dia 15
+        #   !adicionar despesa unica Manutencao 500 dia 15
+        #   !adicionar despesa Manutencao 500 dia 15 unica
+        match_unica_ant = re.match(
             r"^!adicionar\s+despesa\s+[uú]nica\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)(.*)?$",
             texto, re.IGNORECASE,
         )
+        match_unica_pos = re.match(
+            r"^!adicionar\s+despesa\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)\s+[uú]nica(.*)?$",
+            texto, re.IGNORECASE,
+        )
+        match_unica = match_unica_ant or match_unica_pos
         if match_unica:
             nome_desp  = match_unica.group(1).strip()[:50]
             try:
                 valor_desp = Decimal(match_unica.group(2).replace(",", "."))
             except Exception:
-                return "⚠ Valor inválido. Ex:  *!adicionar despesa unica manutencao 500*"
+                return "⚠ Valor inválido. Ex:  *!adicionar despesa Manutencao 500 unica dia 15*"
             resto      = (match_unica.group(3) or "").lower().strip()
-            # Extrai dia de vencimento se informado ("dia 15")
+            # Extrai dia de vencimento se informado ("dia 15" ou número isolado)
             _dia_m = re.search(r'\bdia\s+(\d{1,2})\b', resto)
+            if not _dia_m:
+                _dia_m = re.search(r'\b(\d{1,2})\b', resto)
             dias_venc_u = [int(_dia_m.group(1))] if _dia_m else [1]
             invalidos = [d for d in dias_venc_u if not (1 <= d <= 31)]
             if invalidos:
                 return f"⚠ Dia inválido: {invalidos[0]}. Use um valor entre 1 e 31."
             # Extrai data de início se informada ("a partir de DD/MM" ou "DD/MM/AAAA")
-            _data_m = re.search(r'a\s+partir\s+de\s+(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{2,4}))?', resto)
+            _data_m = re.search(r'(?:a\s+partir\s+de\s+|em\s+)?(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{2,4}))?', resto)
             data_inicio_u = None
             if _data_m:
                 from datetime import date as _dtu
@@ -456,14 +464,14 @@ class ParametrosService:
                 motorista_id, tenant_id, nome_desp, valor_desp,
                 None, dias_venc_u,
                 parcelas_totais=1, data_inicio=data_inicio_u,
+                valor_total=valor_desp,
             )
 
-        # ── Despesa PARCELADA: !adicionar despesa <nome> <valor> em <N> parcelas [dia <n>] ──
-        # Ex: !adicionar despesa seguro 1200 em 4 parcelas
-        # Ex: !adicionar despesa pneus 800 em 2 parcelas dia 10
-        # Ex: !adicionar despesa pneus 800 em 2 parcelas quinzenal   → dias=[1,15]
+        # ── Despesa PARCELADA: !adicionar despesa <nome> <valor> [em] <N> parcelas [dia <n> | quinzenal] ──
+        # Ex: !adicionar despesa seguro 1200 em 4 parcelas todo dia 10
+        # Ex: !adicionar despesa pneus 800 em 2 parcelas quinzenais
         match_parcelas = re.match(
-            r"^!adicionar\s+despesa\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)\s+em\s+(\d+)\s+parcelas?(.*)?$",
+            r"^!adicionar\s+despesa\s+(.+?)\s+([\d]+(?:[.,][\d]+)?)\s+(?:em\s+)?(\d+)\s+parcelas?(.*)?$",
             texto, re.IGNORECASE,
         )
         if match_parcelas:
@@ -472,29 +480,47 @@ class ParametrosService:
                 valor_total = Decimal(match_parcelas.group(2).replace(",", "."))
                 n_parcelas  = int(match_parcelas.group(3))
             except Exception:
-                return "⚠ Formato inválido. Ex:  *!adicionar despesa seguro 1200 em 4 parcelas*"
+                return "⚠ Formato inválido. Ex:  *!adicionar despesa seguro 1200 em 4 parcelas todo dia 10*"
             if n_parcelas < 1:
                 return "⚠ O número de parcelas deve ser pelo menos 1."
             if valor_total <= 0:
                 return "⚠ O valor total deve ser maior que zero."
             resto_p = (match_parcelas.group(4) or "").lower().strip()
-            # Valor de cada parcela (arredonda para 2 casas; a última parcela absorve resíduo)
-            valor_parcela = (valor_total / Decimal(str(n_parcelas))).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-            # Verifica se é quinzenal (2 vencimentos no mês: dia 1 e 15)
-            if "quinzenal" in resto_p:
+
+            is_quinzenal = "quinzenal" in resto_p or "quinzena" in resto_p
+            if is_quinzenal:
                 dias_venc_p = [1, 15]
+                freq_dias = 15
+                # No quinzenal com 2 parcelas no mesmo mês, o valor mensal a provisionar
+                # é o valor total das duas parcelas (ex: R$ 800), e o ReminderService dividirá
+                # pelos 2 vencimentos gerando exatamente R$ 400 por quinzena.
+                if n_parcelas == 2:
+                    valor_mensal_calc = valor_total
+                else:
+                    valor_parcela_unit = (valor_total / Decimal(str(n_parcelas))).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                    valor_mensal_calc = valor_parcela_unit * 2
             else:
+                freq_dias = 30
                 _dia_mp = re.search(r'\bdia\s+(\d{1,2})\b', resto_p)
+                if not _dia_mp:
+                    _dia_mp = re.search(r'\b(\d{1,2})\b', resto_p)
                 dias_venc_p = [int(_dia_mp.group(1))] if _dia_mp else [1]
+                # Mensal: cada mês provisiona 1 parcela
+                valor_mensal_calc = (valor_total / Decimal(str(n_parcelas))).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+
             invalidos = [d for d in dias_venc_p if not (1 <= d <= 31)]
             if invalidos:
                 return f"⚠ Dia inválido: {invalidos[0]}. Use um valor entre 1 e 31."
+
             return await ParametrosService._adicionar_despesa_fixa(
-                motorista_id, tenant_id, nome_desp, valor_parcela,
+                motorista_id, tenant_id, nome_desp, valor_mensal_calc,
                 None, dias_venc_p,
                 parcelas_totais=n_parcelas, data_inicio=None,
+                valor_total=valor_total, frequencia_dias=freq_dias,
             )
 
         # Formato: !adicionar despesa <nome> <valor> [dias_uteis] [venc1] [venc2] ...
@@ -1542,6 +1568,8 @@ class ParametrosService:
         dias_vencimento: list[int],
         parcelas_totais: Optional[int] = None,
         data_inicio: Optional["date"] = None,
+        valor_total: Optional[Decimal] = None,
+        frequencia_dias: Optional[int] = None,
     ) -> str:
         """Insere ou reativa uma despesa fixa mensal e vincula à caixinha de provisão correspondente.
 
@@ -1552,6 +1580,8 @@ class ParametrosService:
 
         `parcelas_totais` — None = perpétua | 1 = única | N > 1 = parcelamento em N vezes.
         `data_inicio` — None = vigente desde já | date = começa a cobrar a partir desta data.
+        `valor_total` — Valor global do contrato para absorção de centavos na última parcela.
+        `frequencia_dias` — Intervalo em dias (ex: 15 para quinzenal, 30 para mensal).
         """
         if valor_mensal <= 0:
             return "⚠ O valor mensal deve ser maior que zero."
@@ -1593,10 +1623,12 @@ class ParametrosService:
                         "UPDATE public.despesas_fixas_mensais "
                         "SET valor_mensal = $1, dias_trabalho_previstos = $2, ativo = TRUE, "
                         "    caixa_id = $3::uuid, dias_vencimento = $4, "
-                        "    parcelas_totais = $5, parcelas_pagas = 0, data_inicio = $6 "
-                        "WHERE id = $7::uuid;",
+                        "    parcelas_totais = $5, parcelas_pagas = 0, data_inicio = $6, "
+                        "    valor_total = $7, frequencia_dias = $8 "
+                        "WHERE id = $9::uuid;",
                         valor_mensal, dias, caixa_id, dias_vencimento,
-                        parcelas_totais, data_inicio, str(existing["id"]),
+                        parcelas_totais, data_inicio, valor_total, frequencia_dias,
+                        str(existing["id"]),
                     )
                     # Sincroniza meta da caixa com o novo valor_mensal
                     await conn.execute(
@@ -1609,11 +1641,13 @@ class ParametrosService:
                         """
                         INSERT INTO public.despesas_fixas_mensais
                             (motorista_id, nome, valor_mensal, dias_trabalho_previstos,
-                             dias_vencimento, caixa_id, parcelas_totais, data_inicio)
-                        VALUES ($1::uuid, $2, $3, $4, $5::integer[], $6::uuid, $7, $8);
+                             dias_vencimento, caixa_id, parcelas_totais, data_inicio,
+                             valor_total, frequencia_dias)
+                        VALUES ($1::uuid, $2, $3, $4, $5::integer[], $6::uuid, $7, $8, $9, $10);
                         """,
                         motorista_id, nome, valor_mensal, dias, dias_vencimento,
                         caixa_id, parcelas_totais, data_inicio,
+                        valor_total, frequencia_dias,
                     )
                     acao = "adicionada"
 
@@ -1626,16 +1660,24 @@ class ParametrosService:
             # Linha descritiva de parcelamento
             if parcelas_totais is None:
                 linha_parcelas = ""
+                lbl_valor = "Valor mensal"
             elif parcelas_totais == 1:
                 _data_str = f"  (a partir de *{data_inicio.strftime('%d/%m/%Y')}*)" if data_inicio else ""
                 linha_parcelas = f"• Tipo:  *Despesa única*{_data_str}\n"
+                lbl_valor = "Valor da despesa"
             else:
-                linha_parcelas = f"• Parcelamento:  *{parcelas_totais}× de R$ {float(valor_mensal):.2f}*\n"
+                _val_parc = (valor_total / Decimal(str(parcelas_totais))) if valor_total else (valor_mensal / Decimal(str(len(dias_vencimento))))
+                _freq_txt = " quinzenais" if frequencia_dias == 15 else ""
+                linha_parcelas = (
+                    f"• Parcelamento:  *{parcelas_totais}×{_freq_txt} de R$ {float(_val_parc):.2f}* "
+                    f"(Total: R$ {float(valor_total or valor_mensal):.2f})\n"
+                )
+                lbl_valor = "Provisão mensal (2 parcelas)" if frequencia_dias == 15 else "Valor por parcela"
 
             return (
                 f"✅  *Despesa fixa {acao}!*\n"
                 f"• Nome:  *{nome}*\n"
-                f"• Valor {'por parcela' if parcelas_totais and parcelas_totais > 1 else 'mensal'}:  *R$ {float(valor_mensal):.2f}*\n"
+                f"• {lbl_valor}:  *R$ {float(valor_mensal):.2f}*\n"
                 + linha_parcelas
                 + f"• Pro-rata diário:  *R$ {pro_rata:.2f}*  (base: {dias} dias úteis)\n"
                 f"• Vencimento:  *todo {venc_str}*\n"
@@ -1834,6 +1876,59 @@ class ParametrosService:
                     "UPDATE public.caixas_provisao SET saldo_atual = $1 WHERE id = $2::uuid;",
                     novo_saldo, str(row["id"]),
                 )
+
+                # Verifica se há despesa parcelada vinculada a esta caixa para controle de concorrência
+                dfm_row = await conn.fetchrow(
+                    """
+                    SELECT id, nome, valor_mensal, parcelas_totais, parcelas_pagas,
+                           dias_vencimento, valor_total
+                    FROM public.despesas_fixas_mensais
+                    WHERE caixa_id = $1::uuid AND ativo = TRUE AND parcelas_totais IS NOT NULL;
+                    """,
+                    str(row["id"])
+                )
+                aviso_parcela = ""
+                if dfm_row:
+                    _pt = dfm_row["parcelas_totais"]
+                    _pp = int(dfm_row["parcelas_pagas"] or 0)
+                    _qtd_v = max(1, len(dfm_row["dias_vencimento"] or [1]))
+                    _val_mensal = Decimal(str(dfm_row["valor_mensal"]))
+                    _val_parc = (_val_mensal / Decimal(str(_qtd_v))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+                    # Se a retirada cobre pelo menos 90% de uma parcela, computa a baixa manual da parcela
+                    if valor >= (_val_parc * Decimal("0.90")):
+                        nova_pp = _pp + 1
+                        if nova_pp >= _pt:
+                            await conn.execute(
+                                "UPDATE public.despesas_fixas_mensais SET parcelas_pagas = $1, ativo = FALSE WHERE id = $2::uuid;",
+                                nova_pp, str(dfm_row["id"])
+                            )
+                            # Se a caixinha ficou vazia, auto-exclui (Auto-Limpeza)
+                            if novo_saldo <= Decimal("0.01"):
+                                await conn.execute(
+                                    "DELETE FROM public.caixas_provisao WHERE id = $1::uuid;",
+                                    str(row["id"])
+                                )
+                                aviso_parcela = (
+                                    f"\n\n🏁  *Parcelamento de {dfm_row['nome']} concluído!* "
+                                    f"Todas as {_pt} parcelas foram quitadas. "
+                                    f"Como o saldo zerou, a caixinha foi arquivada automaticamente."
+                                )
+                            else:
+                                aviso_parcela = (
+                                    f"\n\n🏁  *Parcelamento de {dfm_row['nome']} concluído!* "
+                                    f"Todas as {_pt} parcelas foram quitadas. A despesa foi desativada."
+                                )
+                        else:
+                            await conn.execute(
+                                "UPDATE public.despesas_fixas_mensais SET parcelas_pagas = $1 WHERE id = $2::uuid;",
+                                nova_pp, str(dfm_row["id"])
+                            )
+                            aviso_parcela = (
+                                f"\n\n💳  *Parcela ({nova_pp}/{_pt}) de {dfm_row['nome']} quitada!* "
+                                f"Contador de parcelas atualizado para evitar cobrança duplicada."
+                            )
+
             await ParametrosService._registrar_auditoria(
                 tenant_id, motorista_id, f"retirada_caixa_{nome}", "saldo_atual", -valor
             )
@@ -1847,6 +1942,7 @@ class ParametrosService:
                 f"• Valor retirado:  *R$ {float(valor):.2f}*\n"
                 f"• Novo saldo:  *R$ {float(novo_saldo):.2f}*\n\n"
                 f"_Use este dinheiro para pagar a despesa real quando chegar o vencimento._{meta_str}"
+                + aviso_parcela
             )
         except Exception as exc:
             logger.error(f"[ParametrosService] Erro ao retirar da caixa (motorista={motorista_id}): {exc}")

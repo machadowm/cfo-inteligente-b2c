@@ -74,6 +74,32 @@ DO $$ BEGIN
     END IF;
 END $$;
 
+-- ── 4. valor_total (valor global do contrato para absorção de centavos ímpares) 
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name   = 'despesas_fixas_mensais'
+          AND column_name  = 'valor_total'
+    ) THEN
+        ALTER TABLE public.despesas_fixas_mensais
+            ADD COLUMN valor_total numeric(10,2) DEFAULT NULL;
+    END IF;
+END $$;
+
+-- ── 5. frequencia_dias (ex: 15 para quinzenal, customizável) ──────────────────
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name   = 'despesas_fixas_mensais'
+          AND column_name  = 'frequencia_dias'
+    ) THEN
+        ALTER TABLE public.despesas_fixas_mensais
+            ADD COLUMN frequencia_dias integer DEFAULT NULL;
+    END IF;
+END $$;
+
 -- ── 4. Constraints de integridade ─────────────────────────────────────────────
 -- parcelas_totais deve ser positivo quando informado
 DO $$ BEGIN

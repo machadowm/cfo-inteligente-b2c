@@ -45,6 +45,21 @@ def _barra(pct: float, blocos: int = 10) -> str:
     return "█" * cheios + "░" * (blocos - cheios)
 
 
+def _tag_ciclo_vida(r: dict) -> str:
+    """Retorna tag textual de status do parcelamento / despesa única."""
+    _pt = r.get("parcelas_totais")
+    _pp = int(r.get("parcelas_pagas") or 0)
+    if _pt is not None:
+        _restam = _pt - _pp
+        if _pt == 1:
+            return "  ⚡ _única_"
+        elif _restam <= 1:
+            return f"  🔚 _última parcela ({_pp + 1}/{_pt})_"
+        else:
+            return f"  📋 _parcela {_pp + 1}/{_pt}_"
+    return ""
+
+
 class ProfileService:
     """Gera o relatório de Raio-X completo do motorista em um único bloco de texto."""
 

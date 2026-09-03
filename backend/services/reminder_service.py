@@ -400,6 +400,8 @@ async def _processar_baixas_automaticas() -> None:
                        dfm.caixa_id::text              AS caixa_id,
                        dfm.parcelas_totais,
                        dfm.parcelas_pagas,
+                       dfm.valor_total,
+                       dfm.frequencia_dias,
                        cp.saldo_atual,
                        m.id::text                      AS motorista_id,
                        m.telefone
@@ -435,9 +437,24 @@ async def _processar_baixas_automaticas() -> None:
         saldo_atual  = Decimal(str(row["saldo_atual"]))
         remote_jid   = f"{tenant_id}@s.whatsapp.net"
 
-        # Valor da parcela deste vencimento específico (mesmo critério dos lembretes)
-        qtd_venc      = max(1, int(row["qtd_vencimentos"] or 1))
-        valor_parcela = (valor_mensal / Decimal(str(qtd_venc))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # Valor base da parcela deste vencimento específico (mesmo critério dos lembretes)
+        qtd_venc           = max(1, int(row["qtd_vencimentos"] or 1))
+        valor_parcela_base = (valor_mensal / Decimal(str(qtd_venc))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        # Absorção de resíduo de centavos na última parcela de parcelamento
+        _pt = row.get("parcelas_totais")
+        _pp = int(row.get("parcelas_pagas") or 0)
+        _val_tot_raw = row.get("valor_total")
+        if _pt is not None and (_pp + 1) >= _pt and _val_tot_raw:
+            val_total_dec = Decimal(str(_val_tot_raw))
+            # Resíduo é absorvido na última parcela para fechar 100% do contrato
+            valor_parcela = (val_total_dec - (Decimal(str(_pt - 1)) * valor_parcela_base)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if valor_parcela <= 0:
+                valor_parcela = valor_parcela_base
+        else:
+            valor_parcela = valor_parcela_base
 
         # Linha de contexto de parcela na notificação de baixa
         if qtd_venc <= 1:

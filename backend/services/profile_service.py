@@ -62,8 +62,10 @@ class ProfileService:
                 m = await conn.fetchrow(
                     """
                     SELECT meta_mensal_faturamento, dias_uteis_mes,
-                           COALESCE(piso_ganho_km,   2.0)  AS piso_ganho_km,
-                           COALESCE(piso_ganho_hora, 30.0) AS piso_ganho_hora
+                           COALESCE(piso_ganho_km,       2.0)  AS piso_ganho_km,
+                           COALESCE(piso_ganho_hora,    30.0)  AS piso_ganho_hora,
+                           COALESCE(meta_horas_diarias,  8.0)  AS meta_horas_diarias,
+                           COALESCE(meta_km_diarios,     0.0)  AS meta_km_diarios
                     FROM public.motoristas
                     WHERE id = $1::uuid;
                     """,
@@ -262,6 +264,8 @@ class ProfileService:
             dias_uteis   = int(m["dias_uteis_mes"] or 26)
             piso_km      = float(m["piso_ganho_km"])
             piso_hora    = float(m["piso_ganho_hora"])
+            meta_horas   = float(m["meta_horas_diarias"] or 8.0)
+            meta_km      = float(m["meta_km_diarios"]    or 0.0)
             meta_diaria  = (meta_mensal / Decimal(str(dias_uteis))).quantize(Decimal("0.01")) if dias_uteis > 0 else meta_mensal
 
             # ── Uso Pessoal do mês ─────────────────────────────────────────────
@@ -445,7 +449,7 @@ class ProfileService:
 
                 # Ritmo: faturamento por hora no turno atual vs meta diária
                 fat_por_hora = (fat_p / (minutos_turno / 60)) if minutos_turno > 30 else 0
-                meta_hora_equiv = float(meta_diaria) / 8  # meta horária estimada (8h)
+                meta_hora_equiv = float(meta_diaria) / meta_horas if meta_horas > 0 else 0.0
                 ritmo_emoji = "🔥" if fat_por_hora >= meta_hora_equiv else ("⚠️" if fat_por_hora > 0 else "")
 
                 secao_turno_ativo = (
@@ -648,8 +652,10 @@ class ProfileService:
                 + secao_uso_pessoal
                 + f"🎯  *METAS E PISOS* \n"
                 f"• Meta Diária:  *{_fmt_brl(float(meta_diaria))}*  ({dias_uteis} dias úteis/mês)\n"
-                f"• Piso por KM:  *{_fmt_brl(piso_km)}/km*   Piso por Hora:  *{_fmt_brl(piso_hora)}/h*\n\n"
-                f"📌  *DESPESAS FIXAS MENSAIS* \n"
+                + (f"• Meta de Horas/dia:  *{meta_horas:.0f}h*\n" if meta_horas > 0 and meta_horas != 8.0 else "")
+                + (f"• Meta de KM/dia:  *{meta_km:.0f} km*\n" if meta_km > 0 else "")
+                + f"• Piso por KM:  *{_fmt_brl(piso_km)}/km*   Piso por Hora:  *{_fmt_brl(piso_hora)}/h*\n\n"
+                + f"📌  *DESPESAS FIXAS MENSAIS* \n"
                 f"{despesas_fixas_str}\n\n"
                 f"📦  *CAIXAS DE PROVISÃO* \n"
                 f"{caixas_str}\n\n"

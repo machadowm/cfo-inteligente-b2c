@@ -60,6 +60,8 @@ PARAM_MAP: dict[str, _ParamEntry] = {
     "dias uteis":    ("dias_uteis_mes",            int,     "motoristas", "Dias Úteis/Mês"),
     "piso km":       ("piso_ganho_km",             Decimal, "motoristas", "Piso de Ganho por KM (R$/km)"),
     "piso hora":     ("piso_ganho_hora",           Decimal, "motoristas", "Piso de Ganho por Hora (R$/h)"),
+    "meta horas":    ("meta_horas_diarias",        Decimal, "motoristas", "Meta de Horas Diárias"),
+    "meta km":       ("meta_km_diarios",           Decimal, "motoristas", "Meta de KM Diários"),
     # ── Veículos (colunas planas) ────────────────────────────────────────────
     "aluguel":       ("custo_aluguel_semanal",     Decimal, "veiculos",   "Aluguel Semanal (R$)"),
     "franquia":      ("franquia_km_semanal",       Decimal, "veiculos",   "Franquia KM Semanal (km)"),
@@ -285,6 +287,16 @@ class ParametrosService:
                 "  •  *!alterar dias uteis <n>*      →  Dias úteis trabalhados por mês",
                 "  •  *!alterar piso km <R$/km>*    →  Piso mínimo de ganho por km rodado",
                 "  •  *!alterar piso hora <R$/h>*   →  Piso mínimo de ganho por hora trabalhada",
+                "  •  *!alterar meta horas <h>*     →  Meta de horas diárias de trabalho",
+                "  •  *!alterar meta km <km>*        →  Meta de KM diários a rodar",
+                "",
+                "👤  *Perfil e Veículo:*",
+                "  •  *!alterar nome <novo nome>*          →  Atualizar nome cadastrado",
+                "  •  *!alterar nome social <apelido>*     →  Nome de chamada no chat",
+                "  •  *!alterar modelo <modelo>*           →  Modelo do veículo ativo",
+                "  •  *!alterar placa <placa>*             →  Placa do veículo ativo",
+                "  •  *!alterar combustivel <tipo>*        →  Tipo de combustível",
+                "     _Tipos: gasolina | etanol | flex | hibrido | eletrico | gnv_",
                 "",
                 "🚗  *Contrato e Veículo:*",
                 "  •  *!alterar aluguel <R$/sem>*    →  Custo semanal do aluguel (carros alugados)",
@@ -482,6 +494,46 @@ class ParametrosService:
                 f"_Ex: `!retirar caixa {nome_cx} 180`_"
             )
 
+        # ── Comando !alterar nome / !alterar nome social ──────────────────
+        # Aceita: !alterar nome <valor>  e  !alterar nome social <valor>
+        match_nome = re.match(r"^!alterar\s+nome(?:\s+social)?\s+(.+)$", texto, re.IGNORECASE)
+        if match_nome:
+            return await ParametrosService._alterar_perfil_texto(
+                motorista_id, tenant_id,
+                campo=("nome_social" if "social" in texto.lower() else "nome"),
+                valor=match_nome.group(1).strip()[:150],
+                label=("Nome Social (apelido)" if "social" in texto.lower() else "Nome Cadastrado"),
+            )
+
+        # ── Comando !alterar modelo / !alterar placa ──────────────────────
+        match_veiculo_texto = re.match(
+            r"^!alterar\s+(modelo|placa)\s+(.+)$", texto, re.IGNORECASE
+        )
+        if match_veiculo_texto:
+            campo_vt  = match_veiculo_texto.group(1).lower()
+            valor_vt  = match_veiculo_texto.group(2).strip()
+            if campo_vt == "placa":
+                valor_vt = re.sub(r'[^A-Za-z0-9]', '', valor_vt).upper()
+                if len(valor_vt) != 7:
+                    return "⚠ A placa deve ter 7 caracteres (ex:  *ABC1234* ). Tente novamente."
+            return await ParametrosService._alterar_veiculo_texto(
+                motorista_id, tenant_id,
+                coluna=campo_vt,
+                valor=valor_vt[:150],
+                label=("Modelo do Veículo" if campo_vt == "modelo" else "Placa do Veículo"),
+            )
+
+        # ── Comando !alterar combustivel ──────────────────────────────────
+        # Altera tipo_combustivel + flags is_flex/is_hibrido/is_eletrico + JSONB.meta
+        match_comb = re.match(
+            r"^!alterar\s+combustivel\s+(gasolina|etanol|flex|hibrido|eletrico|gnv)$",
+            texto, re.IGNORECASE,
+        )
+        if match_comb:
+            return await ParametrosService._alterar_combustivel(
+                motorista_id, tenant_id, match_comb.group(1).lower()
+            )
+
         # ── Comando !alterar escala ───────────────────────────────────────
         # Aceita texto descritivo da escala semanal com inferência de dias/semana.
         # Ex: !alterar escala seg a sab   → 6 dias, "Seg a Sáb (6 dias)"
@@ -613,6 +665,128 @@ class ParametrosService:
                 f"coluna={coluna}): {exc}"
             )
             return "❌ Erro interno ao salvar o parâmetro. Verifique o valor e tente novamente."
+
+    @staticmethod
+    async def _alterar_perfil_texto(
+        motorista_id: str, tenant_id: str, campo: str, valor: str, label: str
+    ) -> str:
+        """Atualiza um campo de texto do perfil do motorista (nome ou nome_social)."""
+        _COLUNAS_SEGURAS = {"nome", "nome_social"}
+        if campo not in _COLUNAS_SEGURAS:
+            return "⚠ Campo não permitido."
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                await conn.execute(
+                    f"UPDATE public.motoristas SET {campo} = $1 WHERE id = $2::uuid;",
+                    valor, motorista_id,
+                )
+            await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
+            await ParametrosService._registrar_auditoria(tenant_id, motorista_id, campo, campo, valor)
+            return (
+                f"✅  *{label}*  atualizado!\n"
+                f"• Novo valor:  *{valor}*\n"
+                + ("_Seu nome de chamada foi alterado — aparecerá assim no próximo Raio-X._"
+                   if campo == "nome_social" else
+                   "_Nome cadastrado atualizado com sucesso._")
+            )
+        except Exception as exc:
+            logger.error(f"[ParametrosService] Erro ao alterar {campo} (motorista={motorista_id}): {exc}")
+            return "❌ Erro interno. Tente novamente."
+
+    @staticmethod
+    async def _alterar_veiculo_texto(
+        motorista_id: str, tenant_id: str, coluna: str, valor: str, label: str
+    ) -> str:
+        """Atualiza um campo de texto do veículo ativo (modelo ou placa)."""
+        _COLUNAS_SEGURAS = {"modelo", "placa"}
+        if coluna not in _COLUNAS_SEGURAS:
+            return "⚠ Campo não permitido."
+        try:
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                # placa tem constraint UNIQUE — captura violação amigavelmente
+                try:
+                    await conn.execute(
+                        f"UPDATE public.veiculos SET {coluna} = $1 "
+                        f"WHERE motorista_id = $2::uuid AND ativo = TRUE AND selecionado = TRUE;",
+                        valor, motorista_id,
+                    )
+                except Exception as db_exc:
+                    if "unique" in str(db_exc).lower() or "duplicate" in str(db_exc).lower():
+                        return f"⚠ A placa  *{valor}*  já está cadastrada em outro veículo."
+                    raise
+            await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
+            await ParametrosService._registrar_auditoria(tenant_id, motorista_id, coluna, coluna, valor)
+            return f"✅  *{label}*  atualizado!\n• Novo valor:  *{valor}*"
+        except Exception as exc:
+            logger.error(f"[ParametrosService] Erro ao alterar {coluna} (motorista={motorista_id}): {exc}")
+            return "❌ Erro interno. Tente novamente."
+
+    @staticmethod
+    async def _alterar_combustivel(motorista_id: str, tenant_id: str, tipo: str) -> str:
+        """Atualiza tipo_combustivel + flags booleanas + JSONB.meta no veículo ativo.
+
+        Mantém todos os dados do estoque intactos — apenas atualiza os metadados
+        de motorização para que os próximos cálculos de Power Split usem as flags corretas.
+        """
+        _flags = {
+            "gasolina": {"is_flex": False, "is_hibrido": False, "is_eletrico": False},
+            "etanol":   {"is_flex": False, "is_hibrido": False, "is_eletrico": False},
+            "flex":     {"is_flex": True,  "is_hibrido": False, "is_eletrico": False},
+            "hibrido":  {"is_flex": False, "is_hibrido": True,  "is_eletrico": False},
+            "eletrico": {"is_flex": False, "is_hibrido": False, "is_eletrico": True},
+            "gnv":      {"is_flex": False, "is_hibrido": False, "is_eletrico": False},
+        }
+        flags = _flags.get(tipo)
+        if flags is None:
+            return f"⚠ Combustível  *{tipo}*  não reconhecido."
+
+        _LABEL = {"gasolina": "Gasolina", "etanol": "Etanol", "flex": "Flex (Gasolina/Etanol)",
+                  "hibrido": "Híbrido", "eletrico": "Elétrico", "gnv": "GNV"}
+        try:
+            import json as _json_local
+            async with DatabaseService.get_tenant_connection(motorista_id) as conn:
+                row = await conn.fetchrow(
+                    "SELECT id, estoque_financeiro FROM public.veiculos "
+                    "WHERE motorista_id = $1::uuid AND ativo = TRUE AND selecionado = TRUE FOR UPDATE;",
+                    motorista_id,
+                )
+                if not row:
+                    return "⚠ Nenhum veículo ativo localizado."
+                raw = row["estoque_financeiro"]
+                estoque = _json_local.loads(raw) if isinstance(raw, str) else (raw or {})
+                from services.turno_service import TurnoService
+                estoque = TurnoService._garantir_estrutura_estoque(estoque)
+                # Atualiza as flags de motorização no JSONB.meta
+                estoque["meta"]["tipo_veiculo"]  = tipo
+                estoque["meta"]["is_flex"]        = flags["is_flex"]
+                estoque["meta"]["is_hibrido"]     = flags["is_hibrido"]
+                estoque["meta"]["is_eletrico"]    = flags["is_eletrico"]
+                await conn.execute(
+                    """
+                    UPDATE public.veiculos
+                    SET tipo_combustivel = $1, is_flex = $2, is_hibrido = $3, is_eletrico = $4,
+                        estoque_financeiro = $5::jsonb
+                    WHERE id = $6::uuid;
+                    """,
+                    tipo, flags["is_flex"], flags["is_hibrido"], flags["is_eletrico"],
+                    _json_local.dumps(estoque), str(row["id"]),
+                )
+            await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
+            await ParametrosService._registrar_auditoria(
+                tenant_id, motorista_id, "combustivel", "tipo_combustivel", tipo
+            )
+            aviso = (
+                "\n\n⚠️  _Lembre de conferir os rendimentos com  *!alterar km gasolina*  e  "
+                "*!alterar km etanol*  se necessário._"
+                if tipo == "flex" else ""
+            )
+            return (
+                f"✅  *Combustível*  atualizado para  *{_LABEL[tipo]}* !\n"
+                f"_Os próximos abastecimentos e cálculos de DRE usarão as novas configurações._{aviso}"
+            )
+        except Exception as exc:
+            logger.error(f"[ParametrosService] Erro ao alterar combustivel (motorista={motorista_id}): {exc}")
+            return "❌ Erro interno. Tente novamente."
 
     @staticmethod
     async def _alterar_escala(motorista_id: str, tenant_id: str, valor_bruto: str) -> str:
@@ -768,10 +942,19 @@ class ParametrosService:
                 )
                 estoque[subdict][coluna] = valor_float
 
-                await conn.execute(
-                    "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
-                    _json.dumps(estoque), veiculo_id,
-                )
+                # Sincroniza coluna plana capacidade_bateria quando o motorista altera
+                # capacidade_bateria_kwh no JSONB — evita divergência entre as duas fontes.
+                if coluna == "capacidade_bateria_kwh":
+                    await conn.execute(
+                        "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb, "
+                        "capacidade_bateria = $2 WHERE id = $3::uuid;",
+                        _json.dumps(estoque), valor_float, veiculo_id,
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
+                        _json.dumps(estoque), veiculo_id,
+                    )
 
             await RedisFSMService.limpar_buffer(f"profile:{tenant_id}")
             await ParametrosService._registrar_auditoria(

@@ -231,7 +231,40 @@ class ParametrosService:
                     from services.turno_service import TurnoService
                     estoque = TurnoService._garantir_estrutura_estoque(estoque)
 
-                estoque[subdict][chave] = float(novo_valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                novo_dec = novo_valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+                # Sincronização holística: preserva o CMP unitário e sub-litros
+                if fonte == "litros":
+                    d_liq = estoque.get("liquido", {})
+                    old_q = Decimal(str(d_liq.get("litros", 0.0)))
+                    old_c = Decimal(str(d_liq.get("custo_total", 0.0)))
+                    p_gas = Decimal(str(d_liq.get("gasolina_proporcao", 1.0)))
+                    p_eta = Decimal(str(d_liq.get("etanol_proporcao", 0.0)))
+                    cmp_unit = (old_c / old_q) if (old_q > Decimal("0") and old_c > Decimal("0")) else Decimal("5.85")
+                    
+                    d_liq["litros"] = float(novo_dec)
+                    d_liq["gasolina_litros"] = float((novo_dec * p_gas).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                    d_liq["etanol_litros"]   = float((novo_dec * p_eta).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                    d_liq["custo_total"]     = float((novo_dec * cmp_unit).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                    estoque["liquido"] = d_liq
+
+                elif fonte == "kwh":
+                    d_ele = estoque.get("eletricidade", {})
+                    old_q = Decimal(str(d_ele.get("kwh", 0.0)))
+                    old_c = Decimal(str(d_ele.get("custo_total", 0.0)))
+                    cmp_unit = (old_c / old_q) if (old_q > Decimal("0") and old_c > Decimal("0")) else Decimal("1.20")
+                    d_ele["kwh"] = float(novo_dec)
+                    d_ele["custo_total"] = float((novo_dec * cmp_unit).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                    estoque["eletricidade"] = d_ele
+
+                elif fonte == "m3":
+                    d_gnv = estoque.get("gnv", {})
+                    old_q = Decimal(str(d_gnv.get("m3", 0.0)))
+                    old_c = Decimal(str(d_gnv.get("custo_total", 0.0)))
+                    cmp_unit = (old_c / old_q) if (old_q > Decimal("0") and old_c > Decimal("0")) else Decimal("4.50")
+                    d_gnv["m3"] = float(novo_dec)
+                    d_gnv["custo_total"] = float((novo_dec * cmp_unit).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+                    estoque["gnv"] = d_gnv
 
                 await conn.execute(
                     "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
@@ -249,7 +282,7 @@ class ParametrosService:
             return (
                 f"✅  *Estoque ajustado com sucesso!*\n"
                 f"• {fonte.upper()}:  *{valor_fmt} {unidade}*  registrado no cofre.\n"
-                f"_O CMP (custo médio por unidade) foi preservado. Apenas a quantidade física foi corrigida._"
+                f"_O CMP (custo médio por unidade) e a proporção de combustível foram mantidos coerentes._"
             )
         except Exception as exc:
             logger.error(f"[ParametrosService] Erro ao ajustar estoque (motorista={motorista_id}): {exc}")

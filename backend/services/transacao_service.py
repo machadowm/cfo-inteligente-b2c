@@ -240,8 +240,8 @@ class TransacaoService:
                             if m3_match:
                                 m3_novos = Decimal(m3_match.group(1).replace(',', '.'))
                             else:
-                                # Preço médio de referência GNV: ~3,50/m³
-                                m3_novos = (valor_decimal / Decimal("3.50")).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                                # Preço médio de referência GNV: ~4,50/m³
+                                m3_novos = (valor_decimal / Decimal("4.50")).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
                             dados_gnv["m3"] = float((m3_atual + m3_novos).quantize(Decimal("0.01"), ROUND_HALF_UP))
                             dados_gnv["custo_total"] = float((Decimal(str(dados_gnv["custo_total"])) + valor_decimal).quantize(Decimal("0.01"), ROUND_HALF_UP))
@@ -283,18 +283,31 @@ class TransacaoService:
                                 else:
                                     litros_novos = (valor_decimal / TransacaoService._PRECO_MEDIO_LITRO_FALLBACK)
 
-                            # ── TANQUE-CHEIO SELF-HEAL ───────────────────────────────────────────
-                            # Quando o motorista confirma tanque cheio, sabemos com certeza física
-                            # que o volume real = capacidade nominal.  Descartamos o saldo arrastado,
-                            # ancorámos ao máximo e recalculámos o CMP pelo preço desta nota fiscal.
-                            # Isso corrige desvios acumulados por digitação imprecisa de odômetros,
-                            # abastecimentos sem litros declarados e underflows históricos.
+                            # ── TANQUE-CHEIO SELF-HEAL DE ALTA PRECISÃO ───────────────────────────
+                            # Quando o motorista confirma tanque cheio, ancoramos o volume na capacidade nominal.
+                            # Para precisão química e financeira, calculamos o volume remanescente pré-abastecimento:
+                            #   litros_rem = max(0, capacidade_tanque - litros_novos)
+                            # O resíduo preserva seu mix químico (gas/etanol) e seu CMP contábil. O novo combustível
+                            # é somado ao resíduo, garantindo que o cofre reflita a mistura e os custos reais.
                             if tanque_cheio and capacidade_tanque > Decimal("0"):
                                 litros_base = capacidade_tanque
-                                custo_base  = (capacidade_tanque * (valor_decimal / litros_novos)).quantize(
-                                    Decimal("0.01"), ROUND_HALF_UP
-                                ) if litros_novos > Decimal("0") else valor_decimal
-                                # Redefine proporção química ao combustível puro abastecido
+                                litros_rem = max(Decimal("0.00"), capacidade_tanque - litros_novos)
+
+                                if litros_rem > Decimal("0.00"):
+                                    cmp_ant = (custo_atual / qtd_atual) if qtd_atual > Decimal("0.00") else (
+                                        (valor_decimal / litros_novos) if litros_novos > Decimal("0") else TransacaoService._PRECO_MEDIO_LITRO_FALLBACK
+                                    )
+                                    custo_rem = (litros_rem * cmp_ant).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                                    p_gas_ant = Decimal(str(dados_liq.get("gasolina_proporcao", 1.0)))
+                                    p_eta_ant = Decimal(str(dados_liq.get("etanol_proporcao", 0.0)))
+                                    gas_rem = (litros_rem * p_gas_ant).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                                    eta_rem = (litros_rem * p_eta_ant).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                                else:
+                                    custo_rem = Decimal("0.00")
+                                    gas_rem = Decimal("0.00")
+                                    eta_rem = Decimal("0.00")
+
+                                # Identifica o combustível adicionado neste abastecimento
                                 _tipo_expl_heal = (tipo_combustivel_abastecido or "").lower().strip()
                                 _is_gas_heal = _tipo_expl_heal == "gasolina" or (
                                     not _tipo_expl_heal and ("gasolina" in desc_limpa or (
@@ -303,30 +316,42 @@ class TransacaoService:
                                 _is_eta_heal = _tipo_expl_heal == "etanol" or (
                                     not _tipo_expl_heal and ("etanol" in desc_limpa or "alcool" in desc_limpa)
                                 )
+
                                 if _is_gas_heal:
-                                    dados_liq["gasolina_litros"]  = float(litros_base)
-                                    dados_liq["etanol_litros"]    = 0.0
-                                    dados_liq["gasolina_proporcao"] = 1.0
-                                    dados_liq["etanol_proporcao"]   = 0.0
+                                    gas_final = gas_rem + litros_novos
+                                    eta_final = eta_rem
                                 elif _is_eta_heal:
-                                    dados_liq["gasolina_litros"]  = 0.0
-                                    dados_liq["etanol_litros"]    = float(litros_base)
-                                    dados_liq["gasolina_proporcao"] = 0.0
-                                    dados_liq["etanol_proporcao"]   = 1.0
+                                    gas_final = gas_rem
+                                    eta_final = eta_rem + litros_novos
                                 else:
-                                    # Flex sem especificação: preserva proporção existente sobre novo total
-                                    _p_gas = Decimal(str(dados_liq.get("gasolina_proporcao", 1.0)))
-                                    _p_eta = Decimal(str(dados_liq.get("etanol_proporcao", 0.0)))
-                                    dados_liq["gasolina_litros"] = float((litros_base * _p_gas).quantize(Decimal("0.01"), ROUND_HALF_UP))
-                                    dados_liq["etanol_litros"]   = float((litros_base * _p_eta).quantize(Decimal("0.01"), ROUND_HALF_UP))
-                                dados_liq["litros"]      = float(litros_base)
-                                dados_liq["custo_total"] = float(custo_base)
+                                    # Sem especificação: preserva fração do resíduo ou divide 50/50
+                                    _sub_rem = gas_rem + eta_rem
+                                    if _sub_rem > Decimal("0"):
+                                        gas_final = gas_rem + (litros_novos * (gas_rem / _sub_rem))
+                                        eta_final = eta_rem + (litros_novos * (eta_rem / _sub_rem))
+                                    else:
+                                        gas_final = litros_novos
+                                        eta_final = Decimal("0.00")
+
+                                tot_final = gas_final + eta_final
+                                if tot_final > Decimal("0"):
+                                    p_gas_f = (gas_final / tot_final).quantize(Decimal("0.0001"), ROUND_HALF_UP)
+                                    p_eta_f = (eta_final / tot_final).quantize(Decimal("0.0001"), ROUND_HALF_UP)
+                                else:
+                                    p_gas_f = Decimal("1.0000")
+                                    p_eta_f = Decimal("0.0000")
+
+                                dados_liq["gasolina_litros"]   = float((litros_base * p_gas_f).quantize(Decimal("0.01"), ROUND_HALF_UP))
+                                dados_liq["etanol_litros"]     = float((litros_base * p_eta_f).quantize(Decimal("0.01"), ROUND_HALF_UP))
+                                dados_liq["gasolina_proporcao"]= float(p_gas_f)
+                                dados_liq["etanol_proporcao"]  = float(p_eta_f)
+                                dados_liq["litros"]            = float(litros_base)
+                                dados_liq["custo_total"]       = float((custo_rem + valor_decimal).quantize(Decimal("0.01"), ROUND_HALF_UP))
                                 estoque["liquido"] = dados_liq
                                 logger.info(
-                                    f"[TransacaoService] Tanque-cheio self-heal: motorista={motorista_id} "
-                                    f"capacidade={litros_base} L | novo_cmp=R$ {float(valor_decimal/litros_novos):.4f}/L"
-                                    if litros_novos > 0 else
-                                    f"[TransacaoService] Tanque-cheio self-heal: motorista={motorista_id} capacidade={litros_base} L"
+                                    f"[TransacaoService] Tanque-cheio self-heal refinado: motorista={motorista_id} "
+                                    f"capacidade={litros_base} L | resíduo={float(litros_rem):.1f} L | "
+                                    f"novo_cmp=R$ {float(Decimal(str(dados_liq['custo_total'])) / litros_base):.4f}/L"
                                 )
                                 await conn.execute(
                                     "UPDATE public.veiculos SET estoque_financeiro = $1::jsonb WHERE id = $2::uuid;",
@@ -575,7 +600,7 @@ class TransacaoService:
                   AND estornado = FALSE
                   AND litros_abastecidos IS NOT NULL
                   AND data_transacao > $2
-                  AND odometro_abastecimento < $3;
+                  AND (odometro_abastecimento < $3 OR odometro_abastecimento IS NULL);
                 """,
                 veiculo_id,
                 anterior["data_transacao"],

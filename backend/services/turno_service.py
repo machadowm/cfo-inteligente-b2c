@@ -37,6 +37,54 @@ class TurnoService:
         return km_decimal
 
     @staticmethod
+    def _calcular_km_l_medio_harmonico(
+        km_l_gas: Decimal,
+        km_l_eta: Decimal,
+        p_gas: Decimal,
+        p_eta: Decimal,
+    ) -> Decimal:
+        """
+        Calcula o rendimento médio (km/L) de uma mistura de combustíveis líquidos
+        utilizando a Média Harmônica Ponderada por Volume.
+
+        Em termodinâmica automotiva, consumos específicos volumétricos (L/km)
+        somam-se linearmente. O rendimento combinado (km/L) é o inverso dessa soma:
+            consumo_l_km = (p_gas / km_l_gas) + (p_eta / km_l_eta)
+            km_l_medio   = 1 / consumo_l_km
+        """
+        denom = Decimal("0.0")
+        if km_l_gas > Decimal("0") and p_gas > Decimal("0"):
+            denom += p_gas / km_l_gas
+        if km_l_eta > Decimal("0") and p_eta > Decimal("0"):
+            denom += p_eta / km_l_eta
+        if denom > Decimal("0"):
+            return Decimal("1") / denom
+        return Decimal("10.0")
+
+    @staticmethod
+    def _calcular_custo_km_fallback(
+        is_eletrico: bool,
+        tipo_comb: str,
+        categoria: str,
+        km_l_medio: Optional[Decimal] = None,
+    ) -> Decimal:
+        """
+        Retorna o custo por km estimado quando não há combustível no estoque nem abastecimento registrado.
+        Evita a sobretaxação estática de R$ 0,48/km para motos (gastam ~R$ 0,16/km) ou GNV (~R$ 0,28/km).
+        """
+        if is_eletrico:
+            return Decimal("0.12")
+        tipo_c = (tipo_comb or "").lower()
+        if tipo_c == "gnv":
+            return Decimal("0.28")
+        cat = (categoria or "").lower()
+        if cat == "moto":
+            return Decimal("0.16")
+        if km_l_medio is not None and km_l_medio > Decimal("0"):
+            return (Decimal("5.85") / km_l_medio).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return Decimal("0.48")
+
+    @staticmethod
     def _processar_uso_pessoal(
         km_gap: Decimal,
         estoque: dict,
@@ -130,6 +178,7 @@ class TurnoService:
                 partes.append(f"{float(m3_q):.2f} m³ (R$ {float(c):.2f})")
 
         # Fase 3 — Líquido (Flex / Gasolina)
+        km_l_med = Decimal("10.0")
         if km_restante > Decimal("0") and not is_eletrico and tipo_comb != "gnv":
             liq = estoque["liquido"]
             total_l = max(Decimal("0"), Decimal(str(liq.get("litros", 0.0))))
@@ -139,9 +188,7 @@ class TurnoService:
                 km_l_eta = Decimal(str(liq.get("km_l_etanol",  8.5)))
                 p_gas    = Decimal(str(liq.get("gasolina_proporcao", 1.0)))
                 p_eta    = Decimal(str(liq.get("etanol_proporcao",  0.0)))
-                km_l_med = (p_gas * km_l_gas) + (p_eta * km_l_eta)
-                if km_l_med <= Decimal("0"):
-                    km_l_med = Decimal("10.0")
+                km_l_med = TurnoService._calcular_km_l_medio_harmonico(km_l_gas, km_l_eta, p_gas, p_eta)
                 litros_q = min(total_l, km_restante / km_l_med)
                 c = (litros_q * custo_l / total_l).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 custo += c
@@ -163,7 +210,10 @@ class TurnoService:
 
         # Fase 4 — Fallback SRE: km restantes sem cobertura de estoque
         if km_restante > Decimal("0"):
-            c_fb = (km_restante * Decimal("0.48")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            meta = estoque.get("meta", {})
+            _cat = meta.get("categoria_veiculo", "carro")
+            _custo_km_fb = TurnoService._calcular_custo_km_fallback(is_eletrico, tipo_comb, _cat, km_l_med)
+            c_fb = (km_restante * _custo_km_fb).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             custo += c_fb
             partes.append(f"est. R$ {float(c_fb):.2f} ({float(km_restante):.1f} km s/ estoque)")
 
@@ -697,10 +747,8 @@ class TurnoService:
                         p_gas = Decimal(str(liq.get("gasolina_proporcao", 1.0)))
                         p_eta = Decimal(str(liq.get("etanol_proporcao", 0.0)))
 
-                        # Rendimento médio ponderado da mistura no tanque único
-                        km_l_medio = (p_gas * km_l_gas) + (p_eta * km_l_eta)
-                        if km_l_medio <= 0:
-                            km_l_medio = Decimal("10.0")
+                        # Rendimento médio da mistura no tanque único (Média Harmônica Ponderada por Volume)
+                        km_l_medio = TurnoService._calcular_km_l_medio_harmonico(km_l_gas, km_l_eta, p_gas, p_eta)
 
                         litros_necessarios = km_restante / km_l_medio
                         litros_queimados = min(total_litros, litros_necessarios)
@@ -765,9 +813,7 @@ class TurnoService:
                         _km_l_eta = Decimal(str(liq_ref.get("km_l_etanol",  8.5)))
                         _p_gas    = Decimal(str(liq_ref.get("gasolina_proporcao", 1.0)))
                         _p_eta    = Decimal(str(liq_ref.get("etanol_proporcao",  0.0)))
-                        km_l_fallback = (_p_gas * _km_l_gas) + (_p_eta * _km_l_eta)
-                        if km_l_fallback <= Decimal("0"):
-                            km_l_fallback = Decimal("10.0")
+                        km_l_fallback = TurnoService._calcular_km_l_medio_harmonico(_km_l_gas, _km_l_eta, _p_gas, _p_eta)
 
                         litros_necessarios_restantes = km_restante / km_l_fallback
                         custo_estimado = (litros_necessarios_restantes * preco_litro_real).quantize(
@@ -782,16 +828,14 @@ class TurnoService:
                             f"× R$ {float(preco_litro_real):.3f} = R$ {float(custo_estimado):.2f}"
                         )
                     else:
-                        # FIX #4 — Fallback SRE: sem estoque e sem abastecimento registrado.
-                        # Usa custo por km calibrado por tipo de motorização:
-                        #   Elétrico puro → R$ 0,12/km  (≈ 6 km/kWh × R$ 0,72/kWh médio)
-                        #   Combustão/híbrido → R$ 0,48/km  (≈ 12 km/L × R$ 5,76/L médio)
-                        _custo_km_fb = Decimal("0.12") if is_eletrico else Decimal("0.48")
+                        # Fallback SRE dinâmico por categoria e motorização
+                        _cat = meta.get("categoria_veiculo", "carro")
+                        _custo_km_fb = TurnoService._calcular_custo_km_fallback(is_eletrico, tipo_comb, _cat, km_l_fallback)
                         custo_estimado = (km_restante * _custo_km_fb).quantize(
                             Decimal("0.01"), rounding=ROUND_HALF_UP
                         )
                         custo_combustivel_queimado += custo_estimado
-                        tipo_fb = "elétrico" if is_eletrico else "combustão"
+                        tipo_fb = "elétrico" if is_eletrico else (tipo_comb if tipo_comb == "gnv" else _cat)
                         detalhe_queima.append(f"Falta Estoque ({tipo_fb}): R$ {float(custo_estimado):.2f}")
 
                 # Salva o estoque total recalculado

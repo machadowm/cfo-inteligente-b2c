@@ -368,7 +368,12 @@ class ProfileService:
                 km_l_eta   = Decimal(str(liq.get("km_l_etanol",   8.5)))
                 p_gas      = Decimal(str(liq.get("gasolina_proporcao", 1.0)))
                 p_eta      = Decimal(str(liq.get("etanol_proporcao",  0.0)))
-                km_l_med   = (p_gas * km_l_gas + p_eta * km_l_eta) or Decimal("10.0")
+                _denom_med = Decimal("0.0")
+                if km_l_gas > Decimal("0") and p_gas > Decimal("0"):
+                    _denom_med += p_gas / km_l_gas
+                if km_l_eta > Decimal("0") and p_eta > Decimal("0"):
+                    _denom_med += p_eta / km_l_eta
+                km_l_med   = (Decimal("1") / _denom_med) if _denom_med > Decimal("0") else Decimal("10.0")
                 autonomia  = (litros * km_l_med).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
                 # Mix de combustível (só exibe se flex, ou seja, proporção mista relevante)

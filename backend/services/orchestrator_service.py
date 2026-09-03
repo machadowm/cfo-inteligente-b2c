@@ -157,15 +157,15 @@ def formatar_relatorio_parcial(nome_motorista: str, info: dict) -> str:
     # ── DRE Parcial ────────────────────────────────────────────────────────────
     lucro_sinal = "💰" if lucro_p >= 0 else "🔴"
     dre_parcial = (
-        f"\n📊  *DRE PARCIAL* \n"
+        f"\n📊  *NO MOMENTO* \n"
         f"• Corridas:  *{corridas}*"
         + (f"  ·  Ticket médio: *R$ {ticket_medio:.2f}*" if corridas > 0 else "")
         + "\n"
-        f"• (+) Faturado:  *R$ {fat_p:.2f}*\n"
-        f"• (-) Despesas no turno:  *R$ {desp_p:.2f}*"
-        + (f"  _(combustível: R$ {abastecido:.2f}" + (f" · {litros:.1f} L" if litros > 0 else "") + ")_" if abastecido > 0 else "")
+        f"• Ganhos:  *R$ {fat_p:.2f}*\n"
+        f"• Gastos (turno):  *R$ {desp_p:.2f}*"
+        + (f"  _(abastecido: R$ {abastecido:.2f}" + (f" · {litros:.1f} L" if litros > 0 else "") + ")_" if abastecido > 0 else "")
         + "\n"
-        + f"{lucro_sinal}  *Lucro Parcial:  R$ {lucro_p:.2f}*\n"
+        + f"{lucro_sinal}  *No bolso até agora:  R$ {lucro_p:.2f}*\n"
         + linha_ritmo
         + linha_projecao
     )
@@ -417,8 +417,7 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     linha_km_pessoal = ""
     if km_pessoal_intra > 0:
         linha_km_pessoal = (
-            f"• KM Profissional (serviço):  *{km_profissional:,.1f} km* \n".replace(",", ".") +
-            f"• KM Uso Pessoal (pausa auditada):  *{km_pessoal_intra:,.1f} km*  _(amortizado)_\n".replace(",", ".")
+            f"  _(sendo {km_profissional:,.1f} a serviço e {km_pessoal_intra:,.1f} particular)_\n".replace(",", ".")
         )
 
     # ── 2. Financeiro ─────────────────────────────────────────────────────────
@@ -474,15 +473,15 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
     # ── Linha de resultado ────────────────────────────────────────────────────
     if lucro < 0:
         linha_resultado = (
-            f"🔴  *RESULTADO: R$ {lucro:.2f}*  _(Prejuízo)_\n"
+            f"🔴  LUCRO REAL:    *R$ {lucro:.2f}*  _(Prejuízo)_\n"
         )
     else:
-        linha_resultado = f"💰  *LUCRO LÍQUIDO REAL: R$ {lucro:.2f}* \n"
+        linha_resultado = f"💵  LUCRO REAL:    *R$ {lucro:.2f}* \n"
 
     # ── Linha de provisão no DRE (reserva real, não perda) ───────────────────
     linha_provisao = ""
     if provisao > 0:
-        linha_provisao = f"• (≡) Provisão Despesas Fixas:  *R$ {provisao:.2f}*  _(reservado nas caixas)_\n"
+        linha_provisao = f"──────────────────────────────\n📦  Guardado p/ contas:  *+R$ {provisao:.2f}*\n"
 
     # ── 3. Indicadores de eficiência ─────────────────────────────────────────
     km_por_unidade       = res.get("km_por_litro", 0.0)
@@ -535,17 +534,10 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
 
     if fat_bruto_mes > 0 and dias_uteis_restantes > 0:
         secao_projecao = (
-            f"📅  *4. PROJEÇÃO MENSAL* \n"
-            f"• Meta Mensal:  *R$ {meta_mensal:,.2f}* \n".replace(",", ".") +
-            f"• Faturamento Acumulado (mês):  *R$ {fat_bruto_mes:,.2f}* \n".replace(",", ".") +
-            f"• Dias Úteis Restantes (est.):  *{dias_uteis_restantes} dias* \n"
-            f"• Projeção ao ritmo atual:  *R$ {projecao_mensal:,.2f}* \n".replace(",", ".") +
-            (
-                f"• Faturamento/dia necessário para a meta:  *R$ {fat_diario_necessario:.2f}* \n"
-                if fat_diario_necessario > 0 else
-                f"• 🎯 Você já ultrapassou a meta mensal! Parabéns!\n"
-            ) +
-            f"• Atingimento hoje:  *{perc_meta:.1f}%*  da meta diária (R$ {meta_diaria:.2f})\n\n"
+            f"📅  *PROJEÇÃO MENSAL* \n"
+            f"• Até agora:  *R$ {fat_bruto_mes:,.2f}* \n".replace(",", ".") +
+            f"• Faltam:  *{dias_uteis_restantes} dias* \n"
+            f"• Projeção (mantendo ritmo):  *R$ {projecao_mensal:,.2f}*  (meta: R$ {meta_mensal:,.2f})\n\n".replace(",", ".")
         )
     else:
         secao_projecao = ""
@@ -597,12 +589,11 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
             )
 
         secao_caixas = (
-            f"📦  *5. CAIXAS DE PROVISÃO* \n"
+            f"📦  *CAIXAS DE PROVISÃO* \n"
             f"• Aportes deste turno:\n"
             + linhas_aportes
             + nota_corte
-            + f"• Total provisionado hoje:  *R$ {provisao:.2f}*\n"
-            f"_(Envie  *!caixas*  para ver saldos completos)_\n\n"
+            + f"• Total guardado hoje:  *R$ {provisao:.2f}*\n\n"
         )
 
     # ── Rodapé de configuração de contrato ────────────────────────────────────
@@ -625,46 +616,32 @@ def formatar_relatorio_fechamento_dre(nome_motorista: str, res: dict) -> str:
             "_Ex: atualizar contrato Financiado 150_"
         )
 
+    outras_desp = c_var - custo_queima
+    linha_outras = f"🍔  OUTROS GASTOS: *-R$ {outras_desp:.2f}*\n" if outras_desp > 0 else ""
+
     return (
-        f"🏁  *FECHAMENTO — DRE EXECUTIVO DIÁRIO* \n"
-        f"👤  *{nome_motorista}* \n"
+        f"🏁  *FECHAMENTO — {nome_motorista.upper()}* \n"
         f"──────────────────────────────\n\n"
-        # ── Seção 1 ──
-        f"⏱  *1. RESUMO OPERACIONAL* \n"
-        f"• Horário:  *{res['data_inicio']}*  →  *{res['data_fim']}* \n"
-        + linha_tempo_pausas
-        + f"• Odômetro:  *{res['km_inicial']:,.1f}*  →  *{res['km_final']:,.1f} km* \n".replace(",", ".")
-        + f"• Distância Rodada:  *{km_rodados:,.1f} km* \n".replace(",", ".")
+        f"⏱  *{duracao_efetiva_str}* ao volante  ·  *{km_rodados:,.1f} km* rodados\n".replace(",", ".")
         + linha_km_pessoal
         + "\n"
-        # ── Seção 2 ──
-        + f"📊  *2. DRE — DEMONSTRATIVO DE RESULTADO* \n"
-        + f"• (+) Faturamento Bruto:  *R$ {fat:.2f}* \n"
-        + f"• (-) Custos Variáveis:\n"
-        + lista_despesas_str
-        + f"   *Subtotal Variável: R$ {c_var:.2f}* \n"
-        + f"• (=) Margem de Contribuição:  *R$ {margem_contribuicao:.2f}* \n"
-        + f"• (-) Custo Fixo Contratual:  *R$ {c_fixo_contrato:.2f}*"
-        + (f"  _(já cobrado no 1º turno do dia)_\n" if turno_adicional else f"  _({res.get('locadora', 'contrato')})_\n")
-        + linha_provisao
+        + f"💰  GANHOS:        *R$ {fat:.2f}* \n"
+        + f"⛽  COMBUSTÍVEL:  *-R$ {custo_queima:.2f}* \n"
+        + linha_outras
+        + f"🚗  ALUGUEL/FIXO: *-R$ {c_fixo_contrato:.2f}*"
+        + (f"  _(já cobrado)_\n" if turno_adicional else f"\n")
         + f"──────────────────────────────\n"
         + linha_resultado
-        + f"📈 Margem Líquida:  *{margem_lucro:.1f}%* \n\n"
-        # ── Seção 3 ──
-        + f"🎯  *3. INDICADORES DE PERFORMANCE* \n"
-        + f"• Faturamento/km:  *R$ {faturamento_por_km:.2f}/km* \n"
-        + f"• Custo total/km:  *R$ {custo_por_km:.2f}/km* \n"
-        + f"• Lucro/km:  *R$ {lucro_por_km:.2f}/km* \n"
-        + f"• Faturamento/hora:  *R$ {faturamento_por_hora:.2f}/h* \n"
-        + f"• Lucro/hora:  *R$ {lucro_por_hora:.2f}/h* \n"
-        + f"• Rendimento ({label_rendimento}):  *{km_por_unidade:.2f}* \n\n"
+        + f"📈  Margem: *{margem_lucro:.1f}%* \n"
+        + linha_provisao
+        + "\n"
         + secao_alertas_piso
         + secao_projecao
         + secao_caixas
         + _nota_qualidade_dados(km_por_unidade, res.get("detalhe_queima", ""))
         + _secao_total_dia(totais_dia)
         + formatar_alertas_manutencao(res.get("alertas_manutencao", []))
-        + f"🛡  *Cofre Contábil Atualizado! Bom descanso, {nome_motorista}!*"
+        + f"🛡  *Cofre atualizado! Bom descanso!*"
         + rodape_sugestao
     )
 
@@ -702,14 +679,10 @@ async def registrar_erro_e_verificar_escape(remote_jid: str, tenant_id: str, fsm
         await RedisFSMService.limpar_buffer(fsm_key)
         await RedisFSMService.limpar_erros_consecutivos(tenant_id)
         mensagem_escape = (
-            "⚠  *Múltiplos Erros Consecutivos!* \n"
-            "Seu fluxo atual foi interrompido e limpo para evitar travamento.\n\n"
-            "Por favor, envie um dos comandos rápidos ou valores livres para começar de novo:\n"
-            "🟢  *Iniciar*  (ou 'iniciar 1399')\n"
-            "🏁  *Fechar*  (ou 'fechar 1450')\n"
-            "⏸  *Pausar*  /  *Retomar* \n"
-            "📊  *Status*  (resumo do dia)\n"
-            "💰  *[Valor]* (ex: 'ganhei 100' ou 'gastei 40 almoço')"
+            "⚠  *Opa, me perdi um pouco aqui!* 😅\n"
+            "Vamos recomeçar? Envie o que você quer fazer:\n\n"
+            "🟢  *iniciar*  → se quiser abrir um novo turno\n"
+            "👉  *ajuda geral*  → para ver a lista de comandos"
         )
         await enviar_whatsapp(remote_jid, mensagem_escape)
         return True
@@ -736,10 +709,8 @@ def _montar_resposta_abertura_turno(nome: str, km: float, res: dict) -> str:
         km_uso_fmt = f"{km_uso:,.1f}".replace(",", ".")
         custo_fmt = f"R$ {custo_uso:.2f}"
         base += (
-            f"\n\n🛣️  *Uso Pessoal Auditado*\n"
-            f"• {km_uso_fmt} km registrados fora de serviço desde o último turno.\n"
-            f"• Custo amortizado do cofre:  *{custo_fmt}*  (CMP calculado pelo estoque atual).\n"
-            f"_O Lucro Real dos próximos turnos já está protegido._"
+            f"\n\n🛣️  Rodei *{km_uso_fmt} km* fora do trabalho desde o último turno. "
+            f"Já descontei *{custo_fmt}* do cofre de combustível. Lucro protegido! ✅"
         )
 
     # Aviso de anacronismo: exibido adicionalmente quando houve abastecimento
@@ -804,9 +775,9 @@ class OrchestratorService:
                 await RedisFSMService.definir_estado(fsm_key, "AGUARDANDO_NOME")
                 await enviar_whatsapp(
                     remote_jid,
-                    "Ei, tudo bem? 👋 Seja bem-vindo ao  *Parceiro do Painel* ! 🚗\n\n"
-                    "Aqui você controla seus ganhos, gastos e lucro real direto pelo WhatsApp — sem planilha, sem complicação.\n\n"
-                    "Vamos criar seu perfil rapidinho! Como você se chama?"
+                    "Ei, tudo bem? 👋 Sou o seu *Parceiro do Painel*!\n\n"
+                    "Vou calcular o seu lucro real a cada turno, já descontando combustível e aluguel automaticamente. 💸\n\n"
+                    "Vamos começar? Como você se chama?"
                 )
                 return
 

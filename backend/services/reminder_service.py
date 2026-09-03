@@ -291,11 +291,11 @@ async def _processar_vencimentos_despesas() -> None:
             if saldo_atual >= valor_cobrar:
                 # Caso A: saldo cobre a parcela — oferece o comando de retirada
                 texto = (
-                    f"📅  *Vencimento HOJE ({data_venc_fmt}) — {nome}*\n\n"
+                    f"📅  *{nome} — vence HOJE!*\n\n"
                     f"• Valor mensal:  *{valor_fmt}*\n"
                     + linha_parcela +
-                    f"• Saldo na caixinha:  *{saldo_fmt}*  ✅\n\n"
-                    f"Tudo provisionado! Para registrar a saída:\n"
+                    f"• Guardado:  *{saldo_fmt}*  ✅\n\n"
+                    f"Cofre cheio! Use o dinheiro reservado:\n"
                     f"  👉  `!retirar caixa {nome} {float(valor_cobrar):.2f}`\n\n"
                     f"_Se não retirar agora, a baixa automática executa na virada do dia._"
                 )
@@ -304,52 +304,52 @@ async def _processar_vencimentos_despesas() -> None:
                 faltando     = (valor_cobrar - saldo_atual).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 faltando_fmt = f"R$ {float(faltando):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 texto = (
-                    f"⚠️  *Vencimento HOJE ({data_venc_fmt}) — {nome}*\n\n"
+                    f"⚠️  *{nome} — vence HOJE!*\n\n"
                     f"• Valor mensal:  *{valor_fmt}*\n"
                     + linha_parcela +
-                    f"• Saldo na caixinha:  *{saldo_fmt}*  (parcial 🚨)\n"
+                    f"• Guardado:  *{saldo_fmt}*  (parcial 🚨)\n"
                     f"• Déficit:  *{faltando_fmt}*\n\n"
-                    f"O saldo provisionado não cobre a parcela. Complemente o pagamento externamente.\n"
+                    f"O saldo não cobre a parcela. Complete o pagamento externamente.\n"
                     f"Para resgatar o saldo disponível:\n"
                     f"  👉  `!retirar caixa {nome} {float(saldo_atual):.2f}`"
                 )
             else:
                 # Caso C: caixinha zerada — apenas alerta
                 texto = (
-                    f"🚨  *Vencimento HOJE ({data_venc_fmt}) — {nome}*\n\n"
+                    f"🚨  *{nome} — vence HOJE!*\n\n"
                     f"• Valor mensal:  *{valor_fmt}*\n"
                     + linha_parcela +
-                    f"• Saldo na caixinha:  *R$ 0,00*  ❌\n\n"
-                    f"Não há reserva para cobrir esta parcela.\n"
+                    f"• Guardado:  *R$ 0,00*  ❌\n\n"
+                    f"Não há dinheiro reservado para essa conta.\n"
                     f"Realize o pagamento com recursos externos."
                 )
         else:
             # Vencimento amanhã
             if saldo_atual >= valor_cobrar:
                 texto = (
-                    f"⏰  *Vencimento AMANHÃ ({data_venc_fmt}) — {nome}*\n\n"
+                    f"⏰  *{nome} — vence AMANHÃ*\n\n"
                     f"• Valor mensal:  *{valor_fmt}*\n"
                     + linha_parcela +
-                    f"• Saldo na caixinha:  *{saldo_fmt}*  ✅\n\n"
+                    f"• Guardado:  *{saldo_fmt}*  ✅\n\n"
                     f"Provisionamento em dia! Amanhã lembrarei você de fazer a retirada."
                 )
             elif saldo_atual > Decimal("0"):
                 faltando     = (valor_cobrar - saldo_atual).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                 faltando_fmt = f"R$ {float(faltando):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 texto = (
-                    f"⏰  *Vencimento AMANHÃ ({data_venc_fmt}) — {nome}*\n\n"
+                    f"⏰  *{nome} — vence AMANHÃ*\n\n"
                     f"• Valor mensal:  *{valor_fmt}*\n"
                     + linha_parcela +
-                    f"• Saldo na caixinha:  *{saldo_fmt}*  (parcial ⚠️)\n"
-                    f"• Faltam:  *{faltando_fmt}*\n\n"
-                    f"Complete a caixinha antes do fechamento do dia para cobertura total."
+                    f"• Guardado:  *{saldo_fmt}*  (parcial ⚠️)\n"
+                    f"• Falta guardar:  *{faltando_fmt}*\n\n"
+                    f"Complete a caixinha antes do fechamento de hoje para cobertura total."
                 )
             else:
                 texto = (
-                    f"⏰  *Vencimento AMANHÃ ({data_venc_fmt}) — {nome}*\n\n"
+                    f"⏰  *{nome} — vence AMANHÃ*\n\n"
                     f"• Valor mensal:  *{valor_fmt}*\n"
                     + linha_parcela +
-                    f"• Saldo na caixinha:  *R$ 0,00*  ❌\n\n"
+                    f"• Guardado:  *R$ 0,00*  ❌\n\n"
                     f"Sem provisão para esta parcela. Prepare recursos externos para quitá-la amanhã.\n"
                     f"_Para ver o saldo de todas as caixas:  *!caixas*_"
                 )
@@ -564,25 +564,25 @@ async def _processar_baixas_automaticas() -> None:
             )
             _prog = f"  (parcela *{_nova_pp}/{_pt}*)" if _pt and not _exaurida else ""
             texto = (
-                f"✅  *Baixa automática — {nome}*{_prog}\n\n"
-                f"• Valor mensal:  *{valor_fmt}*\n"
+                f"✅  *Pago automaticamente — {nome}!*{_prog}\n\n"
+                f"• Valor:  *{valor_fmt}*\n"
                 + linha_parcela_baixa +
-                f"• Retirado da caixinha:  *{retirada_fmt}*\n"
-                f"• Saldo restante:  *{novo_saldo_fmt}*\n\n"
-                f"_Parcela quitada automaticamente. Cofre atualizado!_ 🛡"
+                f"• Usado para pagar:  *{retirada_fmt}*\n"
+                f"• Sobrou guardado:  *{novo_saldo_fmt}*\n\n"
+                f"_Conta em dia! Cofre atualizado._ 🛡"
                 + _tag_encerramento
             )
         else:
             # Saldo parcial — informa o que falta para cobrir a parcela
             faltou_fmt = f"R$ {float(faltou):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             texto = (
-                f"⚠  *Baixa parcial — {nome}*\n\n"
-                f"• Valor mensal:  *{valor_fmt}*\n"
+                f"⚠  *Pagamento parcial — {nome}*\n\n"
+                f"• Valor:  *{valor_fmt}*\n"
                 + linha_parcela_baixa +
-                f"• Retirado (saldo disponível):  *{retirada_fmt}*\n"
-                f"• Ainda falta:  *{faltou_fmt}*\n\n"
-                f"_A caixinha não tinha saldo suficiente. "
-                f"Verifique e complete o pagamento manualmente._"
+                f"• Usado para pagar:  *{retirada_fmt}* (tudo que tinha)\n"
+                f"• Ficou faltando:  *{faltou_fmt}*\n\n"
+                f"_A caixinha não tinha dinheiro suficiente. "
+                f"Verifique e complete o pagamento._"
             )
 
         await _enviar(remote_jid, texto)
@@ -667,18 +667,18 @@ async def _processar_vencimentos_semanais() -> None:
         valor_fmt   = f"R$ {float(valor_mensal):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         parcela_fmt = f"R$ {float(valor_parcela):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         saldo_fmt   = f"R$ {float(saldo_atual):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        cabecalho   = f"{'HOJE' if is_hoje else 'AMANHÃ'} ({data_fmt}) — {nome}"
+        cabecalho_dia = "vence HOJE!" if is_hoje else "vence AMANHÃ"
         emoji_h     = "📅" if is_hoje else "⏰"
 
         linha_freq  = f"• Recorrência:  *toda  {dia_label}*  ·  parcela  *{parcela_fmt}*\n"
 
         if saldo_atual >= valor_parcela:
             texto = (
-                f"{emoji_h}  *Vencimento {cabecalho}*\n\n"
+                f"{emoji_h}  *{nome} — {cabecalho_dia}*\n\n"
                 f"• Valor mensal:  *{valor_fmt}*\n"
                 f"{linha_freq}"
-                f"• Saldo na caixinha:  *{saldo_fmt}*  ✅\n\n"
-                f"Tudo provisionado! Para registrar a saída:\n"
+                f"• Guardado:  *{saldo_fmt}*  ✅\n\n"
+                f"Cofre cheio! Use o dinheiro reservado:\n"
                 f"  👉  `!retirar caixa {nome} {float(valor_parcela):.2f}`\n\n"
                 f"_Se não retirar agora, a baixa automática executa na virada do dia._"
             )
@@ -686,21 +686,22 @@ async def _processar_vencimentos_semanais() -> None:
             faltando     = (valor_parcela - saldo_atual).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             faltando_fmt = f"R$ {float(faltando):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             texto = (
-                f"{emoji_h}  *Vencimento {cabecalho}*\n\n"
+                f"{emoji_h}  *{nome} — {cabecalho_dia}*\n\n"
                 f"• Valor mensal:  *{valor_fmt}*\n"
                 f"{linha_freq}"
-                f"• Saldo na caixinha:  *{saldo_fmt}*  (parcial 🚨)\n"
-                f"• Déficit:  *{faltando_fmt}*\n\n"
-                f"Complete o pagamento externamente. Para resgatar o disponível:\n"
+                f"• Guardado:  *{saldo_fmt}*  (parcial 🚨)\n"
+                f"• Falta guardar:  *{faltando_fmt}*\n\n"
+                f"O saldo não cobre a parcela. Complete o pagamento externamente.\n"
+                f"Para resgatar o saldo disponível:\n"
                 f"  👉  `!retirar caixa {nome} {float(saldo_atual):.2f}`"
             )
         else:
             texto = (
-                f"{emoji_h}  *Vencimento {cabecalho}*\n\n"
+                f"{emoji_h}  *{nome} — {cabecalho_dia}*\n\n"
                 f"• Valor mensal:  *{valor_fmt}*\n"
                 f"{linha_freq}"
-                f"• Saldo na caixinha:  *R$ 0,00*  ❌\n\n"
-                f"Não há reserva para cobrir esta parcela.\n"
+                f"• Guardado:  *R$ 0,00*  ❌\n\n"
+                f"Não há dinheiro reservado para essa conta.\n"
                 f"Realize o pagamento com recursos externos."
             )
 

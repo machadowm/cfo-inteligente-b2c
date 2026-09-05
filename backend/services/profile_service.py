@@ -257,7 +257,29 @@ class ProfileService:
                 caixas = await conn.fetch(
                     """
                     SELECT cp.nome_caixa, cp.saldo_atual, cp.meta_valor,
-                           COALESCE(SUM(dfm.valor_pro_rata_diario), 0) AS aporte_diario
+                           COALESCE(SUM(dfm.valor_pro_rata_diario), 0) AS aporte_diario,
+                           -- Próximo dia de vencimento da despesa vinculada (ou NULL se sem despesa)
+                           -- Pega a recorrência e o conjunto de dias do menor vencimento ativo
+                           (
+                               SELECT dfm2.recorrencia_tipo
+                               FROM public.despesas_fixas_mensais dfm2
+                               WHERE dfm2.caixa_id = cp.id AND dfm2.ativo = TRUE
+                               LIMIT 1
+                           ) AS recorrencia_tipo_venc,
+                           (
+                               SELECT dfm2.dias_vencimento
+                               FROM public.despesas_fixas_mensais dfm2
+                               WHERE dfm2.caixa_id = cp.id AND dfm2.ativo = TRUE
+                               LIMIT 1
+                           ) AS dias_vencimento_venc,
+                           (
+                               SELECT dfm2.dias_semana
+                               FROM public.despesas_fixas_mensais dfm2
+                               WHERE dfm2.caixa_id = cp.id
+                                 AND dfm2.ativo = TRUE
+                                 AND dfm2.recorrencia_tipo = 'semanal'
+                               LIMIT 1
+                           ) AS dias_semana_venc
                     FROM public.caixas_provisao cp
                     LEFT JOIN public.despesas_fixas_mensais dfm
                         ON dfm.caixa_id = cp.id AND dfm.ativo = TRUE
@@ -620,11 +642,70 @@ class ProfileService:
                                 f"  [{barra_cx}]"
                             )
                         else:
-                            falta     = meta_cx - saldo_cx
-                            dias_meta = f"  ·  ~{falta / aporte:.0f} turnos" if aporte > 0 else ""
+                            falta = meta_cx - saldo_cx
+
+                            # ── Projeção temporal de cobertura ────────────────
+                            # Calcula quantos dias corridos até o próximo vencimento
+                            # para saber se o motorista tem tempo real de cobrir a meta.
+                            _rec   = r.get("recorrencia_tipo_venc") or "mensal"
+                            _dvenc = list(r.get("dias_vencimento_venc") or []) or []
+                            _dsem  = list(r.get("dias_semana_venc") or []) or []
+                            _hoje_dia = hoje.day
+                            _hoje_iso = hoje.isoweekday()
+
+                            # Dias corridos até o próximo vencimento
+                            if _rec == "semanal" and _dsem:
+                                # Próximo dia da semana ISO que vence
+                                _proximos_iso = sorted(
+                                    [(d - _hoje_iso) % 7 or 7 for d in _dsem]
+                                )
+                                _dias_ate_venc = _proximos_iso[0]
+                            elif _dvenc:
+                                # Próximo dia do mês: pega o menor dia >= hoje, ou o menor do próximo mês
+                                _futuros = [d for d in sorted(_dvenc) if d >= _hoje_dia]
+                                if _futuros:
+                                    _dias_ate_venc = _futuros[0] - _hoje_dia
+                                else:
+                                    # Todos os vencimentos já passaram — calcula para o mês seguinte
+                                    _proximo_mes = sorted(_dvenc)[0]
+                                    _dias_no_mes_atual = _cal.monthrange(hoje.year, hoje.month)[1]
+                                    _dias_ate_venc = (_dias_no_mes_atual - _hoje_dia) + _proximo_mes
+                            else:
+                                _dias_ate_venc = None
+
+                            if aporte > 0 and _dias_ate_venc is not None:
+                                # Turnos disponíveis até o vencimento, proporcional à escala
+                                _dias_sem_ef = _dias_sem if _dias_sem > 0 else 6
+                                turnos_disponiveis = (_dias_ate_venc * _dias_sem_ef) / 7
+                                turnos_necessarios = falta / aporte
+
+                                if _dias_ate_venc == 0:
+                                    projecao = "  🚨 _vence HOJE!_"
+                                elif turnos_necessarios > turnos_disponiveis * 1.15:
+                                    # Mais de 15% acima do disponível → alerta crítico
+                                    projecao = (
+                                        f"  🚨 _Prazo insuficiente!_  "
+                                        f"Precisa de ~{turnos_necessarios:.0f} turnos, "
+                                        f"mas restam ~{turnos_disponiveis:.0f} até o vencimento."
+                                    )
+                                elif turnos_necessarios > turnos_disponiveis * 0.85:
+                                    # Margem apertada (85–115%) → aviso
+                                    projecao = (
+                                        f"  ⚠️ _Prazo apertado_ "
+                                        f"(~{turnos_disponiveis:.0f} turnos disponíveis)"
+                                    )
+                                else:
+                                    # Confortável
+                                    projecao = f"  ·  ~{turnos_necessarios:.0f} turnos  ✅"
+                            elif aporte > 0:
+                                # Sem vencimento vinculado — exibe só os turnos necessários
+                                projecao = f"  ·  ~{falta / aporte:.0f} turnos"
+                            else:
+                                projecao = ""
+
                             linhas_cx.append(
                                 f"• {r['nome_caixa']}:  *{_fmt_brl(saldo_cx)} / {_fmt_brl(meta_cx)}*  ({pct:.0f}%)\n"
-                                f"  [{barra_cx}]  _Faltam {_fmt_brl(falta)}{dias_meta}_"
+                                f"  [{barra_cx}]  _Faltam {_fmt_brl(falta)}{projecao}_"
                             )
                     else:
                         aporte_str = f"  _(+{_fmt_brl(aporte)}/turno)_" if aporte > 0 else ""

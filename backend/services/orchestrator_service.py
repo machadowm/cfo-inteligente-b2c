@@ -1275,7 +1275,7 @@ class OrchestratorService:
             for i, palavra in enumerate(partes):
                 if palavra in palavras_ajuda and i + 1 < len(partes):
                     pot = partes[i + 1]
-                    if pot in ["metas", "contrato", "lancamentos", "turno", "parametros", "perfil", "geral"]:
+                    if pot in ["metas", "contrato", "lancamentos", "turno", "parametros", "perfil", "geral", "caixas"]:
                         topico_explicito = pot
                         break
             if topico_explicito:

@@ -363,6 +363,10 @@ class ParametrosService:
                 "     _Ex: !adicionar despesa semanal aluguel 400_  _(toda segunda-feira)_",
                 "     _Ex: !adicionar despesa semanal aluguel 400 5_ _(toda sexta-feira)_",
                 "     _Dias da semana: 1=Seg  2=Ter  3=Qua  4=Qui  5=Sex  6=Sáb  7=Dom_",
+                "  •  *!adicionar despesa unica <nome> <R$> <DD/MM[/AAAA]>*  →  Despesa pontual futura",
+                "     _Ex: !adicionar despesa Manutencao 800 unica 15/10_",
+                "     _Ex: !adicionar despesa Seguro 600 unica 20/10/2026_",
+                "     _Pro-rata calculado automaticamente pelos dias até o vencimento._",
                 "  •  *!remover despesa <nome>*        → Desativar despesa pelo nome",
                 "",
                 "📦  *Caixas de Provisão (sinking fund):*",
@@ -438,31 +442,76 @@ class ParametrosService:
             try:
                 valor_desp = Decimal(match_unica.group(2).replace(",", "."))
             except Exception:
-                return "⚠ Valor inválido. Ex:  *!adicionar despesa Manutencao 500 unica dia 15*"
-            resto      = (match_unica.group(3) or "").lower().strip()
-            # Extrai dia de vencimento se informado ("dia 15" ou número isolado)
-            _dia_m = re.search(r'\bdia\s+(\d{1,2})\b', resto)
-            if not _dia_m:
-                _dia_m = re.search(r'\b(\d{1,2})\b', resto)
-            dias_venc_u = [int(_dia_m.group(1))] if _dia_m else [1]
-            invalidos = [d for d in dias_venc_u if not (1 <= d <= 31)]
-            if invalidos:
-                return f"⚠ Dia inválido: {invalidos[0]}. Use um valor entre 1 e 31."
-            # Extrai data de início se informada ("a partir de DD/MM" ou "DD/MM/AAAA")
-            _data_m = re.search(r'(?:a\s+partir\s+de\s+|em\s+)?(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{2,4}))?', resto)
+                return "⚠ Valor inválido. Ex:  *!adicionar despesa Manutencao 500 unica 15/10*"
+            resto = (match_unica.group(3) or "").lower().strip()
+
+            from datetime import date as _dtu
+            hoje_u = _dtu.today()
+            data_venc_u   = None
             data_inicio_u = None
-            if _data_m:
-                from datetime import date as _dtu
+            dias_venc_u   = [1]
+            dias_para_juntar = None
+
+            # ── Prioridade 1: data completa DD/MM[/AAAA] ─────────────────
+            # Captura "15/10", "15/10/2026", "15-10-26" etc.
+            _full_data = re.search(
+                r'\b(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{2,4}))?\b', resto
+            )
+            if _full_data:
                 try:
-                    _d, _m = int(_data_m.group(1)), int(_data_m.group(2))
-                    _a = int(_data_m.group(3)) if _data_m.group(3) else _dtu.today().year
+                    _d = int(_full_data.group(1))
+                    _m = int(_full_data.group(2))
+                    _a = int(_full_data.group(3)) if _full_data.group(3) else hoje_u.year
                     _a = _a + 2000 if _a < 100 else _a
-                    data_inicio_u = _dtu(_a, _m, _d)
+                    # Se o mês/dia já passaram e o ano não foi especificado, avança 1 ano
+                    if not _full_data.group(3) and (
+                        _m < hoje_u.month or (_m == hoje_u.month and _d <= hoje_u.day)
+                    ):
+                        _a += 1
+                    data_venc_u = _dtu(_a, _m, _d)
+                    dias_venc_u = [_d]
+                    # Trava de ativação: data_inicio = 1º do mês do vencimento
+                    # Garante que o pro-rata e o lembrete só disparam no mês certo
+                    data_inicio_u = data_venc_u.replace(day=1)
+                    # Pro-rata calculado pela distância real até o vencimento
+                    dias_para_juntar = (data_venc_u - hoje_u).days
+                    if dias_para_juntar <= 0:
+                        return (
+                            f"⚠ A data  *{_full_data.group(0)}*  já passou ou é hoje.\n"
+                            f"Informe uma data futura. Ex:  *!adicionar despesa {nome_desp} "
+                            f"{float(valor_desp):.0f} unica 15/10*"
+                        )
                 except (ValueError, TypeError):
-                    data_inicio_u = None
+                    return f"⚠ Data inválida: `{_full_data.group(0)}`. Use DD/MM ou DD/MM/AAAA."
+
+            # ── Prioridade 2: apenas dia do mês ("dia 15") ───────────────
+            if data_venc_u is None:
+                _dia_m = re.search(r'\bdia\s+(\d{1,2})\b', resto)
+                if not _dia_m:
+                    _dia_m = re.search(r'\b(\d{1,2})\b', resto)
+                dias_venc_u = [int(_dia_m.group(1))] if _dia_m else [1]
+                invalidos   = [d for d in dias_venc_u if not (1 <= d <= 31)]
+                if invalidos:
+                    return f"⚠ Dia inválido: {invalidos[0]}. Use um valor entre 1 e 31."
+                # data_inicio via "a partir de DD/MM"
+                _ap_m = re.search(
+                    r'a\s+partir\s+de\s+(\d{1,2})[/\-](\d{1,2})(?:[/\-](\d{2,4}))?', resto
+                )
+                if _ap_m:
+                    try:
+                        _d2 = int(_ap_m.group(1))
+                        _m2 = int(_ap_m.group(2))
+                        _a2 = int(_ap_m.group(3)) if _ap_m.group(3) else hoje_u.year
+                        _a2 = _a2 + 2000 if _a2 < 100 else _a2
+                        data_inicio_u = _dtu(_a2, _m2, _d2)
+                    except (ValueError, TypeError):
+                        data_inicio_u = None
+
             return await ParametrosService._adicionar_despesa_fixa(
                 motorista_id, tenant_id, nome_desp, valor_desp,
-                None, dias_venc_u,
+                # dias_para_juntar → pro-rata calculado pelo prazo real
+                # None → usa o padrão do motorista (26 dias úteis)
+                dias_para_juntar, dias_venc_u,
                 parcelas_totais=1, data_inicio=data_inicio_u,
                 valor_total=valor_desp,
             )
@@ -1662,8 +1711,23 @@ class ParametrosService:
                 linha_parcelas = ""
                 lbl_valor = "Valor mensal"
             elif parcelas_totais == 1:
-                _data_str = f"  (a partir de *{data_inicio.strftime('%d/%m/%Y')}*)" if data_inicio else ""
-                linha_parcelas = f"• Tipo:  *Despesa única*{_data_str}\n"
+                # Para despesa única com data exata: exibe prazo e pro-rata contextual
+                if data_inicio and dias_vencimento:
+                    from datetime import date as _dth
+                    _hoje_conf = _dth.today()
+                    # Reconstrói a data de vencimento para exibir no retorno
+                    _dv = dias_vencimento[0]
+                    _data_venc_conf = data_inicio.replace(day=_dv) if data_inicio else None
+                    _prazo_dias = (_data_venc_conf - _hoje_conf).days if _data_venc_conf else None
+                    _prazo_str = f"  ·  *{_prazo_dias} dias* para juntar" if _prazo_dias and _prazo_dias > 0 else ""
+                    _data_venc_fmt = _data_venc_conf.strftime("%d/%m/%Y") if _data_venc_conf else ""
+                    linha_parcelas = (
+                        f"• Tipo:  *Despesa única*\n"
+                        f"• Vencimento:  *{_data_venc_fmt}*{_prazo_str}\n"
+                    )
+                else:
+                    _data_str = f"  (a partir de *{data_inicio.strftime('%d/%m/%Y')}*)" if data_inicio else ""
+                    linha_parcelas = f"• Tipo:  *Despesa única*{_data_str}\n"
                 lbl_valor = "Valor da despesa"
             else:
                 _val_parc = (valor_total / Decimal(str(parcelas_totais))) if valor_total else (valor_mensal / Decimal(str(len(dias_vencimento))))
@@ -1679,9 +1743,10 @@ class ParametrosService:
                 f"• Nome:  *{nome}*\n"
                 f"• {lbl_valor}:  *R$ {float(valor_mensal):.2f}*\n"
                 + linha_parcelas
-                + f"• Pro-rata diário:  *R$ {pro_rata:.2f}*  (base: {dias} dias úteis)\n"
-                f"• Vencimento:  *todo {venc_str}*\n"
-                f"• Caixinha vinculada:  *{nome}*  _(aportes automáticos a cada fechamento)_\n\n"
+                + f"• Pro-rata diário:  *R$ {pro_rata:.2f}*  (base: {dias} dias)\n"
+                # Linha de vencimento: omite para despesa única com data exata (já exibida acima)
+                + (f"• Vencimento:  *todo {venc_str}*\n" if not (parcelas_totais == 1 and data_inicio) else "")
+                + f"• Caixinha vinculada:  *{nome}*  _(aportes automáticos a cada fechamento)_\n\n"
                 f"_Esse custo será deduzido automaticamente em cada fechamento de turno._"
                 f"{aviso_dias}"
             )
